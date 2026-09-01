@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader'
+import HackTerminal from '../components/HackTerminal'
 import { GUIDED_STEPS } from '../data'
 
 const TOOLS = [
@@ -25,13 +26,33 @@ const INITIAL_LOG = [
   '10:44:10 — forged payload published',
 ]
 
+const PROMPT = 'student@sandbox:~$ '
+
+// True-color ANSI escapes matching the legacy .term-line.ok / .term-line.warn
+// colors, so the xterm-rendered output stays visually identical to before.
+const ANSI = {
+  ok: '\x1b[38;2;125;206;138m',
+  warn: '\x1b[38;2;240;179;90m',
+  reset: '\x1b[0m',
+}
+
+function formatLine({ kind, text }) {
+  const color = ANSI[kind]
+  return color ? `${color}${text}${ANSI.reset}\r\n` : `${text}\r\n`
+}
+
 function nowStamp() {
   return new Date().toLocaleTimeString('en-GB', { hour12: false })
 }
 
+// Computed once at module scope (not per render/mount) so HackTerminal
+// always receives the same string reference for its one-time boot write.
+const INITIAL_BOOT_TEXT = INITIAL_LINES.map(formatLine).join('') + PROMPT
+
 export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
-  const [lines, setLines] = useState(INITIAL_LINES)
-  const [input, setInput] = useState('')
+  const termRef = useRef(null)
+  const inputBufferRef = useRef('')
+
   const [steps, setSteps] = useState([true, true, false])
   const [attempts, setAttempts] = useState(3)
   const [log, setLog] = useState(INITIAL_LOG)
@@ -68,9 +89,14 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
     [],
   )
 
+  function writeLines(entries) {
+    termRef.current?.write(entries.map(formatLine).join(''))
+  }
+
   function runTool(id) {
     const extra = responses[id] || [{ kind: 'out', text: 'tool unavailable in this sandbox.' }]
-    setLines((prev) => [...prev, ...extra])
+    writeLines(extra)
+    termRef.current?.write(PROMPT)
     if (id === 'nmap') {
       setSteps((s) => [true, s[1], s[2]])
       setLog((l) => [...l, `${nowStamp()} — nmap scan started`])
@@ -86,10 +112,25 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
     }
   }
 
-  function submitCommand(e) {
-    e.preventDefault()
-    const cmd = input.trim()
-    if (!cmd) return
+  // The boot banner is written by HackTerminal itself (see `bootText` prop
+  // below), inside the same effect that creates the Terminal instance, so
+  // it can't run more times than the terminal instance itself is created.
+  // ---------------------------------------------------------------------
+  // PHASE 1 — LOCAL MOCK TRANSPORT (temporary).
+  //
+  // Everything below simulates a shell entirely client-side: it echoes
+  // keystrokes itself, buffers a line locally, and pattern-matches the
+  // submitted text by substring to decide which canned response to show.
+  // It exists only to exercise HackTerminal's onInput/write seam before
+  // a real backend exists.
+  //
+  // Phase 2 must REPLACE this block wholesale with a WebSocket transport
+  // (raw keystrokes forwarded to a FastAPI-fronted constrained PTY, raw
+  // bytes from the PTY written back via the same imperative `write` API).
+  // Do not evolve the substring matching below into real shell semantics
+  // — it is a placeholder, not a shell implementation to grow.
+  // ---------------------------------------------------------------------
+  function runMockCommand(cmd) {
     const lower = cmd.toLowerCase()
     if (lower.includes('nmap')) runTool('nmap')
     else if (lower.includes('mosquitto_sub')) runTool('sub')
@@ -97,14 +138,40 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
     else if (lower.includes('tcpdump') || lower.includes('wireshark')) runTool('cap')
     else if (lower.includes('mqtt-explorer') || lower.startsWith('mqtt')) runTool('exp')
     else {
-      setLines((prev) => [
-        ...prev,
-        { kind: 'prompt', text: `student@sandbox:~$ ${cmd}` },
-        { kind: 'out', text: `sandbox: command recorded (${cmd.split(' ')[0]})` },
-      ])
+      termRef.current?.write(`sandbox: command recorded (${cmd.split(' ')[0]})\r\n${PROMPT}`)
     }
-    setInput('')
   }
+
+  function handleTerminalInput(data) {
+    const term = termRef.current
+    if (!term) return
+    for (const ch of data) {
+      if (ch === '\r') {
+        term.write('\r\n')
+        const cmd = inputBufferRef.current.trim()
+        inputBufferRef.current = ''
+        if (cmd) runMockCommand(cmd)
+        else term.write(PROMPT)
+      } else if (ch === '\x7f') {
+        if (inputBufferRef.current.length > 0) {
+          inputBufferRef.current = inputBufferRef.current.slice(0, -1)
+          term.write('\b \b')
+        }
+      } else if (ch === '\x03') {
+        inputBufferRef.current = ''
+        term.write(`^C\r\n${PROMPT}`)
+      } else if (ch >= ' ') {
+        inputBufferRef.current += ch
+        term.write(ch)
+      }
+    }
+  }
+  // --- end Phase 1 mock transport -----------------------------------------
+
+  // Reserved seam for Phase 2: forward {cols, rows} over the WebSocket as a
+  // PTY resize message. No-op today — HackTerminal already fits/reflows
+  // itself locally via ResizeObserver regardless of this callback.
+  function handleTerminalResize() {}
 
   return (
     <div className="page">
@@ -141,22 +208,12 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
           </section>
         </aside>
         <section className="terminal">
-          <div className="term-body">
-            {lines.map((line, i) => (
-              <div key={i} className={`term-line ${line.kind}`}>
-                {line.text}
-              </div>
-            ))}
-          </div>
-          <form className="term-input" onSubmit={submitCommand}>
-            <span>&gt;</span>
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              aria-label="Terminal input"
-              autoComplete="off"
-            />
-          </form>
+          <HackTerminal
+            ref={termRef}
+            onInput={handleTerminalInput}
+            onResize={handleTerminalResize}
+            bootText={INITIAL_BOOT_TEXT}
+          />
         </section>
         <aside className="side-col">
           <section className="panel">
