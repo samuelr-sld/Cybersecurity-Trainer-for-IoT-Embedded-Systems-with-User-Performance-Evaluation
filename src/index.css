@@ -1,15 +1,15 @@
 :root {
-  --ink: #111111;
-  --muted: #5a5a5a;
-  --line: #1a1a1a;
-  --soft: #d9d9d9;
-  --panel: #f3f3f3;
-  --bg: #ececec;
-  --white: #ffffff;
-  --ok: #1f7a3a;
-  --warn: #b45309;
-  --bad: #b42318;
-  --term: #0d0d0d;
+  --ink: #e6edf3;
+  --muted: #8b98a8;
+  --line: #263241;
+  --soft: #1d2732;
+  --panel: #151c24;
+  --bg: #0b0f14;
+  --white: #111820;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --term: #080c10;
   --sans: "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
 }

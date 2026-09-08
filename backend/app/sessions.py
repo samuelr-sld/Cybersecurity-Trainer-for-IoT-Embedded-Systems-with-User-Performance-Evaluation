@@ -4,10 +4,12 @@ One session per WebSocket connection, held in memory for the lifetime of that
 connection. Sessions are isolated: nothing is shared between connections, and
 a disconnect removes the session entirely.
 
-Deliberately minimal for Phase 2A — a session records who it is, when it
-started, and the terminal geometry the client reported. Scenario state,
-command history, evaluation metrics, and durable storage belong to later
-phases; the manager is the seam they will attach to.
+A session records who it is, when it started, the terminal geometry the
+client reported, and — since Phase 2C — its own `Scenario`. The scenario is
+the per-session simulated target: creating it via a `default_factory` means
+every session gets an independent instance, so no two sessions can observe or
+mutate each other's scenario state. Command history, evaluation metrics, and
+durable storage still belong to later phases.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app import config
+from app.scenarios import Scenario, create_default_scenario
 
 
 def _utc_now() -> datetime:
@@ -32,6 +35,10 @@ class HackSession:
     created_at: datetime = field(default_factory=_utc_now)
     cols: int = config.DEFAULT_TERMINAL_COLS
     rows: int = config.DEFAULT_TERMINAL_ROWS
+    #: The per-session simulated target. Isolation lives here: a fresh
+    #: instance per session means one student's scenario is unreachable from
+    #: another's. Command handlers reach it via `CommandContext.scenario`.
+    scenario: Scenario = field(default_factory=create_default_scenario)
 
     def resize(self, cols: int, rows: int) -> None:
         """Record the client's terminal geometry.

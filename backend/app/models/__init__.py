@@ -3,6 +3,7 @@
 from app.models.messages import (
     CLIENT_MESSAGE_ADAPTER,
     PROTOCOL_VERSION,
+    ActionMessage,
     ClientMessage,
     ErrorMessage,
     EventMessage,
@@ -11,11 +12,13 @@ from app.models.messages import (
     ResizeMessage,
     ServerMessage,
     SessionMessage,
+    StateMessage,
 )
 
 __all__ = [
     "CLIENT_MESSAGE_ADAPTER",
     "PROTOCOL_VERSION",
+    "ActionMessage",
     "ClientMessage",
     "ErrorMessage",
     "EventMessage",
@@ -24,4 +27,5 @@ __all__ = [
     "ResizeMessage",
     "ServerMessage",
     "SessionMessage",
+    "StateMessage",
 ]

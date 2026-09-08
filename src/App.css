@@ -59,15 +59,15 @@
 
 .dot.ok,
 .status.ok .dot {
-  background: #1f7a3a;
+  background: var(--ok);
 }
 
 .status.warn .dot {
-  background: #d97706;
+  background: var(--warn);
 }
 
 .status.bad .dot {
-  background: #b42318;
+  background: var(--bad);
 }
 
 .pipe {
@@ -566,13 +566,23 @@ th {
   background: var(--panel);
 }
 
+.steps li.current {
+  border-color: var(--warn);
+}
+
+.plain-log .muted {
+  color: var(--muted);
+}
+
 .terminal {
   background: var(--term);
   color: #d8d8d8;
   border: 2px solid var(--line);
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 420px;
+  overflow: hidden;
 }
 
 /* xterm.js host container (Phase 1). Fills the .terminal frame; xterm
@@ -766,7 +776,7 @@ th {
 
 .bar {
   width: 70%;
-  background: #4a4a4a;
+  background: var(--muted);
   min-height: 8px;
 }
 
@@ -781,6 +791,34 @@ th {
   height: 180px;
 }
 
+/* Dashboard.jsx sets stroke/fill as SVG presentation attributes tuned for a
+   light background; these rules (which win over presentation attributes)
+   recolor them for the dark theme without touching component logic. */
+.chart text {
+  fill: var(--muted);
+}
+
+.line-chart polyline {
+  stroke: var(--ink);
+}
+
+.line-chart circle {
+  fill: var(--ink);
+}
+
+.radar line {
+  stroke: var(--line);
+}
+
+.radar polygon:first-of-type {
+  stroke: var(--muted);
+}
+
+.radar polygon:last-of-type {
+  stroke: var(--ink);
+  fill: rgba(230, 237, 243, 0.18);
+}
+
 .badge {
   display: inline-block;
   border-radius: 999px;
@@ -790,12 +828,12 @@ th {
 }
 
 .badge.ok {
-  background: #d1fae5;
+  background: rgba(63, 185, 80, 0.16);
   color: var(--ok);
 }
 
 .badge.bad {
-  background: #fee2e2;
+  background: rgba(248, 81, 73, 0.16);
   color: var(--bad);
 }
 

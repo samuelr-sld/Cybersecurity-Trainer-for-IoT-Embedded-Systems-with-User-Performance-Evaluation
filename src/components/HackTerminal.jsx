@@ -29,9 +29,10 @@ function buildTheme() {
  * where terminal data comes from/goes to — callers drive it entirely
  * through `onInput` (keystrokes out) and the imperative handle (text in).
  *
- * Phase 2 note: swapping the mock command transport in HackMode.jsx for
- * a WebSocket only requires changing what `onInput` does and who calls
- * the imperative `write` API — this component should not need to change.
+ * Phase 2D-B note: HackMode.jsx now drives this component over a real
+ * WebSocket (see src/hooks/useHackSocket.js) instead of the earlier mock
+ * transport, by changing only what `onInput` does and who calls the
+ * imperative `write` API — this component did not need to change.
  *
  * `bootText`, if given, is written once per real Terminal instance, inside
  * the same effect that creates it. That ties the one-time write to the

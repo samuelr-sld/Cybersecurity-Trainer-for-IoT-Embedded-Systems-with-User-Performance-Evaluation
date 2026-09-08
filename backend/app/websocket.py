@@ -9,36 +9,60 @@ other process-spawning facility anywhere under `app/`, and none may be added
 to serve terminal input: no `os.system`, no `subprocess.run/Popen`, no
 `shell=True`, no `eval`/`exec`, no CMD/PowerShell/shell bridge.
 
-When command handling arrives (Phase 2B+), it goes through a controlled
-command router and scenario engine that match input against a closed set of
-simulated tools. A student's keystrokes must never reach a host shell.
+Command handling goes through the controlled command router in
+`app/commands/`, which matches input against a closed set of simulated tools.
+A student's keystrokes must never reach a host shell.
 
-Phase 2A behaviour: accept the connection, create an isolated session,
-announce the session id, acknowledge `input` and `resize` frames with
-structured messages, and drop the session on disconnect.
+TERMINAL RESPONSIBILITY BOUNDARY
+--------------------------------
+The browser owns line editing. xterm.js handles character input, local echo,
+Backspace, Ctrl+C, and the cursor, and sends one completed command line per
+`input` frame. This endpoint does not echo keystrokes, does not maintain a
+line buffer, and must not grow one.
+
+Phase 2B behaviour: accept the connection, create an isolated session,
+announce the session id, route each completed `input` line through the
+command router and render the structured result back as `output`/`action`
+frames, record `resize` geometry, and drop the session on disconnect.
+
+Phase 2D-A behaviour: a command whose `CommandResult` carries scenario events
+(forwarded from `Scenario`/`ScenarioOutcome` via `CommandResult.events`, see
+app/commands/base.py and app/commands/scenario_adapter.py) additionally gets
+one `event` frame per event and one trailing `state` frame carrying
+`Scenario.snapshot()`, so the frontend can render the target device panel
+without polling or scraping terminal text. This module still only transports
+that structure — it has no scenario-specific knowledge of its own.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 
 from app import config
+from app.commands import CommandContext, CommandResult, default_router
 from app.models.messages import (
     CLIENT_MESSAGE_ADAPTER,
+    ActionMessage,
     ClientMessage,
     ErrorMessage,
+    EventMessage,
     InputMessage,
     OutputMessage,
     ResizeMessage,
     ServerMessage,
     SessionMessage,
+    StateMessage,
 )
 from app.sessions import HackSession, session_manager
+
+if TYPE_CHECKING:  # pragma: no cover
+    from app.scenarios import Scenario
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +70,15 @@ router = APIRouter()
 
 BANNER = (
     "[backend] hack mode channel established\r\n"
-    "[backend] phase 2A: transport only - commands are not executed\r\n"
+    "[backend] phase 2B: simulated commands only - nothing runs on the host\r\n"
+    "[backend] type 'help' to list the available commands\r\n"
 )
+
+#: Line terminator written to the terminal. xterm.js is in raw mode, so a
+#: bare LF moves down without returning to column 0; CRLF is what a
+#: terminal expects. This is a transport-layer concern, which is exactly
+#: why `CommandResult.lines` carries lines without terminators.
+LINE_ENDING = "\r\n"
 
 
 async def send(websocket: WebSocket, message: ServerMessage) -> None:
@@ -76,18 +107,58 @@ def _parse(raw: str) -> ClientMessage:
         raise ValueError("message does not match the protocol schema") from exc
 
 
+def _render(result: CommandResult, scenario: "Scenario") -> list[ServerMessage]:
+    """Turn a CommandResult into the frames that express it.
+
+    This is the only place that knows both the command vocabulary and the
+    wire protocol; the router deliberately knows neither.
+
+    Frame order is: actions, then coalesced output, then one `event` frame
+    per scenario domain event the command caused, then — only when the
+    command caused at least one event — a single `state` snapshot.
+
+    Actions are sent before output, so a command that both clears the screen
+    and prints something lands in the order a terminal user expects. Output
+    is coalesced into a single frame so that one command causes one write,
+    rather than the terminal painting a result line by line. Events follow
+    output because they are structured signals about what the terminal text
+    just described, not the text itself. The state snapshot comes last and is
+    gated on `result.events` rather than sent unconditionally: the scenario
+    only records an event when something about its state actually changed
+    (see app/scenarios/environmental.py), so an empty `events` tuple means
+    the snapshot the client already has is still current and resending it
+    would be pure noise.
+    """
+    frames: list[ServerMessage] = [
+        ActionMessage(action=action.value) for action in result.actions
+    ]
+    if result.lines:
+        frames.append(
+            OutputMessage(data="".join(line + LINE_ENDING for line in result.lines))
+        )
+    for event in result.events:
+        frames.append(EventMessage(event=event.type.value, data=dict(event.data)))
+    if result.events:
+        frames.append(StateMessage(data=scenario.snapshot()))
+    return frames
+
+
 async def _handle_message(
     websocket: WebSocket, session: HackSession, message: ClientMessage
 ) -> None:
     """Dispatch one validated client message."""
     if isinstance(message, InputMessage):
-        # Phase 2A stub. This is the seam where the command router will be
-        # called; until then the input is acknowledged and discarded. It is
-        # never executed, and never echoed back verbatim.
-        await send(
-            websocket,
-            OutputMessage(data=f"[backend] input received ({len(message.data)} chars)\r\n"),
-        )
+        # One completed command line. The router resolves it against a closed
+        # command table and returns a structured result; it never touches
+        # this socket, and nothing in it is executed.
+        #
+        # `dispatch` contains its own failures, so an unsupported or broken
+        # command yields terminal text rather than an exception that would
+        # drop the student's session.
+        context = CommandContext(session=session)
+        result = await default_router.dispatch(message.data, context)
+        for frame in _render(result, context.scenario):
+            await send(websocket, frame)
         return
 
     if isinstance(message, ResizeMessage):
