@@ -5,11 +5,12 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import __version__, config, websocket
+from app import __version__, build_websocket, config, websocket
+from app.models.build_messages import BUILD_PROTOCOL_VERSION
 from app.models.messages import PROTOCOL_VERSION
 
 app = FastAPI(
-    title="IoT Cybersecurity Trainer — Hack Mode backend",
+    title="IoT Cybersecurity Trainer backend",
     version=__version__,
 )
 
@@ -26,13 +27,15 @@ app.add_middleware(
 )
 
 app.include_router(websocket.router)
+app.include_router(build_websocket.router)
 
 
 @app.get("/health")
 async def health() -> dict[str, object]:
-    """Liveness probe for the dev server and the future frontend."""
+    """Liveness probe for the dev server and the frontend."""
     return {
         "status": "ok",
         "service": config.SERVICE_NAME,
         "protocol_version": PROTOCOL_VERSION,
+        "build_protocol_version": BUILD_PROTOCOL_VERSION,
     }

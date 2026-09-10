@@ -498,11 +498,37 @@ th {
   min-height: 0;
 }
 
+/* Build Mode — collapsible left column (see CLAUDE.md: Blockly Phase 3).
+   Collapsing it hands its width to the Blockly/code workspace; `.hack-grid`
+   is untouched since only Build Mode has this toggle. */
+.ide-grid.left-collapsed {
+  grid-template-columns: 40px minmax(0, 1fr) 240px;
+}
+
 .side-col {
   display: flex;
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+}
+
+.side-col.collapsed {
+  align-items: center;
+  overflow: visible;
+}
+
+.side-col-toggle {
+  align-self: flex-start;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.side-col.collapsed .side-col-toggle {
+  align-self: center;
 }
 
 .panel {
@@ -667,6 +693,22 @@ th {
   min-height: 480px;
 }
 
+/* Build Mode — BUILD ACTIONS: every action button (SAVE/COMPILE/FLASH/
+   validation/security test) grouped in the existing left-hand information
+   column (see CLAUDE.md) rather than a separate sidebar. Stacked and
+   full-width for a narrow ~240px column, using the same `.btn-solid`/
+   `.btn-outline`/`.future-control` styles those controls already had. */
+.build-actions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.build-actions-list button,
+.build-actions-list .future-control {
+  width: 100%;
+}
+
 .tabs {
   display: flex;
   border-bottom: 1px solid var(--soft);
@@ -722,12 +764,6 @@ th {
   font-family: var(--mono);
   font-size: 13px;
   margin-bottom: 10px;
-}
-
-.console-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
 }
 
 .live-box {
@@ -882,4 +918,336 @@ th {
   .or-badge {
     justify-self: center;
   }
+
+  .compile-toast {
+    left: 16px;
+    right: 16px;
+    width: auto;
+  }
+}
+
+/* Build Mode — locked vs. editable firmware regions (Phase 3A). The old
+   single-textarea `.editor-body`/`.gutter` rules above are superseded here
+   but left in place: nothing in the current screen renders them. */
+
+.muted-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.code-view {
+  flex: 1;
+  min-height: 240px;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Build Mode — Blockly Phase 1 POC (see CLAUDE.md). `.code-workspace` fills
+   `.code-view` without triggering its own scrollbar (Blockly manages its
+   own pan/zoom; the CODE textarea scrolls itself) — a BLOCKS/CODE toggle
+   above a canvas that stays the dominant, large area either way. */
+.code-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-mode-tabs {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-bottom: 6px;
+}
+
+.editor-mode-tabs button {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 4px 14px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.editor-mode-tabs button.active {
+  background: var(--white);
+  color: var(--ink);
+  font-weight: 700;
+  border-color: var(--ok);
+}
+
+/* The large blank Blockly canvas — the dominant part of the screen per
+   CLAUDE.md's ESP IDE-inspired goal. `position:relative`/`absolute` (rather
+   than percentage heights) is the robust way to give a library-managed
+   canvas a definite box inside a flex layout; see BlocklyWorkspace.jsx for
+   why it also needs a ResizeObserver on this element. */
+.blockly-panel {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--line);
+}
+
+.blockly-host {
+  position: absolute;
+  inset: 0;
+}
+
+.code-segment {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+.code-segment.locked {
+  color: var(--muted);
+  background: var(--panel);
+  padding: 10px;
+  border-left: 3px solid var(--line);
+  user-select: text;
+}
+
+.code-segment.editable {
+  border: 1px solid var(--warn);
+  background: var(--white);
+}
+
+.region-banner {
+  padding: 6px 10px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: var(--soft);
+  border-bottom: 1px solid var(--warn);
+}
+
+.code-segment.editable textarea {
+  width: 100%;
+  min-height: 120px;
+  border: 0;
+  resize: vertical;
+  background: var(--white);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px;
+}
+
+/* TEMPORARY PHASE 1 POC — a file with no locked regions (see
+   BuildMode.jsx: isFullEditorFile) renders as one plain code editor instead
+   of the locked/editable region view above: no orange border, no banner,
+   just a normal editor filling the available code area. */
+.code-editor-full {
+  flex: 1;
+  width: 100%;
+  min-height: 240px;
+  border: 1px solid var(--line);
+  resize: none;
+  background: var(--white);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px;
+}
+
+.console-out.warn {
+  color: var(--bad);
+}
+
+.future-control {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.future-control em {
+  font-style: normal;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.status-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  margin-left: 6px;
+}
+
+.region-map-file {
+  margin-bottom: 10px;
+}
+
+.region-map-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.region-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 6px;
+}
+
+.region-badge.locked {
+  background: var(--soft);
+  color: var(--muted);
+}
+
+.region-badge.editable {
+  background: var(--warn);
+  color: var(--bg);
+}
+
+/* Build Mode — Flash Terminal (lower part of the code editor area). Real
+   Arduino CLI/esptool upload output only, never simulated — see
+   `flashTerminalText` in BuildMode.jsx. Compact and bounded on purpose: the
+   code editor above it must stay the dominant workspace, and Flash output
+   must never grow the page. Replaces the old unbounded `.flash-result`
+   block that used to sit inline in the console area. */
+.flash-terminal {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  height: 160px;
+  border-top: 2px solid var(--line);
+}
+
+.flash-terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  padding: 6px 10px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--panel);
+  border-bottom: 1px solid var(--soft);
+}
+
+.flash-terminal.detecting .flash-terminal-header,
+.flash-terminal.running .flash-terminal-header,
+.flash-terminal.no_device .flash-terminal-header {
+  color: var(--warn);
+}
+
+.flash-terminal.succeeded .flash-terminal-header {
+  color: var(--ok);
+}
+
+.flash-terminal.failed .flash-terminal-header {
+  color: var(--bad);
+}
+
+.flash-terminal-body {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--term);
+  color: #d8d8d8;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-y: auto;
+}
+
+/* Build Mode — small bottom-right Compile notification (see CLAUDE.md).
+   Fixed/floating so it never takes editor workspace or blocks the page;
+   deliberately small and unanimated, matching this app's flat, bordered
+   aesthetic elsewhere. Replaces the old large inline compile terminal —
+   the full compiler stdout/stderr this used to show inline still lives in
+   `state.compile_output`, just isn't rendered here any more. */
+.compile-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 40;
+  width: 240px;
+  padding: 10px 28px 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.compile-toast strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.compile-toast span {
+  display: block;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.compile-toast.running {
+  border-color: var(--warn);
+}
+
+.compile-toast.running strong {
+  color: var(--warn);
+}
+
+.compile-toast.succeeded {
+  border-color: var(--ok);
+}
+
+.compile-toast.succeeded strong {
+  color: var(--ok);
+}
+
+.compile-toast.failed {
+  border-color: var(--bad);
+}
+
+.compile-toast.failed strong {
+  color: var(--bad);
+}
+
+.compile-toast-dismiss {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+/* Build Mode — Activity Log gets its own bounded, independently scrollable
+   area (see CLAUDE.md) instead of growing `.side-col`/the page indefinitely.
+   The shared `.plain-log` class itself is untouched — Hack Mode's own
+   Activity Log also uses it and must keep growing the old way. */
+.activity-log-scroll {
+  max-height: 260px;
+  overflow-y: auto;
 }

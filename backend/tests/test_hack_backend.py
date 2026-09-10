@@ -210,15 +210,34 @@ def _code_names(path: pathlib.Path) -> set[str]:
     return names
 
 
+#: Build Mode's real toolchain integration deliberately introduces the only
+#: subprocess calls in the whole backend, and they all live in exactly one
+#: file: `app/build/process.py`, which `app/build/compiler.py` (Phase 3B,
+#: `arduino-cli compile`) and `app/build/flasher.py` (Phase 3C,
+#: `arduino-cli board list` / `arduino-cli upload`) both call. Only that one
+#: file is excluded from this repo-wide scan, and it is covered instead by
+#: its own narrower, still-strict safety test — `tests/test_build_process.py::
+#: test_process_module_stays_safe_except_for_its_one_sanctioned_exception` —
+#: which asserts every *other* forbidden name (including the bare identifier
+#: `shell`, which a `shell=True` keyword argument would require) stays
+#: banned there too, and that the invocation passes a real argument list
+#: rather than a command string. The two adapter modules that build those
+#: argument arrays still get the full scan below, as does Hack Mode, which
+#: is completely unaffected.
+_EXEMPT_FROM_EXECUTION_SCAN = frozenset({APP_DIR / "build" / "process.py"})
+
+
 def test_backend_source_contains_no_execution_primitives() -> None:
     """Static guard on the security boundary.
 
     Phase 2A only transports messages. This fails loudly if a later change
     introduces a process-spawning or code-evaluating primitive anywhere under
-    app/.
+    app/ — outside the one, explicit, documented exception above.
     """
     offenders = []
     for path in sorted(APP_DIR.rglob("*.py")):
+        if path in _EXEMPT_FROM_EXECUTION_SCAN:
+            continue
         for name in sorted(_code_names(path) & FORBIDDEN_NAMES):
             offenders.append(f"{path.name}: {name}")
     assert offenders == [], f"execution primitive in backend source: {offenders}"

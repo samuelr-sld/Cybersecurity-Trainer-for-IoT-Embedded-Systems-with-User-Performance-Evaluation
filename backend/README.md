@@ -353,3 +353,310 @@ Planned next steps: **Phase 2D-B** — the React WebSocket client (replacing the
 mock transport in `HackMode.jsx`, rendering the target panel from the `state`
 frame, appending `output`/`event` frames to the terminal, and acting on
 `action`), then **Phase 2E** — event recording and evaluation.
+
+## Build Mode — Phase 3A + 3B + 3C, Phase 1 (Build Mode POC)
+
+Build Mode is the defender/developer side of the trainer: a firmware
+workspace that writes/edits real Arduino C++, compiles it with the real
+Arduino CLI toolchain, and uploads the result to a physically connected
+ESP32. It is a **separate channel and session type** from Hack Mode — its
+own WebSocket endpoint, its own session manager, its own message protocol —
+not Hack Mode commands, and Hack Mode is unmodified by its existence.
+
+**Current default project: LED Blink pipeline-proof (`app/build/blink.py`,
+`led-blink-poc`).** A fresh session's only job right now is to prove the
+write → compile → flash → physical-execution pipeline works end to end
+against real hardware — no vulnerability, no remediation objective. The
+earlier Environmental Monitoring / Weak MQTT project (`app/build/
+environmental.py`, `create_environmental_monitoring_project`) — where a
+student remediated the vulnerability they found in Hack Mode — predates the
+finalized five-panel scope and is no longer loaded by default; it remains
+in the codebase, independently constructible, for when that scope resumes.
+Everything below about the pipeline (WebSocket protocol, region model,
+compiler, flasher) is project-agnostic and applies to either project —
+only the loaded `BuildProject`'s identity, files, and region ids differ.
+
+```
+Student -> Build Mode UI -> WebSocket (/ws/build) -> Build Service -> Build Workspace -> BuildProject
+                             app/build_websocket.py   app/build/service.py  app/build/workspace.py  app/build/models.py
+                                                            |
+                                                            +-> CompilerAdapter -> arduino-cli compile
+                                                            |   app/build/compiler.py
+                                                            |
+                                                            +-> FlasherAdapter  -> arduino-cli upload -> ESP32
+                                                                app/build/flasher.py
+```
+
+- `app/build/` — the domain layer: passive project/file/region models
+  (`models.py`), the `BuildEvent` vocabulary (`events.py`), the workspace
+  that enforces region protection and materializes a compile-ready sketch
+  (`workspace.py`), the LED Blink pipeline-proof project that a fresh
+  session loads by default (`blink.py`), the not-currently-loaded
+  Environmental Monitoring reference project (`environmental.py`), the
+  real-compiler adapter (`compiler.py`), the real-flasher adapter
+  (`flasher.py`), the single sanctioned process-execution primitive both
+  adapters call (`process.py`), and session-level orchestration
+  (`service.py`).
+- `app/build_sessions.py` — per-connection `BuildSession` state and its
+  manager, mirroring `app/sessions.py`.
+- `app/build_websocket.py` — the `/ws/build` endpoint, mirroring
+  `app/websocket.py`.
+- `app/models/build_messages.py` — Build Mode's own message protocol and
+  `BUILD_PROTOCOL_VERSION`, tracked independently of Hack Mode's.
+
+### Locked vs. editable firmware regions
+
+A firmware file is not one opaque blob of text; it is an ordered sequence of
+named segments, each tagged `locked` or `editable`. A segment's identity is
+its `region_id`, not a line range, so a student's edit inside one region can
+never shift another region's boundaries. The current default project's
+`main.ino` (`blink.py`) has two segments — `locked_pre` and the editable
+`blink_program` region — kept deliberately minimal; the not-currently-loaded
+Environmental Monitoring project's `main.ino` has three (`locked_pre`, the
+editable `security_logic` region, and `locked_post`) plus a fully-locked
+`mqtt_config.h` file, and remains available for the five-panel phase.
+
+**Enforcement is structural, not textual.** The only mutation
+`BuildWorkspace` exposes is `update_region(path, region_id, source)`,
+addressed by region id — there is no "submit a whole file" path for a
+locked region's text to hide inside. Submitting an unknown `region_id`, or
+one that names a `locked` segment, raises (`RegionNotFoundError` /
+`RegionNotEditableError`) rather than silently doing nothing, and the
+WebSocket layer turns that into an `error` frame. This is enforced entirely
+server-side: the frontend's read-only styling of locked code is a UI
+convenience, never the actual protection.
+
+A student can submit syntactically broken C++ into the editable region — the
+region model does not parse or validate submitted source at all, only which
+region it may land in. Real syntax errors are now caught by the real
+compiler instead (see "Compilation" below), not by anything in this layer.
+
+### WebSocket endpoint
+
+`ws://127.0.0.1:8000/ws/build` — one session per connection, JSON text
+frames, same strict validation discipline as `/ws/hack` (unknown keys and
+type coercion are rejected).
+
+Client -> server:
+
+```json
+{ "type": "edit_region", "path": "main.ino", "region_id": "security_logic", "source": "..." }
+{ "type": "compile" }
+{ "type": "flash" }
+```
+
+Server -> client:
+
+```json
+{ "type": "session", "session_id": "...", "protocol_version": 3 }
+{ "type": "state",   "data": {} }
+{ "type": "event",   "event": "...", "data": {} }
+{ "type": "error",   "message": "..." }
+```
+
+On connect, the server creates a session with its default (LED Blink
+pipeline-proof, `blink.py`) workspace already loaded, sends `session`, then the
+`build_session_started` and `workspace_loaded` events, then a `state`
+snapshot — `BuildSession.snapshot()`, which is the project's identity, every
+file's segments (kind, region id, current text), `compile_status`/
+`flash_status`/`validation_status`, `compile_output` and `flash_output`
+(each `null` until that operation has run), and `flash_ready` (whether a
+flash would be accepted right now). A successful `edit_region` gets
+`code_edited` (and, when the edited region is the project's
+`security_region_id`, `security_region_edited`) followed by a fresh `state`;
+a rejected one gets a single `error` and nothing else. `compile` is
+field-less — see "Compilation" below — and always gets `compile_started`
+followed by either `compile_succeeded` or `compile_failed`, then a fresh
+`state`; a `compile` sent while one is already running for the session (or
+while a flash is in flight) gets a single `error` instead (no second process
+is spawned). `flash` is field-less too — see "Flashing" below — and, when
+accepted, gets `flash_started` followed by either `flash_succeeded` or
+`flash_failed`, then a fresh `state`; when its preconditions are not met it
+gets a single `error` and nothing is attempted at all.
+
+### Compilation (Phase 3B)
+
+A `compile` request runs the real `arduino-cli compile` against the
+session's current workspace — not a simulation, not a regex over the
+source, not a frontend guess. The flow:
+
+```
+BuildService.compile_workspace
+    -> BuildWorkspace.materialize(tmp_dir)   writes a throwaway sketch copy
+    -> CompilerAdapter.run_compile(request)  real argv (app/build/compiler.py),
+                                             spawned by app/build/process.py
+    -> CompileOutcome                        real exit code, stdout, stderr, duration
+    -> session.compile_status / compile_output updated; events emitted
+```
+
+`materialize` never lets the compiler see (or touch) the live workspace —
+it writes a fresh temporary sketch directory named after the project's
+`.ino` file, and that directory is deleted again once the compile finishes,
+success or failure. The compiler's own argv is a fixed array built entirely
+from backend/project data (`--fqbn` from `BuildProject.board.fqbn`,
+`--build-path` a second temp directory, the sketch path) — a `compile`
+request carries no fields a client could use to supply a different board or
+raw source; `app/build/compiler.py` has no student input in its command
+line at all.
+
+`ARDUINO_CLI_PATH` (env `TRAINER_ARDUINO_CLI_PATH`, defaults to relying on
+`arduino-cli` being on PATH) and `BUILD_COMPILE_TIMEOUT_SECONDS` (env
+`TRAINER_BUILD_COMPILE_TIMEOUT_SECONDS`, default 180) are in `app/config.py`.
+A compile that exceeds the timeout is killed and reported as a truthful
+`compile_failed` (category `timeout`), never a false success. If the
+configured executable cannot be found, the compile fails as
+`toolchain_unavailable` — set `TRAINER_ARDUINO_CLI_PATH` to the full path of
+`arduino-cli` when it is not on the PATH of the process that runs uvicorn.
+
+**Spawning is loop-independent, by design.** `arduino-cli` is launched by
+`app/build/process.py`, which runs the blocking `subprocess.run` on a worker
+thread via `asyncio.to_thread` rather than using `asyncio`'s own subprocess
+API. That API is not available on every event loop: on Windows it needs a
+`ProactorEventLoop`, and uvicorn (>= 0.36) runs the server on a
+`SelectorEventLoop` on win32 whenever it needs worker subprocesses of its
+own — i.e. under `--reload` or `--workers N`. Compiling used to raise
+`NotImplementedError` out of `loop._make_subprocess_transport` and kill the
+`/ws/build` handler in exactly that (development-default) configuration.
+The adapters, their `CompilerAdapter`/`FlasherAdapter` protocols and
+`BuildService` are unchanged by this: `run_capture` is a normal awaitable,
+still takes an argument list, and still never involves a shell.
+
+Both Build Mode projects target board `esp32:esp32:esp32` (the Espressif
+`esp32:esp32` core's "ESP32 Dev Module"), and the same `BoardInfo` supplies
+the `--fqbn` for both compiling and uploading. The current default (LED
+Blink) project needs only that core — no extra libraries — since it uses
+nothing beyond `pinMode`/`digitalWrite`/`delay`. The not-currently-loaded
+Environmental Monitoring project additionally needs `PubSubClient`,
+`Adafruit BME280 Library`, and `Adafruit SSD1306` installed in the Arduino
+CLI environment the configured `ARDUINO_CLI_PATH` uses. **The toolchain,
+core, and library requirements are environment-dependent**: a machine
+without them compiles nothing, and a machine without an ESP32 attached
+flashes nothing — in both cases the backend reports the real reason rather
+than a substitute one.
+
+### Flashing (Phase 3C)
+
+A `flash` request uploads the firmware this session **actually compiled** to
+a physically connected ESP32, using the real `arduino-cli upload`. A
+physical serial device is required: with no board attached there is no
+upload and no success, and the backend says so in those words.
+
+```
+BuildService.flash_workspace
+    -> gates: a successful compile exists, and the workspace still matches it
+    -> FlasherAdapter.detect_devices(...)  real `arduino-cli board list --format json`
+    -> 0 devices -> NO_DEVICE | >1 -> AMBIGUOUS_DEVICE | exactly 1 -> upload to it
+    -> FlasherAdapter.run_flash(request)   real argv (app/build/flasher.py),
+                                          spawned by app/build/process.py
+    -> FlashOutcome                        real exit code, stdout, stderr, duration, port
+    -> session.flash_status / flash_output updated; events emitted
+```
+
+**Compilation must succeed first, and must still correspond to the code on
+screen.** A successful compile retains its build directory as the session's
+`CompiledArtifact`, recorded with a content hash of the workspace it was
+built from. A flash is refused outright — nothing spawned, no state change —
+unless `compile_status` is `succeeded`, that artifact still exists, and the
+workspace still hashes to the same value. Editing the security region after a
+green build therefore makes flashing unavailable until the student compiles
+again, which is what makes "you are flashing what you compiled" a checked
+fact rather than a convention. (Because it is a content hash, an edit that is
+typed and then undone correctly leaves the build flashable.) A failed compile
+leaves no artifact at all, so stale output from an earlier build can never be
+uploaded.
+
+**Device discovery is the backend's job.** The frontend cannot name a port,
+an executable, a binary, or an upload flag — the `flash` frame has no fields,
+and any extra key is rejected by the schema. `ArduinoCliFlasher` reads the
+attached devices from `arduino-cli board list` and narrows them with a
+documented preference ladder: serial ports only; then ports the CLI
+positively identified as this project's platform; then, failing that, ports
+reporting a USB vendor id (a classic ESP32 sits behind a CP2102/CH340 bridge
+the CLI cannot map to a board, but is always a USB device). Exactly one
+survivor is used. **Zero is `NO_DEVICE` and more than one is
+`AMBIGUOUS_DEVICE` — the backend never picks a board to write firmware to.**
+
+**Failure domains stay distinct.** `FlashStatus` has `no_device` as its own
+terminal state, separate from `failed`, and `FlashFailureCategory`
+distinguishes `no_device`, `ambiguous_device`, `device_disconnected`,
+`upload_error`, `timeout`, `toolchain_unavailable` and `internal_error`.
+Nothing is plugged in is never reported as a compiler error; a missing
+`arduino-cli` is never reported as a missing board. Success is decided by
+the upload process's real exit code and nothing else — the categories only
+choose the label a failure carries.
+
+`BUILD_FLASH_TIMEOUT_SECONDS` (env `TRAINER_BUILD_FLASH_TIMEOUT_SECONDS`,
+default 120) and `BUILD_DEVICE_DETECT_TIMEOUT_SECONDS` (env
+`TRAINER_BUILD_DEVICE_DETECT_TIMEOUT_SECONDS`, default 20) are in
+`app/config.py`; the flasher shares `ARDUINO_CLI_PATH` with the compiler.
+An upload that exceeds its timeout is killed and reported as a truthful
+`flash_failed` (category `timeout`), never a false success. Only one flash
+runs per session, a second request while one is in flight is rejected, a
+failed flash leaves both the workspace and the artifact intact so the student
+can simply retry, and sessions remain fully isolated from one another.
+
+### Flashing is not validation
+
+`flash_succeeded` means one thing: `arduino-cli upload` exited 0, so the
+firmware was transferred to the board. It does **not** mean the firmware
+runs, that its sensors read correctly, or that the vulnerability is actually
+fixed. Nothing in this codebase checks any of that.
+
+### What Phase 3C still deliberately does not do
+
+No validation of any kind — no MQTT connection, no sensor/LCD inspection, no
+automatic Hack Mode re-test, no security or functional test runner — and no
+Blockly editor, no scoring, no persistence, and no module identification by
+MAC address. Flashing is implemented at the `BuildProject`/`BoardInfo`/
+toolchain level, proven against the LED Blink pipeline-proof project
+(current default) and previously against Environmental Monitoring (not
+currently loaded); the other four modules are not generalised to yet. The
+`validation_started`/`security_test_started`/... event vocabulary and
+`ValidationStatus` remain declared-but-unused in `app/build/events.py` and
+`app/build/models.py`, always `NOT_STARTED`, and the frontend's
+Validate/Security-Test controls are disabled placeholders.
+
+### Tests
+
+`tests/test_build_workspace.py` covers loading the Environmental Monitoring
+project (still valid, independently constructible, region-model coverage
+data) and that `create_default_workspace` now loads the LED Blink
+pipeline-proof project instead, locked/editable region identification,
+successful and rejected edits (locked region, unknown region, unknown file),
+snapshot shape,
+`materialize`'s sketch layout and isolation, and the no-execution boundary
+(with `process.py`'s one sanctioned exception carved out and separately
+tested in `tests/test_build_process.py`, which also exercises `run_capture`
+— exit code, stdout/stderr capture, timeout, missing binary, argument-array
+safety — on both an ordinary event loop and one that cannot spawn
+subprocesses at all). `tests/test_build_compiler.py` covers
+`ArduinoCliCompiler` against a small fake executable (success, real
+exit-code failure, stdout/stderr capture, timeout, missing binary,
+argument-array safety), repeats that whole contract on a
+subprocess-incapable event loop as a regression guard for the Windows
+`NotImplementedError` crash, and statically checks that `compiler.py` itself
+stays entirely execution-primitive-free; it also
+includes two tests that run the *real* `arduino-cli` end to end (skipped
+unless `TRAINER_ARDUINO_CLI_PATH`/PATH resolves to a working binary — never
+faked). `tests/test_build_flasher.py` does the same for `ArduinoCliFlasher`:
+successful upload, real exit-code failure, output capture, timeout, missing
+binary, discovery finding zero/one/several devices, a device that disappears
+mid-upload, `board list` JSON parsing (both CLI output shapes), the
+device-selection ladder, argument-array safety, and the static check that
+`flasher.py` stays otherwise execution-primitive-free. Its one real-toolchain
+test runs **device discovery only** — a test suite must never write firmware
+to whatever board happens to be plugged into the machine running it, so real
+upload verification is done by hand through Build Mode with a known board
+attached. `tests/test_build_service.py` covers session/event bootstrap, edit
+orchestration, session isolation, repeated-edit stability,
+`compile_workspace` orchestration against a fake `CompilerAdapter`
+(status/event correctness, output exposure, failure leaving the workspace
+intact, edit-then-retry after a failure, and concurrent-request rejection),
+and `flash_workspace` orchestration against a fake `FlasherAdapter`
+(rejection with no/failed/stale compile, the no-device and ambiguous-device
+results, status/event correctness, output exposure, concurrency, retry, and
+artifact lifetime). `tests/test_build_websocket.py` covers the protocol
+end-to-end over a real socket, including `compile` and `flash` requests
+(against fakes), that a `flash` frame carrying a port/executable/path/flag is
+schema-rejected, and that Build Mode never touches Hack Mode's session
+registry or scenario state.

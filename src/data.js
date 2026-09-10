@@ -63,60 +63,8 @@ function seeded(i) {
 
 export const STUDENTS = Array.from({ length: 48 }, (_, i) => seeded(i))
 
-export const PROJECT_FILES = {
-  'main.ino': `/* Weak MQTT Auth lab sketch — ESP32
- * Educational sandbox firmware. Add authentication, ACL, and TLS.
- */
-#include <WiFi.h>
-#include <PubSubClient.h>
-#include "mqtt_config.h"
-#include "wifi_secrets.h"
-
-WiFiClient wifi;
-PubSubClient mqtt(wifi);
-
-void setup() {
-  Serial.begin(115200);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
-  // TODO: set username/password before connect
-  mqtt.connect("sandbox-node");
-  mqtt.subscribe("sandbox/mqtt/#");
-}
-
-void loop() {
-  mqtt.loop();
-  mqtt.publish("sandbox/mqtt/telemetry", "temp=24.1");
-  delay(2000);
-}
-`,
-  'mqtt_config.h': `#pragma once
-#define MQTT_BROKER "192.168.4.1"
-#define MQTT_PORT   1883
-// TODO: switch to 8883 and enable TLS
-// TODO: restrict subscribe/publish ACLs
-`,
-  'wifi_secrets.h': `#pragma once
-#define WIFI_SSID "SANDBOX-LAB"
-#define WIFI_PASS "isolated-only"
-`,
-  'README.md': `# IoT MQTT Comm Panel
-
-Remediate Weak MQTT Auth:
-1. Add client authentication
-2. Restrict topic ACL
-3. Use TLS for the broker link
-`,
-}
-
 export const GUIDED_STEPS = [
   'Discover broker IP',
   'Subscribe to # wildcard',
   'Publish forged telemetry',
-]
-
-export const REMEDIATION_ITEMS = [
-  'Add client authentication',
-  'Restrict topic ACL',
-  'Use TLS for broker link',
 ]
