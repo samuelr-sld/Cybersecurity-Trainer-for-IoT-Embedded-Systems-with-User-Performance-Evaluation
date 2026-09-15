@@ -28,6 +28,7 @@ from app.commands import (
     parse,
 )
 from app.commands import router as router_module
+from app.hardware import device_monitor
 from app.main import app
 from app.sessions import HackSession
 
@@ -63,11 +64,35 @@ REGISTERED = (
     "mqtt-explorer",
     "firmware-extract",
     "firmware-analyze",
+    # Phase 2A: the physical serial commands. Listed here like any other
+    # command, because they resolve through the same closed allowlist —
+    # touching real hardware buys them no separate dispatch path.
+    "serial-status",
+    "serial-monitor",
+    "serial-send",
+    "serial-close",
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_attached_board() -> None:
+    """Keep this module's tests independent of any real ESP32.
+
+    The serial commands read the process-wide `device_monitor`. Without this
+    the suite's behaviour would differ depending on whether a board happened
+    to be plugged into the machine running it — and, worse,
+    `test_each_command_is_dispatched_to_its_handler` would actually OPEN a
+    physical port. Resetting to NOT_CHECKED pins every serial command here
+    to its deterministic no-device path; real transport behaviour is covered
+    against fakes in `test_serial_transport.py` and `test_serial_commands.py`.
+    """
+    device_monitor.reset()
+    yield
+    device_monitor.reset()
+
+
 @pytest.mark.parametrize("name", REGISTERED)
-def test_registry_contains_the_phase_2b_command_set(name: str) -> None:
+def test_registry_contains_the_expected_command_set(name: str) -> None:
     assert name in default_registry
     assert default_registry.get(name) is not None
 

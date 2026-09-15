@@ -8,14 +8,26 @@ the rest of the application only ever sees well-typed values.
 Client -> server
     {"type": "input",  "data": "nmap -p 1883 192.168.4.0/24\r"}
     {"type": "resize", "cols": 100, "rows": 30}
+    {"type": "hardware_status"}
 
 Server -> client
-    {"type": "session", "session_id": "..."}
-    {"type": "output",  "data": "..."}
-    {"type": "action",  "action": "clear"}
-    {"type": "error",   "message": "..."}
-    {"type": "event",   "event": "...", "data": {}}
-    {"type": "state",   "data": {}}
+    {"type": "session",  "session_id": "..."}
+    {"type": "output",   "data": "..."}
+    {"type": "action",   "action": "clear"}
+    {"type": "error",    "message": "..."}
+    {"type": "event",    "event": "...", "data": {}}
+    {"type": "state",    "data": {}}
+    {"type": "hardware", "data": {}}
+
+`hardware` IS ITS OWN FRAME, AND THAT IS THE POINT. Physical ESP32 presence
+is infrastructure state, not something a student did: a board being plugged
+in is not terminal output, not a command, not a scenario event, and not
+scenario state. Reusing `output` would print it into xterm.js, reusing
+`event` would put it in the Activity Log, and reusing `state` would conflate
+it with `Scenario.snapshot()`. A separate frame is what lets the frontend
+poll device presence continuously while changing nothing but a small
+hardware-status indicator — see `app/websocket.py`'s handler, which touches
+no scenario at all.
 """
 
 from __future__ import annotations
@@ -35,7 +47,13 @@ from app import config
 # 3 (Phase 2D-A): `event` frames start being emitted (previously reserved and
 #   never sent) and the `state` server frame is added. A client written
 #   against version 2 would not expect either frame to arrive unsolicited.
-PROTOCOL_VERSION = 3
+# 4 (Phase 1, shared device layer): added the `hardware_status` client message
+#   and the `hardware` server frame, which report the platform-level ESP32
+#   presence from `app/hardware/` — the same shared state Build Mode's own
+#   `hardware` block reports. A version-3 client has no way to render this
+#   and would have to show a hardcoded or assumed connection state instead.
+#   Nothing about the terminal, command, scenario or event protocol changed.
+PROTOCOL_VERSION = 4
 
 
 class _Frame(BaseModel):
@@ -82,8 +100,29 @@ class ResizeMessage(_Frame):
     rows: int = Field(ge=config.MIN_TERMINAL_ROWS, le=config.MAX_TERMINAL_ROWS)
 
 
+class HardwareStatusMessage(_Frame):
+    """A request to refresh the shared ESP32 presence check.
+
+    Field-less, exactly like Build Mode's `hardware_status` request (see
+    `app/models/build_messages.py`) and for the same reason: this asks the
+    shared device layer to re-run its own real `arduino-cli board list`
+    against the backend's own configured board target. There is no field
+    here a client could use to name a serial port, claim a board is
+    connected, or point this backend at a device — and, unlike Build Mode's,
+    this request cannot reach an upload path at all.
+
+    Read-only and idle: it runs no command, touches no `Scenario`, and
+    produces exactly one `hardware` frame back — never terminal `output`,
+    never an `event`, never a scenario `state`. A client may poll it for the
+    whole life of a session without adding a single line to the terminal or
+    a single row to the Activity Log.
+    """
+
+    type: Literal["hardware_status"] = "hardware_status"
+
+
 ClientMessage = Annotated[
-    Union[InputMessage, ResizeMessage],
+    Union[InputMessage, ResizeMessage, HardwareStatusMessage],
     Field(discriminator="type"),
 ]
 
@@ -165,6 +204,30 @@ class StateMessage(_Frame):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class HardwareMessage(_Frame):
+    """The shared device layer's current view of the attached ESP32.
+
+    `data` is exactly `DeviceState.snapshot()` (see `app/hardware/state.py`)
+    — the same process-wide state Build Mode reads, with no reshaping at
+    this layer, so the two modes cannot report different boards or ports for
+    one physical device. Its `status`/`board_name`/`port` keys are spelled
+    identically to Build Mode's `hardware` block, which is what lets one
+    frontend formatter render both.
+
+    DELIBERATELY NOT `state`, `event`, OR `output`. See the module docstring:
+    hardware presence is infrastructure, and the whole reason it has its own
+    frame is that a client can poll it without anything appearing in the
+    terminal, in the Activity Log, or in the scenario.
+
+    Sent only in reply to a `hardware_status` request — this backend never
+    pushes one unsolicited, so no frame can arrive mid-command and interleave
+    with a command's own output.
+    """
+
+    type: Literal["hardware"] = "hardware"
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 ServerMessage = Union[
     SessionMessage,
     OutputMessage,
@@ -172,4 +235,5 @@ ServerMessage = Union[
     ErrorMessage,
     EventMessage,
     StateMessage,
+    HardwareMessage,
 ]

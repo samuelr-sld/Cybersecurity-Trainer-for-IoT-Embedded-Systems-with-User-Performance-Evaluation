@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Callable, Protocol
 
 from app.commands.parser import ParsedCommand
@@ -111,15 +112,28 @@ class CommandContext:
 
 
 class CommandHandler(Protocol):
-    """Callable shape every handler satisfies."""
+    """Callable shape every handler satisfies.
+
+    May return a `CommandResult` directly, or a coroutine yielding one —
+    the router awaits whichever it gets (see `app/commands/router.py`).
+    """
 
     def __call__(
         self, command: ParsedCommand, context: CommandContext
-    ) -> CommandResult: ...
+    ) -> "CommandResult | Awaitable[CommandResult]": ...
 
 
 #: Convenience alias for annotating handler functions.
-HandlerFunction = Callable[[ParsedCommand, CommandContext], CommandResult]
+#:
+#: Phase 2A widened this to allow `async def` handlers. The simulated tools
+#: are pure functions of the scenario and stay synchronous; the serial
+#: commands perform real I/O against a physical board and cannot. Rather
+#: than force every handler into one shape, the router accepts both — which
+#: is exactly the await point `CommandRouter.dispatch` was made `async` for
+#: in the first place.
+HandlerFunction = Callable[
+    [ParsedCommand, CommandContext], "CommandResult | Awaitable[CommandResult]"
+]
 
 
 @dataclass(frozen=True)

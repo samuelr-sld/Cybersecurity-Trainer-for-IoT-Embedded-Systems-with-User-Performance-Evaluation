@@ -30,6 +30,7 @@ from app.build.compiler import CompileFailureCategory, CompileOutcome
 from app.build.flasher import DeviceDetectOutcome, FlashFailureCategory, FlashOutcome
 from app.build.service import default_service
 from app.build_sessions import build_session_manager
+from app.hardware import DeviceMonitor
 from app.main import app
 from app.models.build_messages import BUILD_PROTOCOL_VERSION
 from app.sessions import session_manager as hack_session_manager
@@ -88,6 +89,38 @@ def fake_compile_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 def client() -> TestClient:
     with TestClient(app) as test_client:
         yield test_client
+
+
+def assert_hardware(block: dict, **expected) -> None:
+    """Assert a whole `hardware` block, ignoring only its wall-clock stamp.
+
+    The panel-identity change widened this block from three keys to eleven —
+    it is now exactly the shared `DeviceState.snapshot()` both modes carry.
+    Spelling the full contract here keeps every assertion below *exact* (a
+    stray or missing key still fails) without repeating eleven lines each
+    time. `checked_at` cannot be asserted by value, so it is asserted for
+    presence: absent before any detection has run, set once one has.
+    """
+    base = {
+        "status": "not_checked",
+        "board_name": None,
+        "port": None,
+        "connected": False,
+        "fqbn": None,
+        "identified": False,
+        "detail": "",
+        "port_aliases": [],
+        "mac": None,
+        "panel": None,
+    }
+    base.update(expected)
+    actual = dict(block)
+    checked_at = actual.pop("checked_at")
+    assert actual == base
+    if base["status"] == "not_checked":
+        assert checked_at is None
+    else:
+        assert isinstance(checked_at, str)
 
 
 def _open_session(ws) -> tuple[str, dict]:
@@ -457,7 +490,26 @@ _ESP32 = SerialDevice(
 
 
 def _install_flasher(monkeypatch: pytest.MonkeyPatch, flasher: _FakeFlasher) -> None:
+    """Point `default_service` at a fake board for the duration of one test.
+
+    Two seams, because Phase 1 split device *detection* out of Build Mode:
+    `_flasher` is what `flash_workspace` uploads through, and `_monitor` is
+    the shared device layer (`app/hardware/`) every hardware check now goes
+    to. In production both resolve to the real Arduino CLI and the
+    process-wide `device_monitor`; here they must both resolve to this
+    double, or a `hardware_status` request would run a real
+    `arduino-cli board list` against whatever is physically plugged into the
+    machine running the suite.
+
+    A *private* monitor with `cache_seconds=0` rather than a monkeypatched
+    detector on the shared one, so no detection can survive into the next
+    test through the shared freshness cache — which is precisely what made
+    a "no device" test see a previous test's connected COM7.
+    """
     monkeypatch.setattr(default_service, "_flasher", flasher)
+    monkeypatch.setattr(
+        default_service, "_monitor", DeviceMonitor(detector=flasher, cache_seconds=0.0)
+    )
 
 
 @pytest.fixture
@@ -685,11 +737,7 @@ def test_compile_without_a_prior_save_uses_the_current_editor_source(
         assert final_state["flash_ready"] is True
 
         # 8: hardware-status reporting is untouched by any of this.
-        assert final_state["hardware"] == {
-            "status": "not_checked",
-            "board_name": None,
-            "port": None,
-        }
+        assert_hardware(final_state["hardware"])
 
         # Close the loop the task describes: current editor source ->
         # synchronized workspace -> compile -> compiled fingerprint ->
@@ -915,11 +963,7 @@ def fake_multiple_devices(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_hardware_status_starts_not_checked_on_connect(client: TestClient) -> None:
     with client.websocket_connect("/ws/build") as ws:
         _, initial_state = _open_session(ws)
-        assert initial_state["hardware"] == {
-            "status": "not_checked",
-            "board_name": None,
-            "port": None,
-        }
+        assert_hardware(initial_state["hardware"])
 
 
 def test_hardware_status_reports_connected_for_one_device(
@@ -933,11 +977,7 @@ def test_hardware_status_reports_connected_for_one_device(
 
         # No event frame at all — see the section note above.
         assert reply["type"] == "state"
-        assert reply["data"]["hardware"] == {
-            "status": "connected",
-            "board_name": "ESP32 Dev Module",
-            "port": "COM7",
-        }
+        assert_hardware(reply["data"]["hardware"], status="connected", board_name="ESP32 Dev Module", port="COM7", connected=True, fqbn="esp32:esp32:esp32", identified=True, port_aliases=["COM7", "/dev/ttyUSB0"])
 
 
 def test_hardware_status_reports_disconnected_for_no_device(
@@ -949,7 +989,11 @@ def test_hardware_status_reports_disconnected_for_no_device(
         _hardware_status(ws)
         state = ws.receive_json()["data"]
 
-        assert state["hardware"] == {"status": "disconnected", "board_name": None, "port": None}
+        # `fqbn` survives a disconnect: it records the board target the
+        # detection ran *against*, not a property of a device that is gone.
+        assert_hardware(
+            state["hardware"], status="disconnected", fqbn="esp32:esp32:esp32"
+        )
 
 
 def test_hardware_status_reports_ambiguous_for_multiple_devices(
@@ -961,7 +1005,12 @@ def test_hardware_status_reports_ambiguous_for_multiple_devices(
         _hardware_status(ws)
         state = ws.receive_json()["data"]
 
-        assert state["hardware"] == {"status": "ambiguous", "board_name": None, "port": None}
+        assert_hardware(
+            state["hardware"],
+            status="ambiguous",
+            fqbn="esp32:esp32:esp32",
+            detail="multiple candidate serial devices detected: COM7, COM9",
+        )
 
 
 def test_hardware_status_does_not_require_a_compile_first(
@@ -1005,8 +1054,4 @@ def test_flashing_updates_hardware_status_in_the_same_state_frame(
         ws.receive_json()  # flash_succeeded
         state = ws.receive_json()["data"]
 
-        assert state["hardware"] == {
-            "status": "connected",
-            "board_name": "ESP32 Dev Module",
-            "port": "COM7",
-        }
+        assert_hardware(state["hardware"], status="connected", board_name="ESP32 Dev Module", port="COM7", connected=True, fqbn="esp32:esp32:esp32", identified=True, port_aliases=["COM7", "/dev/ttyUSB0"])

@@ -140,6 +140,26 @@ class SerialDevice:
     board_name: str | None = None
     board_fqbn: str | None = None
     has_usb_id: bool = False
+    #: The CLI's own display spelling of this port (`label`), when it gave
+    #: one and it differs from `address`. Carried so the shared device layer
+    #: can offer every *legitimate* representation of a port without
+    #: inventing one — see `app/hardware/state.py::DeviceState.port_aliases`.
+    #: Purely informational: nothing on the flash path reads it, and an
+    #: upload always targets `port`.
+    label: str | None = None
+    #: The USB vendor and product ids the CLI reported for this port, as
+    #: bare uppercase hex ("10C4", "EA60") — the USB-IF identity of the
+    #: bridge chip providing the port, i.e. what `lsusb` shows.
+    #:
+    #: BACKEND DIAGNOSTICS ONLY. These are deliberately NOT student-facing:
+    #: the USB field's alternate representation is the canonical trainer
+    #: path (see `app/hardware/serial_alias.py`), not a chip id a student
+    #: has no use for. Kept because they are the most precise record of what
+    #: was actually attached, which is exactly what a support question about
+    #: an unrecognised board needs. The flash path never reads them and an
+    #: upload always targets `port`.
+    vid: str | None = None
+    pid: str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,13 +362,39 @@ def _port_from_entry(entry: dict[str, Any]) -> SerialDevice | None:
         board_name = name if isinstance(name, str) else None
         board_fqbn = candidate_fqbn if isinstance(candidate_fqbn, str) else None
 
+    label = port_info.get("label")
     return SerialDevice(
         port=address,
         protocol=protocol if isinstance(protocol, str) else "",
         board_name=board_name,
         board_fqbn=board_fqbn,
         has_usb_id=has_usb_id,
+        label=label if isinstance(label, str) and label and label != address else None,
+        vid=_usb_id_hex(properties.get("vid")),
+        pid=_usb_id_hex(properties.get("pid")),
     )
+
+
+def _usb_id_hex(raw: Any) -> str | None:
+    """Normalise one USB id the CLI reported to bare uppercase hex.
+
+    The Arduino CLI spells these "0x10C4"; strip the prefix so the value is
+    the plain USB-IF id everything else (lsusb, udev, Device Manager) uses.
+    Returns None for anything that is not hex, so a CLI change can only ever
+    cost us this representation — never produce a made-up one.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if text[:2].lower() == "0x":
+        text = text[2:]
+    if not text:
+        return None
+    try:
+        int(text, 16)
+    except ValueError:
+        return None
+    return text.upper()
 
 
 def parse_board_list(payload: str) -> tuple[SerialDevice, ...]:

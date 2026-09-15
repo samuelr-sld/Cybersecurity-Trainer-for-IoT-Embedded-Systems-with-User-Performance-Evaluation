@@ -518,6 +518,10 @@ def test_parse_board_list_reads_the_modern_detected_ports_shape() -> None:
             board_name="ESP32 Dev Module",
             board_fqbn=FQBN,
             has_usb_id=True,
+            # `port_entry` supplies vid 0x10c4 / pid 0xea60; both are read
+            # back as bare uppercase hex, the spelling lsusb/udev use.
+            vid="10C4",
+            pid="EA60",
         ),
     )
 

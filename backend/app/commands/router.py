@@ -15,6 +15,7 @@ exception that would tear down a student's connection.
 
 from __future__ import annotations
 
+import inspect
 import logging
 
 from app.commands.base import CommandContext, CommandResult
@@ -53,12 +54,12 @@ class CommandRouter:
     async def dispatch(self, raw: str, context: CommandContext) -> CommandResult:
         """Route one completed command line.
 
-        Async even though every Phase 2B handler is synchronous and returns
-        immediately. The await point belongs at the transport seam from the
-        start: Phase 2C's simulated tools have durations (a scan takes time,
-        a subscription waits for a message), and introducing that later would
-        otherwise mean reworking the WebSocket layer rather than just the
-        handlers.
+        Async from the start so the await point lived at the transport seam
+        before anything needed it. Phase 2A is what needed it: the serial
+        commands are `async def` because they talk to a real board, while
+        every simulated tool stays synchronous. Both shapes are accepted —
+        see the awaitable check below — so adding real I/O did not force a
+        rewrite of eight working handlers.
         """
         try:
             command = parse(raw)
@@ -80,7 +81,15 @@ class CommandRouter:
             )
 
         try:
-            return spec.handler(command, context)
+            result = spec.handler(command, context)
+            if inspect.isawaitable(result):
+                # An `async def` handler — the serial commands, which do real
+                # I/O against a physical board. Awaited *inside* this try, so
+                # a failure during the await is contained exactly like a
+                # synchronous handler's and still yields terminal text rather
+                # than dropping the student's connection.
+                result = await result
+            return result
         except Exception:
             # A bug in a handler is a server problem, not a student problem.
             # The detail goes to the server log; the terminal gets one

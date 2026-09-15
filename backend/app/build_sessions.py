@@ -40,6 +40,7 @@ from app.build import (
 )
 from app.build.compiler import CompiledArtifact, CompileOutcome
 from app.build.flasher import FlashOutcome
+from app.hardware import DeviceState
 
 
 def _utc_now() -> datetime:
@@ -82,6 +83,12 @@ class BuildSession:
     #: never a value this backend invents or the frontend supplies. None
     #: under the same conditions as `hardware_board_name`.
     hardware_port: str | None = None
+    #: The full shared `DeviceState` behind the three scalars above, kept so
+    #: the `hardware` block can carry the same panel identity (MAC, panel
+    #: name, port aliases) Hack Mode's `hardware` frame carries. Set by
+    #: `BuildService._mirror_device_state`; the default is the same
+    #: NOT_CHECKED state the shared monitor starts in.
+    device_state: DeviceState = field(default_factory=DeviceState)
     #: The most recent real compile's result, or None before any compile has
     #: run. Set only by `BuildService.compile_workspace`.
     compile_output: CompileOutcome | None = None
@@ -124,7 +131,14 @@ class BuildSession:
         data["flash_status"] = self.flash_status.value
         data["validation_status"] = self.validation_status.value
         data["flash_ready"] = self.flash_ready
+        # Exactly the shared `DeviceState` payload Hack Mode's `hardware`
+        # frame carries, with one Build-Mode-owned override: `board_name`
+        # falls back to this session's project board when the Arduino CLI
+        # could not identify the attached one (see
+        # `BuildService._mirror_device_state`). Identical shape in both
+        # modes is what lets one frontend component render either.
         data["hardware"] = {
+            **self.device_state.snapshot(),
             "status": self.hardware_status.value,
             "board_name": self.hardware_board_name,
             "port": self.hardware_port,

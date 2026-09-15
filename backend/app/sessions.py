@@ -5,7 +5,8 @@ connection. Sessions are isolated: nothing is shared between connections, and
 a disconnect removes the session entirely.
 
 A session records who it is, when it started, the terminal geometry the
-client reported, and — since Phase 2C — its own `Scenario`. The scenario is
+client reported, its own `Scenario`, and — since Phase 2A — its own
+`SerialTransport` for real I/O with the attached ESP32. The scenario is
 the per-session simulated target: creating it via a `default_factory` means
 every session gets an independent instance, so no two sessions can observe or
 mutate each other's scenario state. Command history, evaluation metrics, and
@@ -20,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app import config
+from app.hardware import SerialTransport
 from app.scenarios import Scenario, create_default_scenario
 
 
@@ -39,6 +41,15 @@ class HackSession:
     #: instance per session means one student's scenario is unreachable from
     #: another's. Command handlers reach it via `CommandContext.scenario`.
     scenario: Scenario = field(default_factory=create_default_scenario)
+    #: This session's own link to the physical ESP32 (Phase 2A). A fresh
+    #: transport per session, for the same isolation reason `scenario` is
+    #: per-session: one student's serial stream is unreachable from another's.
+    #:
+    #: Created CLOSED and stays closed until a serial command opens it, so
+    #: merely entering Hack Mode never claims the port or resets the board.
+    #: `app/websocket.py` closes it unconditionally on disconnect, so no
+    #: reader thread or open port outlives the connection that made it.
+    serial: SerialTransport = field(default_factory=SerialTransport)
 
     def resize(self, cols: int, rows: int) -> None:
         """Record the client's terminal geometry.
@@ -77,6 +88,23 @@ class SessionManager:
         """Unregister a session. Safe to call for an already-removed id."""
         async with self._lock:
             return self._sessions.pop(session_id, None)
+
+    def discard(self, session_id: str) -> HackSession | None:
+        """Unregister without awaiting. The teardown path.
+
+        WebSocket cleanup runs on a task the server has already cancelled,
+        where every `await` — including acquiring `_lock` — raises
+        immediately (see `SerialTransport.release` for the same problem and
+        the same reasoning). A registry entry that could not be removed
+        would keep a finished session, and its scenario, alive for the life
+        of the process.
+
+        Dropping the lock is safe here rather than merely expedient: a dict
+        `pop` contains no await point, so under asyncio it cannot interleave
+        with `create`/`get`/`remove`. The lock exists to make multi-step
+        async sequences atomic, and this is a single step.
+        """
+        return self._sessions.pop(session_id, None)
 
     async def count(self) -> int:
         """Number of live sessions (used by /health and by tests)."""

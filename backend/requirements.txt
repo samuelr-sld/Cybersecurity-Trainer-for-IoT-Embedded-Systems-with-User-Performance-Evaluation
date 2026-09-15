@@ -1,3 +1,7 @@
 # Phase 2A runtime dependencies (pinned to the versions verified in-repo).
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
+# Phase 2A: real USB-serial I/O with the ESP32 from Hack Mode
+# (app/hardware/serial_transport.py). Imported lazily, so a backend
+# without it still starts — serial commands report it as unavailable.
+pyserial==3.5

@@ -21,6 +21,10 @@ from app.commands.handlers import (
     mosquitto_sub,
     mqtt_explorer,
     nmap,
+    serial_close,
+    serial_monitor,
+    serial_send,
+    serial_status,
 )
 
 
@@ -56,7 +60,7 @@ class CommandRegistry:
 
 
 def build_default_registry() -> CommandRegistry:
-    """Build the Phase 2B command set.
+    """Build the command set this sandbox recognises.
 
     `help` is built last and against the finished registry: it is the one
     command whose output depends on what else is registered, so it takes the
@@ -71,6 +75,13 @@ def build_default_registry() -> CommandRegistry:
         mosquitto_sub.SPEC,
         mosquitto_pub.SPEC,
         mqtt_explorer.SPEC,
+        # Phase 2A: the only commands in this table that touch real
+        # hardware. They still resolve through the same closed allowlist as
+        # every simulated tool — being physical buys them no special path.
+        serial_status.SPEC,
+        serial_monitor.SPEC,
+        serial_send.SPEC,
+        serial_close.SPEC,
     ):
         registry.register(spec)
     registry.register(help_command.build_spec(registry))

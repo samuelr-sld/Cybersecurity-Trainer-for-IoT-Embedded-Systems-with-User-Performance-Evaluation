@@ -1,7 +1,9 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader'
 import HackTerminal from '../components/HackTerminal'
 import useHackSocket, { CONNECTION_STATUS } from '../hooks/useHackSocket'
+import HardwareHeaderStatus from '../components/HardwareHeaderStatus'
+import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE } from '../hardware/deviceState'
 import { GUIDED_STEPS } from '../data'
 
 const TOOLS = [
@@ -83,13 +85,6 @@ function guidedStepsDone(scenarioState) {
   ]
 }
 
-const STATUS_LABEL = {
-  [CONNECTION_STATUS.CONNECTING]: 'LINK: CONNECTING…',
-  [CONNECTION_STATUS.CONNECTED]: 'LINK: CONNECTED',
-  [CONNECTION_STATUS.DISCONNECTED]: 'LINK: DISCONNECTED',
-  [CONNECTION_STATUS.ERROR]: 'LINK: ERROR',
-}
-
 // True-color ANSI escapes matching the legacy .term-line.warn color, used
 // only for frontend-injected notices (protocol errors) — never for backend
 // `output` text, which is written verbatim.
@@ -123,6 +118,15 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
   const [scenarioEvents, setScenarioEvents] = useState([])
   const [scenarioState, setScenarioState] = useState(null)
 
+  // Shared ESP32 presence, from backend/app/hardware/ — the SAME
+  // process-wide device state Build Mode reads, not a Hack-Mode-owned
+  // device and not a second detection path. Held apart from
+  // `scenarioState` on purpose: the scenario is the simulated target a
+  // student attacks, this is the physical board plugged into the machine,
+  // and conflating them is exactly what would let hardware noise leak into
+  // the Activity Log or the Target Device panel.
+  const [hardware, setHardware] = useState(UNKNOWN_HARDWARE)
+
   // Writes a (possibly multi-line) chunk to the terminal, prefixing each
   // line with the current elapsed timestamp — the single mechanism every
   // terminal-rendered line goes through, whether it's a whole backend output
@@ -155,7 +159,7 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
     })
   }
 
-  const { status, sendInput, sendResize } = useHackSocket({
+  const { status, sendInput, sendResize, sendHardwareStatus } = useHackSocket({
     onSession: (message) => {
       setSessionId(message.session_id)
       // A `session` frame only ever arrives once per connection (right after
@@ -199,11 +203,38 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
       })
     },
     onState: (data) => setScenarioState(data),
+    // SILENT BY CONSTRUCTION — Phase 1's hard requirement. This handler
+    // does one thing: swap the hardware badge's data. It deliberately does
+    // not call `writeTimestamped` (nothing reaches xterm.js — no "ESP32
+    // CONNECTED", no "NO ESP32 DETECTED", no line at all), does not touch
+    // `scenarioEvents` (nothing reaches the Activity Log), and does not
+    // touch `scenarioState` (no exploit/discovery flag moves). A board
+    // being plugged in is not something the student did.
+    onHardware: (data) => setHardware(data || UNKNOWN_HARDWARE),
   })
+
+  // Keeps the badge truthful as the board is plugged in, pulled out, or
+  // reconnected while Hack Mode stays open — no page refresh, and no
+  // second detection path, since every poll resolves to the one shared
+  // `device_monitor` the backend also answers Build Mode from. Re-checks
+  // immediately on (re)connect so a freshly opened screen never shows
+  // "CHECKING…" for a whole interval.
+  useEffect(() => {
+    if (status !== CONNECTION_STATUS.CONNECTED) return undefined
+    sendHardwareStatus()
+    const id = setInterval(sendHardwareStatus, HARDWARE_POLL_INTERVAL_MS)
+    return () => clearInterval(id)
+  }, [status, sendHardwareStatus])
+
+  // When the socket itself isn't open, nothing about `hardware` can be
+  // trusted (it's whatever was last pushed, possibly never), so the header
+  // falls back to "nothing known" rather than reporting a stale board as
+  // still attached. The socket's own state is never *shown* — it is
+  // diagnostics, and the header reports the ESP32, not the transport.
+  const device = status === CONNECTION_STATUS.CONNECTED ? hardware : UNKNOWN_HARDWARE
 
   const stepsDone = guidedStepsDone(scenarioState)
   const currentStepIndex = stepsDone.findIndex((done) => !done)
-  const attackSuccessful = Boolean(scenarioState?.completion?.attack_successful)
 
   // The single path a completed command line takes to the backend, whether
   // it came from the terminal's own Enter key or a tool button below —
@@ -271,13 +302,11 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
   return (
     <div className="page">
       <AppHeader
-        title="SECURITY TESTING TERMINAL — HACK MODE"
-        right={
-          <>
-            SANDBOX NETWORK ISOLATED | SCENARIO: Weak MQTT Auth | {STATUS_LABEL[status]}
-            {attackSuccessful ? ' | OBJECTIVE COMPLETE' : ''}
-          </>
-        }
+        title="HACK MODE"
+        // The uniform panel/hardware header. Identical component and
+        // identical shared device state in Build Mode — the mode name above
+        // is the only difference between the two headers.
+        right={<HardwareHeaderStatus hardware={device} />}
         onMenu={onMenu}
       />
       <main className="page-body hack-grid">

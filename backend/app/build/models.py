@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from app.hardware.state import DeviceStatus
+
 
 class RegionKind(str, Enum):
     """Whether a firmware segment may be modified by a student."""
@@ -162,23 +164,20 @@ class ValidationStatus(str, Enum):
     FAILED = "failed"
 
 
-class HardwareStatus(str, Enum):
-    """Live ESP32 serial-device presence, independent of any flash attempt.
-
-    This is deliberately its own vocabulary rather than reuse of
-    `FlashStatus`: a hardware check never uploads anything, so it has no
-    `RUNNING`/`SUCCEEDED` upload states, and it *does* need a value for "no
-    check has happened yet" (`NOT_CHECKED`), which `FlashStatus.NOT_STARTED`
-    would overload with the unrelated "no flash requested" meaning.
-
-    `AMBIGUOUS` mirrors `FlashFailureCategory.AMBIGUOUS_DEVICE` for the same
-    reason that one exists: several plausible boards were found and this
-    backend will not guess which is the intended ESP32.
-    """
-
-    NOT_CHECKED = "not_checked"
-    DETECTING = "detecting"
-    CONNECTED = "connected"
-    DISCONNECTED = "disconnected"
-    AMBIGUOUS = "ambiguous"
-    ERROR = "error"
+#: Live ESP32 serial-device presence, as Build Mode has always spelled it.
+#:
+#: PHASE 1: this is no longer a vocabulary of its own — it is *the same enum
+#: object* as the shared layer's `DeviceStatus` (`app/hardware/state.py`),
+#: re-exported under the name Build Mode's session state, snapshot, service
+#: and tests already use. Aliasing rather than redeclaring is the point:
+#: there is exactly one hardware-presence vocabulary in this backend, so a
+#: Build Mode `state` frame and a Hack Mode `hardware` frame cannot drift
+#: into describing the same board with different words, and
+#: `HardwareStatus.CONNECTED is DeviceStatus.CONNECTED` is True rather than
+#: merely equal.
+#:
+#: It stays distinct from `FlashStatus` for the reasons that enum documents:
+#: a presence check uploads nothing, so it has no RUNNING/SUCCEEDED upload
+#: states, and it needs a "nothing has looked yet" value that
+#: `FlashStatus.NOT_STARTED` would overload.
+HardwareStatus = DeviceStatus

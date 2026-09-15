@@ -48,6 +48,63 @@
   white-space: nowrap;
 }
 
+/* The uniform hardware header shared by Hack Mode and Build Mode — see
+   src/components/HardwareHeaderStatus.jsx. PANEL and USB are real buttons
+   (they toggle which representation of the same device is shown), so they
+   are stripped back to look like the surrounding text and marked as
+   clickable with a dotted underline rather than button chrome: identifiable
+   without turning a one-line status readout into a row of widgets. */
+.hw-status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.hw-sep {
+  color: var(--line);
+}
+
+.hw-field {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  letter-spacing: inherit;
+}
+
+/* No underline, border, or button chrome of any kind: a toggleable field
+   must read as ordinary header text. The affordance is the pointer cursor
+   plus a subtle dim on hover/focus — deliberately not `text-decoration` or
+   a `border-bottom`, either of which would put a line back under the field. */
+.hw-field.is-cyclable {
+  cursor: pointer;
+}
+
+.hw-field.is-cyclable:hover .hw-value,
+.hw-field.is-cyclable:focus-visible .hw-value {
+  opacity: 0.6;
+}
+
+/* Only one legitimate representation exists, so the field stays on it. Still
+   a button for uniformity, but it must not promise a toggle it cannot do. */
+.hw-field:not(.is-cyclable):not(.is-empty) {
+  cursor: default;
+}
+
+.hw-value {
+  font-weight: 700;
+}
+
+.hw-conn.is-connected {
+  font-weight: 700;
+}
+
+.hw-conn.is-disconnected {
+  font-weight: 700;
+  opacity: 0.7;
+}
+
 .dot {
   display: inline-block;
   width: 8px;

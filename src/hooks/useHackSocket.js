@@ -90,6 +90,13 @@ export default function useHackSocket(handlers) {
         case 'state':
           h.onState?.(message.data)
           break
+        case 'hardware':
+          // Shared ESP32 presence (backend/app/hardware/) — infrastructure
+          // state, deliberately its own frame so it can never be mistaken
+          // for terminal `output`, an Activity Log `event`, or scenario
+          // `state`. The handler must only update a status indicator.
+          h.onHardware?.(message.data)
+          break
         default:
           break
       }
@@ -122,5 +129,18 @@ export default function useHackSocket(handlers) {
     }
   }, [])
 
-  return { status, sendInput, sendResize }
+  // Field-less, read-only, and safe to send as often as needed — see
+  // backend/app/models/messages.py. It asks the shared device layer to
+  // re-run its own real `arduino-cli board list` and replies with exactly
+  // one `hardware` frame: no terminal output, no scenario event, no
+  // scenario state, and nothing that reaches the command router. There is
+  // no field here that could name a port or claim a board is connected.
+  const sendHardwareStatus = useCallback(() => {
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'hardware_status' }))
+    }
+  }, [])
+
+  return { status, sendInput, sendResize, sendHardwareStatus }
 }

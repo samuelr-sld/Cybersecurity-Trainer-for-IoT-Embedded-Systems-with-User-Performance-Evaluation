@@ -56,7 +56,6 @@ from app.build.compiler import (
 )
 from app.build.events import BuildEvent, BuildEventType
 from app.build.flasher import (
-    DeviceDetectOutcome,
     DeviceDetectRequest,
     FlasherAdapter,
     FlashFailureCategory,
@@ -64,8 +63,14 @@ from app.build.flasher import (
     FlashRequest,
     default_flasher,
 )
-from app.build.models import CompileStatus, FlashStatus, HardwareStatus
+from app.build.models import CompileStatus, FlashStatus
 from app.build.workspace import BuildWorkspaceError
+from app.hardware import (
+    DeviceMonitor,
+    DeviceState,
+    NullIdentityProbe,
+    device_monitor,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from app.build_sessions import BuildSession
@@ -129,45 +134,39 @@ def discard_artifact(session: "BuildSession") -> None:
     shutil.rmtree(artifact.root, ignore_errors=True)
 
 
-def _apply_hardware_discovery(
-    session: "BuildSession", discovery: DeviceDetectOutcome
-) -> None:
-    """Turn one real `detect_devices` outcome into the session's live status.
+def _mirror_device_state(session: "BuildSession", state: DeviceState) -> None:
+    """Copy the shared device state onto the session's hardware fields.
 
-    The one place that decides `hardware_status`/`hardware_board_name`/
-    `hardware_port` from a `DeviceDetectOutcome`, so `detect_hardware` (a
-    standalone check) and `flash_workspace` (which already runs its own
-    discovery before uploading) can never disagree about what "connected"
-    means. Never raises, and never guesses a board/port for anything but the
-    single-device case — the same ambiguity discipline `flash_workspace`
-    already applies.
+    PHASE 1 — THE SHARED LAYER IS NOW THE SOURCE OF TRUTH. Deciding what a
+    detection *means* (connected / disconnected / ambiguous / error) moved
+    out of this module into `app/hardware/monitor.py`, so Build Mode and
+    Hack Mode read one verdict about one board instead of computing their
+    own. What is left here is the projection of that verdict onto the
+    session fields Build Mode's `state` frame has always carried —
+    unchanged in name, type and meaning, which is why nothing in the
+    frontend or the `/ws/build` protocol had to move.
+
+    The one Build-Mode-specific decision that stays Build Mode's: the board
+    *name*. The CLI does not always identify a classic ESP32 behind a
+    generic USB-UART bridge (see `flasher.py::SerialDevice`), so the shared
+    state truthfully reports `board=None` there rather than inventing one.
+    Falling back to this session's own project board name is still truthful
+    — a single serial candidate survived `_select_candidates`' USB/platform
+    preference ladder specifically because it looks like this project's own
+    ESP32 — and it is a fallback only the session knows how to make.
     """
-    if not discovery.ok:
-        session.hardware_status = HardwareStatus.ERROR
-        session.hardware_board_name = None
-        session.hardware_port = None
-        return
-    if not discovery.devices:
-        session.hardware_status = HardwareStatus.DISCONNECTED
-        session.hardware_board_name = None
-        session.hardware_port = None
-        return
-    if len(discovery.devices) > 1:
-        session.hardware_status = HardwareStatus.AMBIGUOUS
-        session.hardware_board_name = None
-        session.hardware_port = None
-        return
-    device = discovery.devices[0]
-    session.hardware_status = HardwareStatus.CONNECTED
-    # The CLI does not always identify classic ESP32 boards behind a generic
-    # USB-UART bridge (see `flasher.py::SerialDevice`) — falling back to this
-    # session's own project board name is still truthful: a single serial
-    # candidate survived `_select_candidates`' USB/platform preference
-    # ladder specifically because it looks like this project's own ESP32.
+    session.hardware_status = state.status
+    session.hardware_port = state.port
     session.hardware_board_name = (
-        device.board_name or session.workspace.project.board.name
+        (state.board or session.workspace.project.board.name)
+        if state.connected
+        else None
     )
-    session.hardware_port = device.port
+    # The whole shared state is kept too, not just the three scalars above:
+    # the header renders panel identity (MAC / panel name / port aliases),
+    # and Build Mode must hand the frontend exactly what Hack Mode hands it
+    # so one component can render both without branching on mode.
+    session.device_state = state
 
 
 class BuildService:
@@ -180,15 +179,48 @@ class BuildService:
     and never touch a real subprocess or a physical board. These are the
     only per-instance state; everything else is still passed in per call via
     `session`.
+
+    `monitor` is the shared device layer (`app/hardware/`), and defaults to
+    the process-wide `device_monitor` — the same instance Hack Mode reads,
+    which is what makes the two modes structurally unable to report
+    different boards or ports for one physical ESP32. Build Mode does not
+    own it and does not get its own copy in production.
+
+    A caller that injects its *own* `flasher` without a monitor gets a
+    private monitor over that adapter rather than the process-wide one. That
+    is not a test affordance bolted on: serving a privately-injected
+    adapter's detections out of the shared, cross-session cache would report
+    a board that adapter never saw, which would be a lie in production too.
     """
 
     def __init__(
         self,
         compiler: CompilerAdapter | None = None,
         flasher: FlasherAdapter | None = None,
+        monitor: DeviceMonitor | None = None,
     ) -> None:
         self._compiler = compiler if compiler is not None else default_compiler
         self._flasher = flasher if flasher is not None else default_flasher
+        if monitor is not None:
+            self._monitor = monitor
+        elif flasher is not None:
+            # `cache_seconds=0`: there are no other sessions sharing this
+            # adapter, so there is nothing to deduplicate, and reuse would
+            # only hide the injecting caller's own changes to it.
+            #
+            # `NullIdentityProbe`: this monitor reports whatever the
+            # injected adapter says is attached, which need not be
+            # physically present. Driving real esptool at a port that
+            # adapter named would probe an absent device — or reset a real
+            # board nobody asked us to touch. Pass an explicit `monitor` to
+            # pair an injected flasher with real identity probing.
+            self._monitor = DeviceMonitor(
+                detector=flasher,
+                cache_seconds=0.0,
+                identity_probe=NullIdentityProbe(),
+            )
+        else:
+            self._monitor = device_monitor
 
     async def start_session(self, session: "BuildSession") -> BuildActionResult:
         """Bring a freshly-created session's default workspace online.
@@ -441,10 +473,16 @@ class BuildService:
             )
         )
         # A flash's own discovery call is the freshest hardware information
-        # this session has — record it as the live hardware status too,
-        # rather than spawning a second `arduino-cli board list` just for
-        # the header. See `detect_hardware` for the standalone check.
-        _apply_hardware_discovery(session, discovery)
+        # in the process — publish it to the SHARED device state rather than
+        # spawning a second `arduino-cli board list` just for the header.
+        # Phase 1 widens who benefits: Hack Mode's hardware display learns
+        # from this flash too, still without an extra CLI invocation. The
+        # flash itself is unchanged and still selects its own port from
+        # `discovery` below; nothing about the upload path reads the shared
+        # state. See `detect_hardware` for the standalone check.
+        _mirror_device_state(
+            session, self._monitor.publish(discovery, fqbn=board.fqbn)
+        )
 
         if not discovery.ok:
             # Discovery itself could not run — a missing toolchain or a
@@ -499,15 +537,22 @@ class BuildService:
 
         device = discovery.devices[0]
         session.flash_status = FlashStatus.RUNNING
-        outcome = await self._flasher.run_flash(
-            FlashRequest(
-                sketch_dir=artifact.sketch_dir,
-                build_path=artifact.build_path,
-                fqbn=board.fqbn,
-                port=device.port,
-                timeout_seconds=config.BUILD_FLASH_TIMEOUT_SECONDS,
+        # The upload owns the serial port for its whole duration. The hold
+        # stops the shared layer from probing this board's MAC meanwhile —
+        # `esptool read_mac` would fight `arduino-cli upload` for the port,
+        # and the write is the operation that must win. Nothing else about
+        # the flash changes: the port, the artifact and the invocation are
+        # exactly what they were.
+        with self._monitor.hold_identity_probe():
+            outcome = await self._flasher.run_flash(
+                FlashRequest(
+                    sketch_dir=artifact.sketch_dir,
+                    build_path=artifact.build_path,
+                    fqbn=board.fqbn,
+                    port=device.port,
+                    timeout_seconds=config.BUILD_FLASH_TIMEOUT_SECONDS,
+                )
             )
-        )
         return self._finish_flash(
             session,
             events,
@@ -518,14 +563,25 @@ class BuildService:
         )
 
     async def detect_hardware(self, session: "BuildSession") -> BuildActionResult:
-        """Refresh the session's live ESP32 presence — read-only, no upload.
+        """Refresh the live ESP32 presence — read-only, no upload.
 
-        Runs the same `FlasherAdapter.detect_devices` real `arduino-cli
-        board list` that precedes every flash, but never proceeds to
-        `run_flash`: this exists purely so the Build Mode header can show a
-        truthful BOARD/PORT/LINK before the student ever asks to flash, and
-        can keep showing one as boards are plugged in or unplugged while the
-        session stays open.
+        PHASE 1: this now asks the SHARED device monitor
+        (`app/hardware/monitor.py`) instead of calling the flasher directly,
+        and mirrors its answer onto the session. Three consequences, none of
+        which change what Build Mode shows:
+
+        - Hack Mode sees the same refresh, because there is one monitor.
+        - Concurrent polls from many sessions collapse into one real
+          `arduino-cli board list` instead of one per session.
+        - The board target is still this session's own project board, so a
+          Build Mode check prefers exactly the platform it always did.
+
+        Underneath, the monitor runs the same `FlasherAdapter.detect_devices`
+        real `arduino-cli board list` that precedes every flash, and never
+        proceeds to `run_flash`: this exists purely so the Build Mode header
+        can show a truthful BOARD/PORT/LINK before the student ever asks to
+        flash, and can keep showing one as boards are plugged in or
+        unplugged while the session stays open.
 
         Deliberately emits no `BuildEvent` — the module docstring in
         `app/build/events.py` already treats device discovery as carrying no
@@ -542,14 +598,7 @@ class BuildService:
         rejections.
         """
         board = session.workspace.project.board
-        session.hardware_status = HardwareStatus.DETECTING
-        discovery = await self._flasher.detect_devices(
-            DeviceDetectRequest(
-                fqbn=board.fqbn,
-                timeout_seconds=config.BUILD_DEVICE_DETECT_TIMEOUT_SECONDS,
-            )
-        )
-        _apply_hardware_discovery(session, discovery)
+        _mirror_device_state(session, await self._monitor.refresh(fqbn=board.fqbn))
         return BuildActionResult.ok()
 
     def _finish_flash(

@@ -36,8 +36,9 @@ from app.build.flasher import (
     SerialDevice,
 )
 from app.build.models import CompileStatus, FlashStatus, HardwareStatus
-from app.build.service import BuildService
+from app.build.service import BuildService, default_service
 from app.build_sessions import BuildSession, BuildSessionManager
+from app.hardware import DeviceMonitor, device_monitor
 
 
 class FakeCompilerAdapter:
@@ -82,6 +83,38 @@ def failure_outcome(**overrides) -> CompileOutcome:
     )
     defaults.update(overrides)
     return CompileOutcome.failed(**defaults)
+
+
+def assert_hardware(block: dict, **expected) -> None:
+    """Assert a whole `hardware` block, ignoring only its wall-clock stamp.
+
+    The panel-identity change widened this block from three keys to eleven —
+    it is now exactly the shared `DeviceState.snapshot()` both modes carry.
+    Spelling the full contract here keeps every assertion below *exact* (a
+    stray or missing key still fails) without repeating eleven lines each
+    time. `checked_at` cannot be asserted by value, so it is asserted for
+    presence: absent before any detection has run, set once one has.
+    """
+    base = {
+        "status": "not_checked",
+        "board_name": None,
+        "port": None,
+        "connected": False,
+        "fqbn": None,
+        "identified": False,
+        "detail": "",
+        "port_aliases": [],
+        "mac": None,
+        "panel": None,
+    }
+    base.update(expected)
+    actual = dict(block)
+    checked_at = actual.pop("checked_at")
+    assert actual == base
+    if base["status"] == "not_checked":
+        assert checked_at is None
+    else:
+        assert isinstance(checked_at, str)
 
 
 def run(coro):
@@ -979,11 +1012,7 @@ def test_hardware_status_starts_not_checked(session: BuildSession) -> None:
     assert session.hardware_status is HardwareStatus.NOT_CHECKED
     assert session.hardware_board_name is None
     assert session.hardware_port is None
-    assert session.snapshot()["hardware"] == {
-        "status": "not_checked",
-        "board_name": None,
-        "port": None,
-    }
+    assert_hardware(session.snapshot()["hardware"])
 
 
 def test_hardware_status_reports_connected_for_one_device(session: BuildSession) -> None:
@@ -1074,11 +1103,7 @@ def test_hardware_status_appears_in_session_snapshot(session: BuildSession) -> N
     fake = FakeFlasherAdapter(devices=[esp32(port="COM7")])
     run(BuildService(flasher=fake).detect_hardware(session))
 
-    assert session.snapshot()["hardware"] == {
-        "status": "connected",
-        "board_name": "ESP32 Dev Module",
-        "port": "COM7",
-    }
+    assert_hardware(session.snapshot()["hardware"], status="connected", board_name="ESP32 Dev Module", port="COM7", connected=True, fqbn="esp32:esp32:esp32", identified=True, port_aliases=["COM7", "/dev/ttyUSB0"])
 
 
 def test_flashing_also_refreshes_the_live_hardware_status(session: BuildSession) -> None:
@@ -1116,3 +1141,129 @@ def test_hardware_status_for_one_session_does_not_affect_another() -> None:
 
     assert a.hardware_status is HardwareStatus.CONNECTED
     assert b.hardware_status is HardwareStatus.NOT_CHECKED
+
+
+# --- hardware: Build Mode reads the SHARED device state (Phase 1) ----------
+#
+# Build Mode's observable behaviour is unchanged — every test above this
+# line still passes untouched — but `detect_hardware` now resolves through
+# `app/hardware/`'s `DeviceMonitor` instead of calling the flasher directly.
+# These assert the wiring itself: that production shares one monitor with
+# Hack Mode, that an injected flasher stays isolated from it, and that the
+# flash pipeline still runs its own discovery while contributing the result
+# to the shared state for free.
+
+
+def test_the_production_service_reads_the_process_wide_shared_monitor() -> None:
+    """Not a Build-Mode-owned device: the same object Hack Mode reads."""
+    assert BuildService()._monitor is device_monitor
+    assert default_service._monitor is device_monitor
+
+
+def test_an_injected_flasher_gets_an_isolated_monitor() -> None:
+    """A caller's own adapter must never publish into the shared state.
+
+    Otherwise a test double — or any caller with a private adapter — would
+    make the whole process report a board it invented.
+    """
+    fake = FakeFlasherAdapter(devices=[esp32()])
+    service = BuildService(flasher=fake)
+    before = device_monitor.snapshot()
+
+    assert service._monitor is not device_monitor
+    run(service.detect_hardware(BuildSession(session_id="isolated")))
+
+    assert device_monitor.snapshot() is before
+
+
+def test_detect_hardware_publishes_into_the_shared_state(session: BuildSession) -> None:
+    """What makes Hack Mode's badge update when Build Mode polls."""
+    monitor = DeviceMonitor(detector=FakeFlasherAdapter(devices=[esp32(port="COM7")]))
+    service = BuildService(monitor=monitor)
+
+    run(service.detect_hardware(session))
+
+    shared = monitor.snapshot()
+    assert shared.connected is True
+    assert shared.port == "COM7"
+    # And the session still projects exactly what it always did.
+    assert session.hardware_status is HardwareStatus.CONNECTED
+    assert session.hardware_port == shared.port
+
+
+def test_detect_hardware_still_prefers_this_session_s_project_board(
+    session: BuildSession,
+) -> None:
+    """Behaviour preserved: the board target is the session's own project."""
+    fake = FakeFlasherAdapter(devices=[esp32()])
+    service = BuildService(flasher=fake)
+
+    run(service.detect_hardware(session))
+
+    assert fake.detect_requests[0].fqbn == session.workspace.project.board.fqbn
+
+
+def test_flashing_feeds_the_shared_state_without_a_second_detection(
+    session: BuildSession,
+) -> None:
+    """The flash pipeline is untouched — it just stops wasting its discovery.
+
+    `flash_workspace` still runs its own `detect_devices` and still selects
+    its own port from that result; publishing it to the shared layer costs
+    no extra `arduino-cli board list`, which is exactly why Build Mode did
+    not have to be rewritten to share.
+    """
+    fake = FakeFlasherAdapter(devices=[esp32(port="COM7")])
+    monitor = DeviceMonitor(detector=FakeFlasherAdapter(devices=[]))
+    service = BuildService(
+        compiler=FakeCompilerAdapter(success_outcome()), flasher=fake, monitor=monitor
+    )
+    flashable(session, service)
+
+    result = run(service.flash_workspace(session))
+
+    assert result.success is True
+    assert session.flash_status is FlashStatus.SUCCEEDED
+    # Exactly one discovery — the flash's own — and it reached the shared state.
+    assert len(fake.detect_requests) == 1
+    assert monitor.snapshot().port == "COM7"
+    # The upload still went to the port the flash itself selected.
+    assert fake.requests[0].port == "COM7"
+
+
+def test_a_flash_that_finds_nothing_reports_disconnected_to_both_layers(
+    session: BuildSession,
+) -> None:
+    monitor = DeviceMonitor(detector=FakeFlasherAdapter(devices=[esp32()]))
+    service = BuildService(
+        compiler=FakeCompilerAdapter(success_outcome()),
+        flasher=FakeFlasherAdapter(devices=[]),
+        monitor=monitor,
+    )
+    flashable(session, service)
+
+    run(service.flash_workspace(session))
+
+    assert session.flash_status is FlashStatus.NO_DEVICE
+    assert session.hardware_status is HardwareStatus.DISCONNECTED
+    assert monitor.snapshot().status is HardwareStatus.DISCONNECTED
+
+
+def test_build_mode_never_writes_firmware_from_the_shared_layer(
+    session: BuildSession,
+) -> None:
+    """The boundary: the shared layer says what is connected, nothing more.
+
+    A `detect_hardware` call must not be able to reach an upload, no matter
+    what is plugged in or what state the session is in.
+    """
+    fake = FakeFlasherAdapter(devices=[esp32()])
+    # An explicit compiler double: without one this would fall back to the
+    # real `arduino-cli`, turning a wiring assertion into a 25-second build.
+    service = BuildService(compiler=FakeCompilerAdapter(success_outcome()), flasher=fake)
+    flashable(session, service)
+
+    run(service.detect_hardware(session))
+
+    assert fake.requests == []
+    assert session.flash_status is FlashStatus.NOT_STARTED

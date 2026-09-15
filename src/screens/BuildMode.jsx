@@ -2,6 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader'
 import BlocklyWorkspace from '../components/BlocklyWorkspace'
 import useBuildSocket, { CONNECTION_STATUS } from '../hooks/useBuildSocket'
+// Shared with Hack Mode rather than kept private here: both screens render
+// the SAME backend device state (one `device_monitor` per process, see
+// backend/app/hardware/) through the SAME header component, so the two
+// cannot drift. The mode name passed to AppHeader is the only difference
+// between this header and Hack Mode's.
+import HardwareHeaderStatus from '../components/HardwareHeaderStatus'
+import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE } from '../hardware/deviceState'
 
 // Backend `BuildEventType` values (backend/app/build/events.py) -> Activity
 // Log copy. A plain lookup, not a switch, so an event type this map doesn't
@@ -39,38 +46,6 @@ const EVENT_LABELS = {
   functional_test_succeeded: 'Functional test succeeded',
   build_completed: 'Build completed',
 }
-
-// When the `/ws/build` socket itself isn't open, nothing about the
-// `hardware` block can be trusted (it's whatever was last pushed, possibly
-// never) — so the header's LINK falls back to this instead of the hardware
-// status. Once the socket is CONNECTED, LINK reflects real ESP32 presence
-// (see HARDWARE_LINK_LABEL) rather than the transport.
-const SOCKET_LINK_LABEL = {
-  [CONNECTION_STATUS.CONNECTING]: 'SOCKET CONNECTING…',
-  [CONNECTION_STATUS.DISCONNECTED]: 'SOCKET DISCONNECTED',
-  [CONNECTION_STATUS.ERROR]: 'SOCKET ERROR',
-}
-
-// Backend `HardwareStatus` values (backend/app/build/models.py) -> header
-// copy. Drives the Build Mode header's BOARD/PORT/LINK from the backend's
-// own real `arduino-cli board list` discovery (see
-// backend/app/build/flasher.py) — never hardcoded, never assumed CONNECTED.
-const HARDWARE_LINK_LABEL = {
-  not_checked: 'CHECKING…',
-  detecting: 'CHECKING…',
-  connected: 'CONNECTED',
-  disconnected: 'DISCONNECTED',
-  ambiguous: 'AMBIGUOUS',
-  error: 'ERROR',
-}
-
-// How often the frontend asks the backend to re-run device discovery while
-// Build Mode stays open — the only way an unplug is ever reflected in the
-// header, since nothing pushes an OS-level USB event to this socket. Kept
-// deliberately infrequent (see CLAUDE.md: "avoid aggressive polling") next
-// to a real `arduino-cli board list` invocation, which is cheap but not
-// free.
-const HARDWARE_POLL_INTERVAL_MS = 10000
 
 // Backend `CompileStatus`/`FlashStatus`/`ValidationStatus` values (backend/
 // app/build/models.py) -> display copy. `detecting` and `no_device` are
@@ -397,18 +372,16 @@ export default function BuildMode({ onBack, onMenu }) {
   // real device-detection state, distinct from `flash_status` (which only
   // reflects discovery run as part of an actual flash attempt, or never, if
   // one hasn't happened yet) and distinct from `status` (the WebSocket
-  // transport, not the physical board).
-  const hardware = state?.hardware || { status: 'not_checked', board_name: null, port: null }
+  // transport, not the physical board). Since Phase 1 this block is a
+  // projection of the shared `device_monitor` state Hack Mode reads too, so
+  // the two screens cannot disagree about what is plugged in.
   const socketLinked = status === CONNECTION_STATUS.CONNECTED
-  const headerLink = socketLinked
-    ? HARDWARE_LINK_LABEL[hardware.status] || hardware.status
-    : SOCKET_LINK_LABEL[status]
-  const headerBoard = socketLinked && hardware.status === 'connected'
-    ? hardware.board_name || '—'
-    : socketLinked && hardware.status === 'ambiguous'
-      ? 'MULTIPLE'
-      : '—'
-  const headerPort = socketLinked && hardware.status === 'connected' ? hardware.port || '—' : '—'
+  // When the socket isn't open, nothing about the `hardware` block can be
+  // trusted (it's whatever was last pushed, possibly never), so the header
+  // falls back to "nothing known" rather than reporting a stale board as
+  // still attached. `socketLinked` itself is never *shown*: it stays
+  // internal, for gating the poll below and for diagnostics.
+  const hardware = (socketLinked && state?.hardware) || UNKNOWN_HARDWARE
 
   // Keeps a truthful LINK as boards are plugged/unplugged while Build Mode
   // stays open, rather than only ever showing whatever was detected at
@@ -542,13 +515,11 @@ export default function BuildMode({ onBack, onMenu }) {
   return (
     <div className="page">
       <AppHeader
-        title="ESP32 WORKSTATION IDE — BUILD MODE"
-        right={
-          <>
-            {state ? state.project.firmware_name : 'LOADING PROJECT…'} | BOARD: {headerBoard} |
-            PORT: {headerPort} | LINK: {headerLink}
-          </>
-        }
+        title="BUILD MODE"
+        // The uniform panel/hardware header. Identical component and
+        // identical shared device state in Hack Mode — the mode name above
+        // is the only difference between the two headers.
+        right={<HardwareHeaderStatus hardware={hardware} />}
         onMenu={onMenu}
       />
       <nav className="ide-menu" aria-label="IDE menu">
