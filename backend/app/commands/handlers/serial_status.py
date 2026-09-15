@@ -8,7 +8,7 @@ which the frontend refreshes on its own interval.
 
 from __future__ import annotations
 
-from app.commands.base import CommandContext, CommandResult, CommandSpec
+from app.commands.base import CommandCategory, CommandContext, CommandResult, CommandSpec
 from app.commands.handlers.serial_common import EXIT_OK, describe_port
 from app.commands.parser import ParsedCommand
 from app.hardware import canonical_alias, device_monitor
@@ -42,4 +42,6 @@ def handle(command: ParsedCommand, context: CommandContext) -> CommandResult:
     return CommandResult.text(*lines, exit_code=EXIT_OK)
 
 
-SPEC = CommandSpec(name="serial-status", summary=SUMMARY, handler=handle)
+SPEC = CommandSpec(
+    name="serial-status", summary=SUMMARY, handler=handle, category=CommandCategory.SERIAL
+)

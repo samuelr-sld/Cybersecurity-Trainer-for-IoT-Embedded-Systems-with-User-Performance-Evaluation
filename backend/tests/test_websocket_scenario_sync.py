@@ -77,12 +77,12 @@ def test_input_still_produces_command_output(client: TestClient) -> None:
 # --- 4 & 5: scenario events and state are emitted when expected ------------
 
 
-def test_firmware_extract_emits_one_event_then_state(client: TestClient) -> None:
+def test_esptool_read_flash_emits_one_event_then_state(client: TestClient) -> None:
     with client.websocket_connect("/ws/hack") as ws:
         session_id = _open_session(ws)
         session = session_manager._sessions[session_id]
 
-        _send_input(ws, "firmware-extract")
+        _send_input(ws, "esptool.py read_flash 0x0 0x400000 firmware.bin")
         output = ws.receive_json()
         assert output["type"] == "output"
 
@@ -96,18 +96,18 @@ def test_firmware_extract_emits_one_event_then_state(client: TestClient) -> None
         assert state["data"]["discovery"]["firmware_extracted"] is True
 
 
-def test_firmware_analyze_emits_three_events_then_one_state(
+def test_strings_emits_three_events_then_one_state(
     client: TestClient,
 ) -> None:
     with client.websocket_connect("/ws/hack") as ws:
         session_id = _open_session(ws)
         session = session_manager._sessions[session_id]
 
-        _send_input(ws, "firmware-extract")
+        _send_input(ws, "esptool.py read_flash 0x0 0x400000 firmware.bin")
         for _ in range(3):  # output, event, state
             ws.receive_json()
 
-        _send_input(ws, "firmware-analyze")
+        _send_input(ws, "strings firmware.bin")
         assert ws.receive_json()["type"] == "output"
 
         events = [ws.receive_json() for _ in range(3)]
@@ -180,8 +180,8 @@ def test_successful_spoof_emits_full_event_chain_and_final_state(
         session = session_manager._sessions[session_id]
 
         for line in (
-            "firmware-extract",
-            "firmware-analyze",
+            "esptool.py read_flash 0x0 0x400000 firmware.bin",
+            "strings firmware.bin",
             f"mosquitto_sub -h {TARGET_IP} -t {TARGET_TOPIC}",
         ):
             _send_input(ws, line)
@@ -259,7 +259,7 @@ def test_independent_sessions_retain_independent_scenario_state(
             first_session = session_manager._sessions[first_id]
             second_session = session_manager._sessions[second_id]
 
-            _send_input(first, "firmware-extract")
+            _send_input(first, "esptool.py read_flash 0x0 0x400000 firmware.bin")
             output = first.receive_json()
             assert output["type"] == "output"
             event = first.receive_json()

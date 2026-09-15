@@ -7,6 +7,7 @@ development defaults, so no settings library is required at this stage.
 from __future__ import annotations
 
 import os
+import pathlib
 
 SERVICE_NAME = "iot-cybersecurity-trainer"
 
@@ -35,6 +36,22 @@ DEFAULT_ALLOWED_ORIGINS = (
 
 ALLOWED_ORIGINS: list[str] = _split_origins(
     os.getenv("TRAINER_ALLOWED_ORIGINS", ",".join(DEFAULT_ALLOWED_ORIGINS))
+)
+
+# --- event logging (Phase 2B) ---------------------------------------------
+#
+# Durable Hack Mode event log — see app/events/store.py. One SQLite file
+# holds the session/command/event rows Phase 2E will compute metrics from.
+#
+# The default lives beside the backend package rather than in the working
+# directory, so the path does not change depending on where uvicorn was
+# started from — a classroom's evidence must not end up split across several
+# files because someone launched the server from a different folder. Set
+# TRAINER_EVENT_DB_PATH to place it on a specific volume, or to ":memory:"
+# for a throwaway run that keeps nothing.
+EVENT_DB_PATH: str = os.getenv(
+    "TRAINER_EVENT_DB_PATH",
+    str(pathlib.Path(__file__).resolve().parent.parent / "data" / "trainer_events.sqlite3"),
 )
 
 # --- protocol limits ------------------------------------------------------
@@ -217,12 +234,14 @@ HARDWARE_IDENTITY_TIMEOUT_SECONDS: float = float(
     os.getenv("TRAINER_HARDWARE_IDENTITY_TIMEOUT_SECONDS", "30")
 )
 
-# Extra MAC -> panel-name entries, as comma-separated `mac=NAME` pairs, e.g.
-# "24:6f:28:ab:cd:ef=ENVIRONMENTAL MONITORING SYSTEM". Merged over the
-# built-in table in app/hardware/panels.py so a second machine, or the
-# remaining panels of the five-panel scope, can be mapped without a code
-# change. An unmapped board shows its MAC; nothing is ever guessed.
-PANEL_NAMES_RAW: str = os.getenv("TRAINER_PANEL_NAMES", "")
+# Extra MAC -> panel bindings, as comma-separated `mac=panel-id` pairs, e.g.
+# "02:00:00:00:00:02=environmental-monitoring". Applied over the built-in
+# registry in app/hardware/panels.py so a replacement or additional ESP32
+# module can be bound to a panel without a code change. A binding may only
+# name a panel id already defined in backend source — it cannot create a
+# panel, rename one, or point at firmware — and malformed entries are
+# skipped. An unregistered board shows its MAC; nothing is ever guessed.
+PANEL_MACS_RAW: str = os.getenv("TRAINER_PANEL_MACS", "")
 
 # Bounded upload timeout, in seconds. An ESP32 upload over a 921600-baud
 # USB-UART link commonly takes 15-40s for a sketch this size; this leaves

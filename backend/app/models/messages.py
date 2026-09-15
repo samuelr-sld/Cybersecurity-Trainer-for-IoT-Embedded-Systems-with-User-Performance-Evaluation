@@ -53,7 +53,14 @@ from app import config
 #   `hardware` block reports. A version-3 client has no way to render this
 #   and would have to show a hardcoded or assumed connection state instead.
 #   Nothing about the terminal, command, scenario or event protocol changed.
-PROTOCOL_VERSION = 4
+# 5 (Phase 2B): `event` frames gain `occurred_at` and `sequence`, carrying the
+#   server-generated timestamp and per-session ordering of the durable
+#   `HackEventRecord` the backend just wrote. Additive — a version-4 client
+#   ignores both fields and still renders every event — but bumped rather
+#   than smuggled in, because a version-4 client necessarily shows a
+#   *client-generated* time for each event, and the two are not the same
+#   claim. No frame was removed and no field changed meaning.
+PROTOCOL_VERSION = 5
 
 
 class _Frame(BaseModel):
@@ -182,11 +189,27 @@ class EventMessage(_Frame):
     produced, emitted in the order the scenario recorded them. See
     `app/scenarios/events.py` for the event vocabulary and
     `app/websocket.py::_render` for where these are built.
+
+    Phase 2B adds `occurred_at` and `sequence`, taken from the
+    `HackEventRecord` the backend just wrote (see app/events/records.py).
+    They are the SAME values the database holds, not a second reading of the
+    clock, so what a student sees in the Activity Log and what a professor
+    later sees in their performance record cannot disagree. `occurred_at` is
+    ISO 8601 UTC and is generated on the server: the frontend previously
+    stamped each Activity Log row from the browser's own clock, which is not
+    evidence — it can be wrong, in another timezone, or simply changed.
+
+    `sequence` is this event's position in its session's ordered log. It is
+    included so a client can render events in the backend's order rather than
+    in arrival order, and so a row on screen can be tied back to the exact
+    row in the log.
     """
 
     type: Literal["event"] = "event"
     event: str
     data: dict[str, Any] = Field(default_factory=dict)
+    occurred_at: str | None = None
+    sequence: int | None = None
 
 
 class StateMessage(_Frame):

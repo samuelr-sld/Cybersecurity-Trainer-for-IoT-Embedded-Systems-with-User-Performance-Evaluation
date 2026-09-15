@@ -37,11 +37,13 @@ from app.hardware import (
     IdentityRequest,
     NullIdentityProbe,
     normalize_mac,
-    panel_for,
-    panel_names,
 )
 from app.hardware.identity import discover_esptool, parse_mac
-from app.hardware.panels import BUILT_IN_PANEL_NAMES, _parse_overrides
+from app.hardware.panels import (
+    BUILT_IN_PANELS,
+    default_panel_registry,
+    parse_panel_bindings,
+)
 from app.hardware.serial_alias import (
     canonical_alias,
     resolve_serial_target,
@@ -164,55 +166,76 @@ def test_things_that_are_not_macs_are_rejected() -> None:
 
 
 # --- 2: the panel mapping ---------------------------------------------------
+#
+# Phase 2C.5 replaced the flat MAC -> name table with `PanelRegistry` (see
+# `tests/test_panel_registry.py` for the registry's own tests). What stays
+# here is the built-in binding of this project's real board, which the
+# hardware header depends on.
+
+
+def panel_name(mac):
+    return default_panel_registry().resolve(mac).display_name
 
 
 def test_the_connected_board_maps_to_its_panel() -> None:
-    assert panel_for(REAL_MAC) == REAL_PANEL
+    assert panel_name(REAL_MAC) == REAL_PANEL
 
 
 def test_panel_lookup_is_case_insensitive() -> None:
-    assert panel_for("20:9B:A9:88:0B:E4") == REAL_PANEL
+    assert panel_name("20:9B:A9:88:0B:E4") == REAL_PANEL
 
 
 def test_an_unmapped_board_has_no_panel_name_rather_than_an_invented_one() -> None:
     """The UI shows the MAC instead. Naming an unknown board would tell a
     student they are sitting at a station they are not."""
-    assert panel_for("aa:bb:cc:dd:ee:ff") is None
+    assert panel_name("aa:bb:cc:dd:ee:ff") is None
 
 
 def test_no_mac_means_no_panel() -> None:
-    assert panel_for(None) is None
-    assert panel_for("") is None
+    assert panel_name(None) is None
+    assert panel_name("") is None
 
 
 def test_the_built_in_table_holds_canonical_keys() -> None:
     """A key that is not canonical could never be matched by a lookup."""
-    for mac in BUILT_IN_PANEL_NAMES:
-        assert normalize_mac(mac) == mac
+    for panel in BUILT_IN_PANELS:
+        for mac in panel.mac_addresses:
+            assert normalize_mac(mac) == mac
 
 
-def test_additional_panels_can_be_configured_without_a_code_change() -> None:
-    """The four unconnected panels get added this way, or by editing the table."""
-    parsed = _parse_overrides(
-        "24:6F:28:AB:CD:EF=ENVIRONMENTAL MONITORING SYSTEM,"
-        "aa:bb:cc:dd:ee:ff=EMERGENCY EXIT LIGHTING SYSTEM"
+def test_additional_modules_can_be_bound_without_a_code_change() -> None:
+    """Replacement/extra ESP32 modules are bound to existing panels by id."""
+    known = [panel.panel_id for panel in BUILT_IN_PANELS]
+    parsed = parse_panel_bindings(
+        "02:00:00:AB:CD:EF=environmental-monitoring,"
+        "02-00-00-00-00-01=emergency-exit-lighting",
+        known,
     )
     assert parsed == {
-        "24:6f:28:ab:cd:ef": "ENVIRONMENTAL MONITORING SYSTEM",
-        "aa:bb:cc:dd:ee:ff": "EMERGENCY EXIT LIGHTING SYSTEM",
+        "02:00:00:ab:cd:ef": "environmental-monitoring",
+        "02:00:00:00:00:01": "emergency-exit-lighting",
     }
 
 
-def test_a_malformed_override_is_skipped_not_fatal() -> None:
+def test_a_malformed_binding_is_skipped_not_fatal() -> None:
     """A typo in an env var must not stop the backend from starting."""
-    assert _parse_overrides("not-a-mac=X,,=Y,aa:bb:cc:dd:ee:ff=") == {}
+    known = [panel.panel_id for panel in BUILT_IN_PANELS]
+    assert (
+        parse_panel_bindings(
+            "not-a-mac=environmental-monitoring,,=x,02:00:00:00:00:01=,"
+            "02:00:00:00:00:02=NO SUCH PANEL",
+            known,
+        )
+        == {}
+    )
 
 
-def test_configured_overrides_win_over_the_built_in_table(
+def test_configured_bindings_win_over_the_built_in_table(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(config, "PANEL_NAMES_RAW", f"{REAL_MAC}=RELABELLED PANEL")
-    assert panel_names()[REAL_MAC] == "RELABELLED PANEL"
+    """Moving this board to another panel is a binding, not a code change."""
+    monkeypatch.setattr(config, "PANEL_MACS_RAW", f"{REAL_MAC}=environmental-monitoring")
+    assert panel_name(REAL_MAC) == "ENVIRONMENTAL MONITORING SYSTEM"
 
 
 # --- 3: the esptool invocation is safe and correct --------------------------

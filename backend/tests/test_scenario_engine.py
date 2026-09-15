@@ -65,10 +65,10 @@ class Terminal:
     # The canonical progression, so tests can reach a stage without repeating
     # the exact command strings everywhere.
     def extract(self) -> CommandResult:
-        return self.run("firmware-extract")
+        return self.run("esptool.py read_flash 0x0 0x400000 firmware.bin")
 
     def analyze(self) -> CommandResult:
-        return self.run("firmware-analyze")
+        return self.run("strings firmware.bin")
 
     def scan(self) -> CommandResult:
         return self.run(f"nmap -p {TARGET_PORT} {TARGET_IP}")
@@ -170,7 +170,7 @@ def test_firmware_extract_sets_only_extraction_flag(term: Terminal) -> None:
 def test_analysis_requires_extraction_first(term: Terminal) -> None:
     result = term.analyze()
     assert result.exit_code != 0
-    assert "firmware-extract" in joined(result)
+    assert "esptool.py" in joined(result)
     # No configuration leaked, no state advanced.
     assert TARGET_TOPIC not in joined(result)
     assert term.snapshot["discovery"]["firmware_analyzed"] is False
@@ -203,9 +203,6 @@ def test_topic_not_revealed_before_analysis(term: Terminal) -> None:
     term.extract()
     # nmap confirms the service but never names the topic.
     assert TARGET_TOPIC not in joined(term.scan())
-    # mqtt-explorer connects but will not enumerate the topic pre-analysis.
-    explorer = term.run(f"mqtt-explorer -h {TARGET_IP}")
-    assert TARGET_TOPIC not in joined(explorer)
     assert term.snapshot["discovery"]["topic_discovered"] is False
 
 
@@ -229,14 +226,14 @@ def test_scan_of_correct_target_finds_mqtt(term: Terminal) -> None:
     assert "open" in text
     assert "mqtt" in text.lower()
     assert result.exit_code == 0
-    assert ScenarioEventType.MQTT_SERVICE_SCANNED.value in term.event_types()
+    assert ScenarioEventType.SCAN.value in term.event_types()
 
 
 def test_scan_of_wrong_host_finds_nothing(term: Terminal) -> None:
     result = term.run("nmap 10.20.30.40")
     assert result.exit_code != 0
     assert "open" not in joined(result)
-    assert ScenarioEventType.MQTT_SERVICE_SCANNED.value not in term.event_types()
+    assert ScenarioEventType.SCAN.value not in term.event_types()
 
 
 def test_scan_of_wrong_port_is_closed(term: Terminal) -> None:
@@ -244,7 +241,7 @@ def test_scan_of_wrong_port_is_closed(term: Terminal) -> None:
     text = joined(result)
     assert "closed" in text
     assert "1883/tcp open" not in text
-    assert ScenarioEventType.MQTT_SERVICE_SCANNED.value not in term.event_types()
+    assert ScenarioEventType.SCAN.value not in term.event_types()
 
 
 def test_scan_requires_a_target(term: Terminal) -> None:
@@ -473,22 +470,42 @@ def test_a_full_run_reaches_success_regardless_of_scan(term: Terminal) -> None:
     assert term.snapshot["completion"]["attack_successful"] is True
 
 
-# --- mqtt-explorer as an alternate observation path -----------------------
+# --- grep: filtered firmware-string search ---------------------------------
 
 
-def test_mqtt_explorer_after_analysis_observes(term: Terminal) -> None:
+def test_grep_finds_matching_strings(term: Terminal) -> None:
     term.extract()
-    term.analyze()
-    result = term.run(f"mqtt-explorer -h {TARGET_IP}")
+    result = term.run("grep MQTT firmware.bin")
     assert result.exit_code == 0
-    assert TARGET_TOPIC in joined(result)
-    assert term.snapshot["discovery"]["mqtt_observed"] is True
+    assert TARGET_TOPIC in joined(result)  # the matched "MQTT topic: ..." line
+    assert term.snapshot["discovery"]["topic_discovered"] is True
 
 
-def test_mqtt_explorer_wrong_host_fails(term: Terminal) -> None:
-    result = term.run("mqtt-explorer -h 10.9.9.9")
+def test_grep_with_no_match_is_silent_and_fails(term: Terminal) -> None:
+    term.extract()
+    result = term.run("grep zzz_no_such_string firmware.bin")
     assert result.exit_code != 0
-    assert term.snapshot["discovery"]["mqtt_observed"] is False
+    assert result.lines == ()
+    # The read still happened, so discovery still completes.
+    assert term.snapshot["discovery"]["firmware_analyzed"] is True
+
+
+def test_grep_is_gated_on_extraction_like_strings(term: Terminal) -> None:
+    result = term.run("grep MQTT firmware.bin")
+    assert result.exit_code != 0
+    assert "esptool.py" in joined(result)
+    assert term.snapshot["discovery"]["firmware_analyzed"] is False
+
+
+def test_grep_does_not_add_extra_events(term: Terminal) -> None:
+    """A search is a read, not a new discovery path — same three events either way."""
+    term.extract()
+    result = term.run("grep MQTT firmware.bin")
+    assert [e.type.value for e in result.events] == [
+        "firmware_analyzed",
+        "broker_discovered",
+        "topic_discovered",
+    ]
 
 
 # --- 19 & 20: no execution primitives in the scenario layer ---------------

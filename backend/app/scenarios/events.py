@@ -33,7 +33,12 @@ class ScenarioEventType(str, Enum):
     FIRMWARE_ANALYZED = "firmware_analyzed"
     BROKER_DISCOVERED = "broker_discovered"
     TOPIC_DISCOVERED = "topic_discovered"
-    MQTT_SERVICE_SCANNED = "mqtt_service_scanned"
+    # Generic on purpose: this is the `nmap` command's one event, kept free
+    # of "MQTT" so a future scenario's own recon action can reuse it without
+    # a service-specific name lying about what it means. What the scan found
+    # (which service, which port) is scenario detail carried in `data`, not
+    # in the type — see `EnvironmentalMonitoringScenario.scan`.
+    SCAN = "scan"
     MQTT_OBSERVED = "mqtt_observed"
     SPOOF_ATTEMPTED = "spoof_attempted"
     SPOOF_REJECTED = "spoof_rejected"

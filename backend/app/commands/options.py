@@ -1,11 +1,11 @@
 """Tiny option reader for the simulated tools' argument lists.
 
-The scenario tools (`nmap`, `mosquitto_sub`, `mosquitto_pub`, `mqtt-explorer`)
+The scenario tools (`nmap`, `mosquitto_sub`, `mosquitto_pub`, `esptool.py`)
 share a small, familiar option grammar: value options like `-h host`,
 `-p 1883`, `-t topic`, `-m payload`, plus bare positional arguments (nmap's
-target host). This turns an already-tokenised argument tuple into
-`(options, positionals, flags)` so each handler can pull out what it needs
-without repeating the walk.
+target host, esptool.py's `read_flash` subcommand). This turns an
+already-tokenised argument tuple into `(options, positionals, flags)` so
+each handler can pull out what it needs without repeating the walk.
 
 This is NOT a general argument parser and does no expansion — the command
 parser has already produced literal tokens. It only groups them. Value

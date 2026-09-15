@@ -19,7 +19,7 @@ path to give them meaning even if it had not.
 from __future__ import annotations
 
 from app import config
-from app.commands.base import CommandContext, CommandResult, CommandSpec
+from app.commands.base import CommandCategory, CommandContext, CommandResult, CommandSpec
 from app.commands.handlers.serial_common import (
     EXIT_FAILURE,
     EXIT_OK,
@@ -80,4 +80,6 @@ async def handle(command: ParsedCommand, context: CommandContext) -> CommandResu
     return CommandResult.text(*lines, exit_code=EXIT_OK)
 
 
-SPEC = CommandSpec(name="serial-send", summary=SUMMARY, handler=handle)
+SPEC = CommandSpec(
+    name="serial-send", summary=SUMMARY, handler=handle, category=CommandCategory.SERIAL
+)

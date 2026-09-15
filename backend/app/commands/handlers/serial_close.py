@@ -11,7 +11,7 @@ unconditionally, so forgetting to run this never leaks a port or a thread.
 
 from __future__ import annotations
 
-from app.commands.base import CommandContext, CommandResult, CommandSpec
+from app.commands.base import CommandCategory, CommandContext, CommandResult, CommandSpec
 from app.commands.handlers.serial_common import EXIT_OK
 from app.commands.parser import ParsedCommand
 
@@ -30,4 +30,6 @@ async def handle(command: ParsedCommand, context: CommandContext) -> CommandResu
     return CommandResult.text(f"serial: closed {address}", exit_code=EXIT_OK)
 
 
-SPEC = CommandSpec(name="serial-close", summary=SUMMARY, handler=handle)
+SPEC = CommandSpec(
+    name="serial-close", summary=SUMMARY, handler=handle, category=CommandCategory.SERIAL
+)

@@ -146,28 +146,45 @@ class EnvironmentalMonitoringScenario(Scenario):
                 "firmware image extracted from target",
             )
 
+        # Styled after real `esptool.py <read_flash>` output — the command
+        # handler (`app/commands/handlers/esptool_py.py`) only validates the
+        # subcommand; what a read actually returns is scenario data.
         lines = [
-            "[firmware-extract] Attaching to target over the simulated debug interface...",
-            "[firmware-extract] Reading flash 0x00000000 - 0x00400000 ................ done",
-            "[firmware-extract] Firmware image written to firmware.bin (4194304 bytes).",
+            "esptool.py v4.7.0",
+            "Connecting....",
+            "Chip is ESP32-D0WDQ6 (revision v1.0)",
+            "Uploading stub...",
+            "Running stub...",
+            "Stub running...",
+            "Reading 4194304 bytes at 0x00000000 in flash (4194304 remaining)...",
+            "Read 4194304 bytes at 0x00000000 in 41.9 seconds (800.7 kbit/s)...",
+            "Hard resetting via RTS pin...",
         ]
         if not first_time:
-            lines.append(
-                "[firmware-extract] Firmware already extracted; reusing firmware.bin."
-            )
+            lines.append("firmware.bin already exists locally; overwriting.")
         return ScenarioOutcome.ok(*lines, events=tuple(bucket))
 
     # -- interface: stage 2, firmware analysis -----------------------------
 
-    def analyze_firmware(self) -> ScenarioOutcome:
+    def analyze_firmware(self, search: str | None = None) -> ScenarioOutcome:
+        """Back the `strings` (bare) and `grep <pattern>` (Phase 2C) commands.
+
+        `search=None` is `strings firmware.bin`: every printable string in
+        the image, unfiltered, in the order `_firmware_strings()` returns
+        them. A `search` term is `grep <pattern> firmware.bin`: only the
+        matching lines, nothing else — silent with a non-zero exit if
+        nothing matches, exactly like real `grep`. Discovery only requires
+        the image to have been *read*, not searched a particular way, so
+        both commands complete the same discovery flags on first use.
+        """
         bucket: list[ScenarioEvent] = []
         discovery = self._state.discovery
         target = self._state.target
 
         if not discovery.firmware_extracted:
             return ScenarioOutcome.failed(
-                "[firmware-analyze] No firmware image found.",
-                "[firmware-analyze] Run 'firmware-extract' first to obtain firmware.bin.",
+                "firmware.bin: No such file or directory",
+                "Run 'esptool.py read_flash 0x0 0x400000 firmware.bin' first to obtain it.",
             )
 
         first_time = not discovery.firmware_analyzed
@@ -198,16 +215,41 @@ class EnvironmentalMonitoringScenario(Scenario):
         # spoofed out of order), analysis is what completes the chain.
         self._recompute_completion(bucket)
 
-        lines = [
-            "[firmware-analyze] Extracting printable strings from firmware.bin...",
-            "[firmware-analyze] Device    : Environmental Monitor (ESP32 + BME280)",
-            "[firmware-analyze] Sensors   : temperature, humidity, pressure",
-            f"[firmware-analyze] MQTT host : {target.ip_address}",
-            f"[firmware-analyze] MQTT port : {target.mqtt_port}",
-            f"[firmware-analyze] MQTT topic: {target.mqtt_topic}",
-            "[firmware-analyze] Note: incoming values on this topic are applied without validation.",
-        ]
-        return ScenarioOutcome.ok(*lines, events=tuple(bucket))
+        strings_found = self._firmware_strings()
+
+        if search is None:
+            return ScenarioOutcome.ok(*strings_found, events=tuple(bucket))
+
+        matches = tuple(s for s in strings_found if search.lower() in s.lower())
+        if not matches:
+            # Real grep prints nothing and exits 1 when nothing matches.
+            return ScenarioOutcome.failed(events=tuple(bucket))
+        return ScenarioOutcome.ok(*matches, events=tuple(bucket))
+
+    def _firmware_strings(self) -> tuple[str, ...]:
+        """Printable strings a `strings(1)`-style pass over firmware.bin would show.
+
+        Scenario-owned content for the `strings`/`grep` commands — see
+        `Scenario.analyze_firmware`. The generic engine never reads this
+        method or its return value directly; only this scenario's own
+        `analyze_firmware` does. A different scenario supplies its own table,
+        or none at all, without this class or the handler changing.
+
+        Computed from live target state rather than a module-level constant
+        so it cannot drift from the unconditional analysis output above if
+        `TargetInfo`'s defaults ever change.
+        """
+        target = self._state.target
+        return (
+            "ESP32-WROOM-32 / Environmental Monitor firmware v1.4.2",
+            "BME280 sensor driver v1.2 initialized",
+            "WiFi: connecting to configured SSID...",
+            "MQTT client library v1.6",
+            f"MQTT broker: {target.ip_address}:{target.mqtt_port}",
+            f"MQTT topic: {target.mqtt_topic}",
+            "WARNING: telemetry topic accepts unauthenticated publishes",
+            "DEBUG: OTA update endpoint disabled in this build",
+        )
 
     # -- interface: stage 3, network reconnaissance ------------------------
 
@@ -242,7 +284,7 @@ class EnvironmentalMonitoringScenario(Scenario):
 
         self._emit(
             bucket,
-            ScenarioEventType.MQTT_SERVICE_SCANNED,
+            ScenarioEventType.SCAN,
             "MQTT service confirmed reachable by scan",
             ip_address=target.ip_address,
             mqtt_port=target.mqtt_port,
@@ -409,58 +451,6 @@ class EnvironmentalMonitoringScenario(Scenario):
             published,
             f"Target accepted the manipulated data: reported temperature is now {spoofed}°C.",
             "Humidity and pressure are unchanged.",
-            events=tuple(bucket),
-        )
-
-    # -- interface: MQTT explorer (visual observation) ---------------------
-
-    def explore(self, host: str | None, port: int | None) -> ScenarioOutcome:
-        bucket: list[ScenarioEvent] = []
-        target = self._state.target
-        discovery = self._state.discovery
-
-        if host is None:
-            return ScenarioOutcome.usage(
-                "mqtt-explorer: a broker host is required.",
-                "Usage: mqtt-explorer -h <host> [-p <port>]",
-            )
-
-        if not self._reaches_broker(host, port):
-            shown_port = port if port is not None else target.mqtt_port
-            return ScenarioOutcome.failed(
-                f"mqtt-explorer: unable to connect to {_short(host)}:{shown_port}."
-            )
-
-        header = [
-            f"mqtt-explorer: connected to {target.ip_address}:{target.mqtt_port}.",
-        ]
-
-        # The topic is only visible here once it has been recovered from the
-        # firmware. The broker does not advertise a directory of topics, so
-        # the explorer cannot hand the student the topic before analysis.
-        if not discovery.topic_discovered:
-            return ScenarioOutcome.ok(
-                *header,
-                "No active topics are advertised by the broker.",
-                "Recover the device's topic from its firmware, then observe it.",
-            )
-
-        first_time = not discovery.mqtt_observed
-        discovery.mqtt_observed = True
-        if first_time:
-            self._emit(
-                bucket,
-                ScenarioEventType.MQTT_OBSERVED,
-                "telemetry observed via mqtt-explorer",
-                mqtt_topic=target.mqtt_topic,
-            )
-        self._recompute_completion(bucket)
-
-        return ScenarioOutcome.ok(
-            *header,
-            "Topic tree:",
-            f"  {target.mqtt_topic}",
-            f"    last payload: {self._telemetry()}",
             events=tuple(bucket),
         )
 

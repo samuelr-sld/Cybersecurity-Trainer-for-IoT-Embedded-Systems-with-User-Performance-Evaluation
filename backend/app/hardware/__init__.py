@@ -31,10 +31,19 @@ declaring a parallel one.
 Module map:
 
     state.py    `DeviceState` / `DeviceStatus` — passive, dependency-free.
+    mac.py      `normalize_mac` — the one canonical MAC spelling. Pure.
     identity.py `IdentityProbe` / `EsptoolIdentityProbe` — reads the ESP32's
                 MAC with the esptool the ESP32 Arduino core already ships.
-    panels.py   MAC -> training-panel name. One table, so both modes name
-                the same board identically.
+    panels.py   `PanelDefinition` / `PanelRegistry` — MAC -> registered
+                training panel. Pure data and lookup, no hardware I/O. One
+                registry, so both modes name the same board identically.
+    firmware.py `FirmwareConfiguration` — the firmware resources a panel
+                references (source, board, compilation, flashing, serial).
+                A reference only: nothing here builds or flashes.
+    panel_identification.py
+                `PanelIdentificationService` — joins the monitor's MAC to
+                the registry: connected ESP32 -> PanelDefinition or an
+                explicit unregistered/unidentified answer. Triggers nothing.
     serial_alias.py
                 The canonical Linux/training serial path (`/dev/ttyUSB0`)
                 the courseware speaks, plus `resolve_serial_target` — the
@@ -70,8 +79,32 @@ from app.hardware.identity import (
     default_identity_probe,
     normalize_mac,
 )
+from app.hardware.firmware import (
+    BoardConfiguration,
+    CompilationSettings,
+    FirmwareConfiguration,
+    FirmwareSource,
+    FirmwareSourceKind,
+    FlashSettings,
+    SerialSettings,
+)
 from app.hardware.monitor import DeviceDetector, DeviceMonitor, device_monitor
-from app.hardware.panels import panel_for, panel_names
+from app.hardware.panel_identification import (
+    PanelIdentification,
+    PanelIdentificationService,
+    PanelIdentificationStatus,
+    identify_panel,
+    panel_identification_service,
+)
+from app.hardware.panels import (
+    BUILT_IN_PANELS,
+    PanelDefinition,
+    PanelMatch,
+    PanelRegistry,
+    PanelResolution,
+    default_panel_registry,
+    parse_panel_bindings,
+)
 from app.hardware.serial_alias import (
     canonical_alias,
     resolve_serial_target,
@@ -90,6 +123,25 @@ from app.hardware.serial_transport import (
 from app.hardware.state import DeviceState, DeviceStatus
 
 __all__ = [
+    "BUILT_IN_PANELS",
+    "BoardConfiguration",
+    "CompilationSettings",
+    "FirmwareConfiguration",
+    "FirmwareSource",
+    "FirmwareSourceKind",
+    "FlashSettings",
+    "PanelDefinition",
+    "PanelIdentification",
+    "PanelIdentificationService",
+    "PanelIdentificationStatus",
+    "PanelMatch",
+    "PanelRegistry",
+    "PanelResolution",
+    "SerialSettings",
+    "default_panel_registry",
+    "identify_panel",
+    "panel_identification_service",
+    "parse_panel_bindings",
     "DeviceDetector",
     "DeviceMonitor",
     "DeviceState",
@@ -112,8 +164,6 @@ __all__ = [
     "device_monitor",
     "normalize_mac",
     "open_pyserial_port",
-    "panel_for",
-    "panel_names",
     "resolve_serial_target",
     "serial_representations",
 ]

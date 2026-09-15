@@ -5,12 +5,14 @@ connection. Sessions are isolated: nothing is shared between connections, and
 a disconnect removes the session entirely.
 
 A session records who it is, when it started, the terminal geometry the
-client reported, its own `Scenario`, and — since Phase 2A — its own
-`SerialTransport` for real I/O with the attached ESP32. The scenario is
-the per-session simulated target: creating it via a `default_factory` means
-every session gets an independent instance, so no two sessions can observe or
-mutate each other's scenario state. Command history, evaluation metrics, and
-durable storage still belong to later phases.
+client reported, its own `Scenario`, its own `SerialTransport` for real I/O
+with the attached ESP32 (Phase 2A), and — since Phase 2B — its own
+`HackEventRecorder`. The scenario is the per-session simulated target:
+creating it via a `default_factory` means every session gets an independent
+instance, so no two sessions can observe or mutate each other's scenario
+state. The recorder follows the same rule for the same reason, and is what
+finally makes a session's activity durable. Evaluation metrics still belong
+to Phase 2E.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app import config
+from app.events import HackEventRecorder
 from app.hardware import SerialTransport
 from app.scenarios import Scenario, create_default_scenario
 
@@ -50,6 +53,23 @@ class HackSession:
     #: `app/websocket.py` closes it unconditionally on disconnect, so no
     #: reader thread or open port outlives the connection that made it.
     serial: SerialTransport = field(default_factory=SerialTransport)
+    #: This session's own event recorder (Phase 2B). Built in `__post_init__`
+    #: rather than by a `default_factory`, because unlike the scenario and the
+    #: transport it is not independent of the session: it needs this
+    #: session's id, this session's scenario id, and this session's
+    #: `created_at` as the timeline anchor Phase 2E measures TTE from.
+    #:
+    #: Constructing it performs no I/O and opens no database — the store is
+    #: resolved lazily on the first write (see `app/events/recorder.py`), so
+    #: a `HackSession` built in a test is as cheap as it was before.
+    recorder: HackEventRecorder = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.recorder = HackEventRecorder(
+            session_id=self.session_id,
+            scenario_id=self.scenario.scenario_id,
+            started_at=self.created_at,
+        )
 
     def resize(self, cols: int, rows: int) -> None:
         """Record the client's terminal geometry.
@@ -73,8 +93,16 @@ class SessionManager:
         self._lock = asyncio.Lock()
 
     async def create(self) -> HackSession:
-        """Create and register a session with a fresh unique id."""
+        """Create and register a session with a fresh unique id.
+
+        The event log is opened here, at connect, rather than when the first
+        command arrives: `started_at` is the interval Phase 2E's TTE is
+        measured over, so it must mean "entered Hack Mode", not "got as far
+        as typing something". A session that ends without a single command
+        is still a session that happened, and the log says so.
+        """
         session = HackSession(session_id=str(uuid.uuid4()))
+        session.recorder.start()
         async with self._lock:
             self._sessions[session.session_id] = session
         return session

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.commands.base import (
+    CommandCategory,
     CommandContext,
     CommandResult,
     CommandSpec,
@@ -24,4 +25,4 @@ def handle(command: ParsedCommand, context: CommandContext) -> CommandResult:
     return CommandResult.act(TerminalAction.CLEAR)
 
 
-SPEC = CommandSpec(name="clear", summary=SUMMARY, handler=handle)
+SPEC = CommandSpec(name="clear", summary=SUMMARY, handler=handle, category=CommandCategory.TRAINER)

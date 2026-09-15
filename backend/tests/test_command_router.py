@@ -8,6 +8,7 @@ line is matched against a table of simulated tools and is never executed.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import pathlib
 import tokenize
 
@@ -52,18 +53,21 @@ def run(router: CommandRouter, line: str, context: CommandContext) -> CommandRes
 
 # --- 1-6: every registered command is recognised --------------------------
 
-# The closed command set. Phase 2C added the two firmware commands the
-# scenario needs; the network/MQTT tools carried over from Phase 2B, though
-# their behaviour is now scenario-driven rather than stubbed.
+# The closed command set. Phase 2C finalized the toolbox on real-tool
+# semantics: `esptool.py`/`strings`/`grep` back the firmware stage instead of
+# the earlier `firmware-extract`/`firmware-analyze` placeholders, and
+# `mqtt-explorer` (not a real tool) was removed outright. The network/MQTT
+# tools carried over from Phase 2B, though their behaviour is now
+# scenario-driven rather than stubbed.
 REGISTERED = (
     "help",
     "clear",
+    "esptool.py",
+    "strings",
+    "grep",
     "nmap",
     "mosquitto_sub",
     "mosquitto_pub",
-    "mqtt-explorer",
-    "firmware-extract",
-    "firmware-analyze",
     # Phase 2A: the physical serial commands. Listed here like any other
     # command, because they resolve through the same closed allowlist —
     # touching real hardware buys them no separate dispatch path.
@@ -71,6 +75,8 @@ REGISTERED = (
     "serial-monitor",
     "serial-send",
     "serial-close",
+    # Phase 2C: the trainer-utility side of the generic toolbox.
+    "history",
 )
 
 
@@ -137,7 +143,7 @@ def test_clear_returns_a_terminal_action_not_blank_lines(
     [
         "nmap 192.168.10.10",
         "mosquitto_sub -h 192.168.10.10 -t sensors/bme280/telemetry",
-        "firmware-extract",
+        "esptool.py read_flash 0x0 0x400000 firmware.bin",
     ],
 )
 def test_tool_commands_are_scenario_driven_not_stubs(
@@ -444,12 +450,41 @@ def test_results_are_deterministic_across_fresh_sessions(line: str) -> None:
     # Same command from the same *starting* state gives the same result.
     # Fresh sessions are used because scenario commands are stateful (running
     # the same command twice on one session can legitimately differ, e.g.
-    # firmware-extract then "already extracted"); determinism is a property of
+    # esptool.py read_flash then "firmware.bin already exists"); determinism is a property of
     # equal starting state, which independent fresh sessions guarantee.
+    #
+    # `records` is excluded, and must be: since Phase 2B a result carries the
+    # event-log rows the dispatch just wrote, and those legitimately differ
+    # between two sessions — different session ids, different timestamps.
+    # That is the point of a session-scoped log, not a determinism failure.
+    # Everything the student can actually see (lines, actions, exit code) and
+    # the scenario events themselves are still compared exactly.
     router = CommandRouter(build_default_registry())
     first = CommandContext(session=HackSession(session_id="a"))
     second = CommandContext(session=HackSession(session_id="b"))
-    assert run(router, line, first) == run(router, line, second)
+    first_result = run(router, line, first)
+    second_result = run(router, line, second)
+    assert replace(first_result, records=()) == replace(second_result, records=())
+
+
+@pytest.mark.parametrize("line", [*REGISTERED, "foo", "nmap -p 1883 192.168.4.1"])
+def test_recorded_rows_belong_to_the_session_that_ran_the_command(line: str) -> None:
+    """The flip side of the determinism test above: rows are NOT shared.
+
+    Identical input on two sessions must produce identical output and two
+    separate, correctly-attributed log entries.
+    """
+    router = CommandRouter(build_default_registry())
+    first = CommandContext(session=HackSession(session_id="a"))
+    second = CommandContext(session=HackSession(session_id="b"))
+    run(router, line, first)
+    run(router, line, second)
+
+    for session_id, context in (("a", first), ("b", second)):
+        recorder = context.session.recorder
+        assert recorder.commands, f"{line!r} recorded no command for {session_id}"
+        assert {record.session_id for record in recorder.commands} == {session_id}
+        assert {record.session_id for record in recorder.events} <= {session_id}
 
 
 # --- 15: session isolation ------------------------------------------------

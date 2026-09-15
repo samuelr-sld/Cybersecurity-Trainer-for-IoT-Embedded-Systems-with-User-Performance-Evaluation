@@ -16,7 +16,7 @@ There is no process, no interpreter, and no filesystem path involved.
 
 from __future__ import annotations
 
-from app.commands.base import CommandContext, CommandResult, CommandSpec
+from app.commands.base import CommandCategory, CommandContext, CommandResult, CommandSpec
 from app.commands.handlers.serial_common import (
     EXIT_FAILURE,
     EXIT_OK,
@@ -62,4 +62,6 @@ async def handle(command: ParsedCommand, context: CommandContext) -> CommandResu
     )
 
 
-SPEC = CommandSpec(name="serial-monitor", summary=SUMMARY, handler=handle)
+SPEC = CommandSpec(
+    name="serial-monitor", summary=SUMMARY, handler=handle, category=CommandCategory.SERIAL
+)

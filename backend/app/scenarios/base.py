@@ -91,11 +91,23 @@ class Scenario(ABC):
 
     @abstractmethod
     def extract_firmware(self) -> ScenarioOutcome:
-        """Simulated authorized firmware extraction (Stage 1)."""
+        """Simulated authorized firmware read (Stage 1) — `esptool.py read_flash`."""
 
     @abstractmethod
-    def analyze_firmware(self) -> ScenarioOutcome:
-        """Analyze extracted firmware, revealing MQTT config (Stage 2)."""
+    def analyze_firmware(self, search: str | None = None) -> ScenarioOutcome:
+        """Analyze extracted firmware, revealing its configuration (Stage 2).
+
+        Backs two real-tool command surfaces (Phase 2C): `strings` calls
+        this with `search=None` for an unfiltered dump of every printable
+        string; `grep <pattern>` calls it with the student's pattern for a
+        filtered one. Neither handler interprets the strings themselves —
+        WHICH strings exist, and whether any of them are meaningful, is
+        entirely scenario data (see `EnvironmentalMonitoringScenario`'s own
+        string table); this interface only guarantees every scenario can
+        answer the same generic question. `None` performs the same
+        unconditional configuration-recovery analysis this method has always
+        performed, unchanged.
+        """
 
     @abstractmethod
     def scan(self, host: str | None, port: int | None) -> ScenarioOutcome:
@@ -116,10 +128,6 @@ class Scenario(ABC):
         message: str | None,
     ) -> ScenarioOutcome:
         """Simulated mosquitto_pub — the spoofing attack (Stages 5-6)."""
-
-    @abstractmethod
-    def explore(self, host: str | None, port: int | None) -> ScenarioOutcome:
-        """Simulated mqtt-explorer topic browse / visual observation."""
 
     @abstractmethod
     def snapshot(self) -> dict[str, Any]:

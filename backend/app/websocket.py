@@ -91,6 +91,7 @@ from pydantic import ValidationError
 
 from app import config
 from app.commands import CommandContext, CommandResult, default_router
+from app.events import to_iso
 from app.hardware import (
     SerialEventKind,
     SerialTextDecoder,
@@ -196,8 +197,25 @@ def _render(result: CommandResult, scenario: "Scenario") -> list[ServerMessage]:
         frames.append(
             OutputMessage(data="".join(line + LINE_ENDING for line in result.lines))
         )
-    for event in result.events:
-        frames.append(EventMessage(event=event.type.value, data=dict(event.data)))
+    # PHASE 2B: built from `result.records` — the rows the recorder just
+    # wrote — rather than from the raw `result.events`. Same events in the
+    # same order, but each now carries the server timestamp and sequence
+    # number the durable log holds, so the Activity Log on screen and the
+    # evidence in the database are literally the same rows. `records` is
+    # empty only for a result that never went through the router, so
+    # `events` remains the fallback and no event can be dropped.
+    for record in result.records:
+        frames.append(
+            EventMessage(
+                event=record.event_type,
+                data=dict(record.data),
+                occurred_at=to_iso(record.occurred_at),
+                sequence=record.sequence,
+            )
+        )
+    if not result.records:
+        for event in result.events:
+            frames.append(EventMessage(event=event.type.value, data=dict(event.data)))
     if result.events:
         frames.append(StateMessage(data=scenario.snapshot()))
     return frames
@@ -408,13 +426,17 @@ async def hack_websocket(websocket: WebSocket) -> None:
         # session at all: both leaked on every real disconnect, and the held
         # port then blocked Build Mode from flashing that board.
         #
-        # So teardown is three synchronous calls that cannot be interrupted.
+        # So teardown is four synchronous calls that cannot be interrupted.
         # `pump.cancel()` only requests cancellation (the task ends on the
         # next loop pass, writing nothing — `_Channel.send` absorbs a closed
-        # socket), `release()` closes the port inline, and `discard()`
-        # drops the registry entry without taking the async lock. See
-        # `SerialTransport.release` and `SessionManager.discard`.
+        # socket), `release()` closes the port inline, `recorder.finish()`
+        # stamps the session's end time with one SQLite UPDATE, and
+        # `discard()` drops the registry entry without taking the async
+        # lock. See `SerialTransport.release`, `HackEventRecorder.finish`
+        # and `SessionManager.discard` — all three are documented as
+        # await-free precisely because of this block.
         pump.cancel()
         session.serial.release()
+        session.recorder.finish()
         session_manager.discard(session.session_id)
         logger.info("hack session closed: %s", session.session_id)

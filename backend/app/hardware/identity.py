@@ -57,6 +57,10 @@ from typing import Any, Protocol
 
 from app import config
 
+# Re-exported: the pure spelling rule lives in `mac.py` so the panel
+# registry can use it without importing this I/O module.
+from app.hardware.mac import normalize_mac  # noqa: F401
+
 #: `esptool read_mac` prints the address as `MAC: xx:xx:xx:xx:xx:xx`. v5
 #: prints it twice (once from the ROM handshake, once as the command's own
 #: result); both are the same value, so the first match is taken.
@@ -132,19 +136,6 @@ class IdentityProbe(Protocol):
     """What the shared layer needs to learn a board's physical identity."""
 
     async def read_mac(self, request: IdentityRequest) -> IdentityOutcome: ...
-
-
-def normalize_mac(raw: str) -> str | None:
-    """Canonical lower-case colon form, or None if this is not a MAC.
-
-    One spelling everywhere — the panel mapping, the wire, and the UI all
-    use it — so a lookup can never miss because the CLI changed case or
-    separator. Accepts the `-` separated spelling some tools emit.
-    """
-    candidate = raw.strip().replace("-", ":").lower()
-    if re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", candidate):
-        return candidate
-    return None
 
 
 def parse_mac(payload: str) -> str | None:

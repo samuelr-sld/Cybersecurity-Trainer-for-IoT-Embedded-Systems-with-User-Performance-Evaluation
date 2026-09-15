@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from app import config
 from app.hardware.identity import IdentityProbe, IdentityRequest, default_identity_probe
-from app.hardware.panels import panel_for
+from app.hardware.panels import PanelRegistry, default_panel_registry
 from app.hardware.serial_alias import serial_representations
 from app.hardware.state import DeviceState, DeviceStatus
 
@@ -129,8 +129,12 @@ class DeviceMonitor:
         timeout_seconds: float = config.BUILD_DEVICE_DETECT_TIMEOUT_SECONDS,
         identity_probe: IdentityProbe | None = None,
         identity_timeout_seconds: float = config.HARDWARE_IDENTITY_TIMEOUT_SECONDS,
+        panel_registry: PanelRegistry | None = None,
     ) -> None:
         self._detector = detector
+        #: None means `default_panel_registry()`, built at lookup time so a
+        #: configured `TRAINER_PANEL_MACS` binding is always honoured.
+        self._panel_registry = panel_registry
         self._target_fqbn = target_fqbn
         self._cache_seconds = cache_seconds
         self._timeout_seconds = timeout_seconds
@@ -165,6 +169,18 @@ class DeviceMonitor:
     def target_fqbn(self) -> str:
         """The platform's default board target, used when a caller names none."""
         return self._target_fqbn
+
+    @property
+    def panel_registry(self) -> PanelRegistry:
+        """The registry this monitor names panels with.
+
+        Exposed so `PanelIdentificationService` resolves full definitions
+        against the very registry that produced `DeviceState.panel`, and the
+        header's panel name and the service's answer cannot disagree.
+        """
+        if self._panel_registry is not None:
+            return self._panel_registry
+        return default_panel_registry()
 
     # --- writing -----------------------------------------------------------
 
@@ -245,7 +261,9 @@ class DeviceMonitor:
         if state.connected and state.port:
             mac = self._mac_by_port.get(state.port)
             if mac is not None:
-                state = replace(state, mac=mac, panel=panel_for(mac))
+                state = replace(
+                    state, mac=mac, panel=self.panel_registry.resolve(mac).display_name
+                )
         else:
             self._mac_by_port.clear()
         self._state = state
@@ -324,7 +342,9 @@ class DeviceMonitor:
             if self._state.port != port:
                 return self._state
 
-        identified = replace(state, mac=mac, panel=panel_for(mac))
+        identified = replace(
+            state, mac=mac, panel=self.panel_registry.resolve(mac).display_name
+        )
         self._state = identified
         return identified
 

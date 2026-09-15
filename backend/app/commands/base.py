@@ -23,6 +23,7 @@ from app.commands.parser import ParsedCommand
 from app.sessions import HackSession
 
 if TYPE_CHECKING:  # pragma: no cover
+    from app.events import HackEventRecord
     from app.scenarios import Scenario
     from app.scenarios.events import ScenarioEvent
 
@@ -44,6 +45,33 @@ class TerminalAction(str, Enum):
     CLEAR = "clear"
 
 
+class CommandCategory(str, Enum):
+    """The toolbox section a registered command belongs to — Phase 2C.
+
+    Purely organisational metadata on `CommandSpec`: `help` groups its
+    listing by category (see `app/commands/handlers/help.py`), and a future
+    frontend could do the same. Nothing in the router or in any handler
+    branches on this value — it carries no permission, no validation, and no
+    behavioural meaning, which is what keeps it safe to add without touching
+    dispatch. It is the "category" column the Phase 2C command registry asks
+    for; "aliases" and a declarative "argument specification" are not added
+    alongside it because nothing in this sandbox currently needs either —
+    every command has exactly one name, and each handler already validates
+    its own arguments and returns `ScenarioOutcome.usage(...)`/`EXIT_USAGE`
+    for a bad one, which is what the test suite already exercises.
+
+    The five members mirror the five boxes of the generic Hack Engine this
+    phase formalises (firmware / network / mqtt / serial) plus the trainer
+    utilities that are not tools against a target at all.
+    """
+
+    FIRMWARE = "firmware"
+    NETWORK = "network"
+    MQTT = "mqtt"
+    SERIAL = "serial"
+    TRAINER = "trainer"
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """What a handler produced.
@@ -61,12 +89,24 @@ class CommandResult:
     `app.commands.scenario_adapter.to_command_result`. The router does not
     interpret them; the transport turns them into `event` (and, when present,
     `state`) frames — see `app/websocket.py`.
+
+    `records` is those same events after the Phase 2B recorder has stamped
+    them: same events, same order, one `HackEventRecord` each, now carrying a
+    server-generated timestamp, a per-session sequence number, and the
+    session they belong to. HANDLERS NEVER SET IT — it is filled in by
+    `CommandRouter.dispatch` on the way out, which is the only place that
+    knows both the command's identity and the session's recorder. The
+    transport renders `event` frames from these rather than from `events`,
+    so what the terminal shows and what the database holds are the same rows.
+    An empty tuple alongside a non-empty `events` means the result never went
+    through the router (a handler called directly in a test).
     """
 
     lines: tuple[str, ...] = ()
     actions: tuple[TerminalAction, ...] = ()
     exit_code: int = 0
     events: tuple["ScenarioEvent", ...] = ()
+    records: tuple["HackEventRecord", ...] = ()
 
     @classmethod
     def text(cls, *lines: str, exit_code: int = 0) -> CommandResult:
@@ -141,13 +181,16 @@ class CommandSpec:
     """A registered command: its name, its one-line help, its handler.
 
     `name` is the exact token a student types, so it may contain characters
-    that are illegal in a Python identifier (`mqtt-explorer`). The module
+    that are illegal in a Python identifier (`esptool.py`). The module
     filename and the command name are therefore independent.
+
+    `category` (Phase 2C) is display metadata only — see `CommandCategory`.
     """
 
     name: str
     summary: str
     handler: HandlerFunction
+    category: CommandCategory = CommandCategory.TRAINER
 
     def __post_init__(self) -> None:
         if not self.name:

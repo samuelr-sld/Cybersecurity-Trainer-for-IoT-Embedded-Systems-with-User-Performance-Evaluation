@@ -29,6 +29,7 @@ no backend-side echo state, key handling, or line discipline here.
 """
 
 from app.commands.base import (
+    CommandCategory,
     CommandContext,
     CommandResult,
     CommandSpec,
@@ -40,6 +41,7 @@ from app.commands.registry import CommandRegistry, build_default_registry, defau
 from app.commands.router import CommandRouter, default_router
 
 __all__ = [
+    "CommandCategory",
     "CommandContext",
     "CommandRegistry",
     "CommandResult",

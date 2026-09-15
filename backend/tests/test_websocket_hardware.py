@@ -410,7 +410,9 @@ def test_the_simulated_hack_engine_still_works_alongside_hardware_polling(
         _open_session(ws)
         _hardware_status(ws)
 
-        ws.send_json({"type": "input", "data": "firmware-extract"})
+        ws.send_json(
+            {"type": "input", "data": "esptool.py read_flash 0x0 0x400000 firmware.bin"}
+        )
         output = ws.receive_json()
         assert output["type"] == "output"
 

@@ -7,7 +7,7 @@ This handler only turns the student's arguments into a scan request.
 
 from __future__ import annotations
 
-from app.commands.base import CommandContext, CommandResult, CommandSpec
+from app.commands.base import CommandCategory, CommandContext, CommandResult, CommandSpec
 from app.commands.options import parse_options, to_port
 from app.commands.parser import ParsedCommand
 from app.commands.scenario_adapter import to_command_result
@@ -22,4 +22,4 @@ def handle(command: ParsedCommand, context: CommandContext) -> CommandResult:
     return to_command_result(context.scenario.scan(host, port))
 
 
-SPEC = CommandSpec(name="nmap", summary=SUMMARY, handler=handle)
+SPEC = CommandSpec(name="nmap", summary=SUMMARY, handler=handle, category=CommandCategory.NETWORK)

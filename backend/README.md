@@ -122,9 +122,8 @@ An invalid frame produces an `error` frame; the connection stays open.
 
 ### Scenario event/state delivery
 
-Commands that act on the scenario (`firmware-extract`, `firmware-analyze`,
-`nmap`, `mosquitto_sub`, `mosquitto_pub`, `mqtt-explorer`) can cause the
-scenario to record domain events — see `app/scenarios/events.py` for the
+Commands that act on the scenario (`esptool.py`, `strings`, `grep`, `nmap`,
+`mosquitto_sub`, `mosquitto_pub`) can cause the scenario to record domain events — see `app/scenarios/events.py` for the
 event vocabulary (`firmware_extracted`, `broker_discovered`,
 `spoof_succeeded`, `attack_completed`, and so on). When a command does, the
 WebSocket layer sends one `event` frame per event, in the order the scenario
@@ -147,14 +146,16 @@ knows that a `CommandResult` may carry `events`, forwarded unchanged from
 
 The router recognises a closed set of commands and nothing else:
 
-| Command         | Phase 2B behaviour                                    |
-| --------------- | ----------------------------------------------------- |
-| `help`          | Lists the registered commands.                         |
-| `clear`         | Returns a `clear` terminal action.                     |
-| `nmap`          | Deterministic stub; scenario results land in Phase 2C. |
-| `mosquitto_sub` | Deterministic stub; scenario data lands in Phase 2C.   |
-| `mosquitto_pub` | Deterministic stub; scenario behaviour lands in 2C.    |
-| `mqtt-explorer` | Deterministic stub; scenario data lands in Phase 2C.   |
+| Command         | Behaviour                                                        |
+| --------------- | ------------------------------------------------------------------ |
+| `help`          | Lists the registered commands.                                     |
+| `clear`         | Returns a `clear` terminal action.                                 |
+| `esptool.py`    | `read_flash` reads the target's firmware (Phase 2C real-tool set). |
+| `strings`       | Dumps the printable strings in a firmware image.                   |
+| `grep`          | Searches a firmware image's strings for a pattern.                 |
+| `nmap`          | Scans a host; scenario decides what's reachable.                   |
+| `mosquitto_sub` | Subscribes to an MQTT topic; scenario decides what's observed.     |
+| `mosquitto_pub` | Publishes to an MQTT topic; scenario decides the effect.           |
 
 The pipeline, and the module owning each step:
 
@@ -211,22 +212,24 @@ protocol, or the terminal.
 Each stage is gated by the specific scenario facts it needs, not by a global
 counter, so out-of-order attempts behave deterministically:
 
-| Stage | Command                                             | Effect                                              |
-| ----- | --------------------------------------------------- | --------------------------------------------------- |
-| 0     | *(initial)*                                         | Target online: 28 °C, 65 %, 1008 hPa.               |
-| 1     | `firmware-extract`                                  | Obtains a firmware image (`firmware_extracted`).    |
-| 2     | `firmware-analyze`                                  | Recovers broker IP, port, and topic from firmware.  |
-| 3     | `nmap -p 1883 <ip>`                                 | Confirms the MQTT service is reachable.             |
-| 4     | `mosquitto_sub -h <ip> -t <topic>`                  | Observes legitimate telemetry (`mqtt_observed`).    |
-| 5-6   | `mosquitto_pub -h <ip> -t <topic> -m temperature=150` | Spoofs the reading; the target adopts it.         |
-| 7     | *(all of the above)*                                | Objective complete (`attack_successful`).           |
+| Stage | Command                                                        | Effect                                              |
+| ----- | --------------------------------------------------------------- | --------------------------------------------------- |
+| 0     | *(initial)*                                                     | Target online: 28 °C, 65 %, 1008 hPa.               |
+| 1     | `esptool.py read_flash 0x0 0x400000 firmware.bin`                | Obtains a firmware image (`firmware_extracted`).    |
+| 2     | `strings firmware.bin` (or `grep <pattern> firmware.bin`)        | Recovers broker IP, port, and topic from firmware.  |
+| 3     | `nmap -p 1883 <ip>`                                              | Confirms the MQTT service is reachable.             |
+| 4     | `mosquitto_sub -h <ip> -t <topic>`                               | Observes legitimate telemetry (`mqtt_observed`).    |
+| 5-6   | `mosquitto_pub -h <ip> -t <topic> -m temperature=150`             | Spoofs the reading; the target adopts it.         |
+| 7     | *(all of the above)*                                             | Objective complete (`attack_successful`).           |
 
-`firmware-extract` / `firmware-analyze` are the two commands Phase 2C added:
-the Phase 2B tool set could not represent obtaining and analysing firmware
-without overloading an unrelated tool. Analysis is what reveals the MQTT
-topic, so the topic is never handed out before the student does the work —
-`nmap` confirms the service but never names the topic, and `mqtt-explorer`
-will not enumerate it pre-analysis.
+`esptool.py read_flash` / `strings` / `grep` are the real-tool trio Phase 2C
+finalized on: the earlier placeholder `firmware-extract` / `firmware-analyze`
+commands (and the never-real `mqtt-explorer`) are gone. `strings` dumps every
+printable string in the firmware image unfiltered; `grep <pattern>` narrows
+that to matching lines only, silently failing (like real `grep`) when nothing
+matches. Analysis is what reveals the MQTT topic, so the topic is never
+handed out before the student does the work — `nmap` confirms the service
+but never names the topic.
 
 ### Attack success
 
