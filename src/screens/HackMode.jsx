@@ -434,24 +434,54 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
             {scenarioState ? (
               <>
                 <p>Status: {scenarioState.target.device_status.toUpperCase()}</p>
-                <p>
-                  Broker:{' '}
-                  {scenarioState.discovery.broker_discovered
-                    ? `${scenarioState.target.ip_address}:${scenarioState.target.mqtt_port}`
-                    : 'UNKNOWN — recover from firmware'}
-                </p>
-                <p>
-                  Topic:{' '}
-                  {scenarioState.discovery.topic_discovered
-                    ? scenarioState.target.mqtt_topic
-                    : 'UNKNOWN — recover from firmware'}
-                </p>
-                {scenarioState.discovery.mqtt_observed ? (
-                  <p>
-                    Telemetry: {scenarioState.environment.temperature}°C
-                    {scenarioState.attack.spoof_active ? ' (SPOOFED)' : ''}
-                  </p>
-                ) : null}
+                {scenarioState.motor ? (
+                  // Smart Home MQTT Control (Panel 1, Phase 2E.1): the
+                  // snapshot shape is scenario-owned and genuinely different
+                  // from the Environmental target's (motor/broker_host vs
+                  // environment/ip_address) — this branches on which shape
+                  // arrived, not on a panel id.
+                  <>
+                    <p>
+                      Broker:{' '}
+                      {scenarioState.discovery.broker_discovered
+                        ? `${scenarioState.target.broker_host}:${scenarioState.target.broker_port}`
+                        : 'UNKNOWN — recover from firmware'}
+                    </p>
+                    <p>
+                      Command topic:{' '}
+                      {scenarioState.discovery.topic_discovered
+                        ? scenarioState.target.command_topic
+                        : 'UNKNOWN — recover from firmware'}
+                    </p>
+                    {scenarioState.discovery.mqtt_observed ? (
+                      <p>
+                        Motor: {scenarioState.motor.running ? 'RUNNING' : 'STOPPED'}
+                        {scenarioState.attack.spoof_active ? ' (SPOOFED)' : ''}
+                      </p>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <p>
+                      Broker:{' '}
+                      {scenarioState.discovery.broker_discovered
+                        ? `${scenarioState.target.ip_address}:${scenarioState.target.mqtt_port}`
+                        : 'UNKNOWN — recover from firmware'}
+                    </p>
+                    <p>
+                      Topic:{' '}
+                      {scenarioState.discovery.topic_discovered
+                        ? scenarioState.target.mqtt_topic
+                        : 'UNKNOWN — recover from firmware'}
+                    </p>
+                    {scenarioState.discovery.mqtt_observed ? (
+                      <p>
+                        Telemetry: {scenarioState.environment.temperature}°C
+                        {scenarioState.attack.spoof_active ? ' (SPOOFED)' : ''}
+                      </p>
+                    ) : null}
+                  </>
+                )}
               </>
             ) : (
               <p>No contact with the target yet — begin recon.</p>

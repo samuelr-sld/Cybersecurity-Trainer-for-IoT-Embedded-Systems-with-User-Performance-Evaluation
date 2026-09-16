@@ -8,11 +8,19 @@ A session records who it is, when it started, the terminal geometry the
 client reported, its own `Scenario`, its own `SerialTransport` for real I/O
 with the attached ESP32 (Phase 2A), and — since Phase 2B — its own
 `HackEventRecorder`. The scenario is the per-session simulated target:
-creating it via a `default_factory` means every session gets an independent
-instance, so no two sessions can observe or mutate each other's scenario
-state. The recorder follows the same rule for the same reason, and is what
-finally makes a session's activity durable. Evaluation metrics still belong
-to Phase 2E.
+every session gets an independent instance, so no two sessions can observe
+or mutate each other's scenario state. The recorder follows the same rule
+for the same reason, and is what finally makes a session's activity
+durable. Evaluation metrics still belong to Phase 2E.
+
+WHICH SCENARIO A SESSION RUNS IS DECIDED ELSEWHERE (Phase 2D.4). A caller
+may inject an already-constructed `Scenario`; the connection lifecycle in
+`app/websocket.py` does exactly that, passing whatever the attached panel's
+package declared (see `app/scenario_selection.py`). Nothing in this module
+identifies a panel, reads a package, or knows that panels exist: a session
+knows its scenario, not why it is that one. Omitting the argument keeps the
+long-standing default, so a session built without one — in a test, or in
+any pre-2D.4 caller — behaves exactly as before.
 """
 
 from __future__ import annotations
@@ -43,6 +51,10 @@ class HackSession:
     #: The per-session simulated target. Isolation lives here: a fresh
     #: instance per session means one student's scenario is unreachable from
     #: another's. Command handlers reach it via `CommandContext.scenario`.
+    #:
+    #: Injectable since Phase 2D.4 — pass the instance the attached panel's
+    #: package selected. The `default_factory` remains the fallback for the
+    #: no-panel development flow and for every existing caller.
     scenario: Scenario = field(default_factory=create_default_scenario)
     #: This session's own link to the physical ESP32 (Phase 2A). A fresh
     #: transport per session, for the same isolation reason `scenario` is
@@ -92,7 +104,7 @@ class SessionManager:
         self._sessions: dict[str, HackSession] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self) -> HackSession:
+    async def create(self, scenario: Scenario | None = None) -> HackSession:
         """Create and register a session with a fresh unique id.
 
         The event log is opened here, at connect, rather than when the first
@@ -100,8 +112,24 @@ class SessionManager:
         measured over, so it must mean "entered Hack Mode", not "got as far
         as typing something". A session that ends without a single command
         is still a session that happened, and the log says so.
+
+        `scenario` is dependency injection, and injection is the whole point
+        (Phase 2D.4): the caller that owns the connection lifecycle decides
+        which experiment this session runs — by then the attached panel has
+        already been identified and its package's declared scenario id
+        resolved, in `app/scenario_selection.py` — and hands the constructed
+        object in. Neither this manager nor `HackSession` looks at a MAC, a
+        panel id, a package or `panel.json` to make that decision, and
+        neither has an opinion about which scenario is "right".
+
+        Omitting it keeps the pre-2D.4 behaviour exactly: the session falls
+        back to `HackSession`'s own `create_default_scenario` factory, so
+        every existing caller and test is unaffected.
         """
-        session = HackSession(session_id=str(uuid.uuid4()))
+        session = HackSession(
+            session_id=str(uuid.uuid4()),
+            scenario=scenario if scenario is not None else create_default_scenario(),
+        )
         session.recorder.start()
         async with self._lock:
             self._sessions[session.session_id] = session

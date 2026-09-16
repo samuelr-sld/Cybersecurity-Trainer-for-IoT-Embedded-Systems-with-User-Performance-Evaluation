@@ -13,10 +13,12 @@ Position in the architecture (Phase 2C.5):
     identify_panel  ------>  PanelRegistry.resolve(mac)      (panels.py, pure)
     (this module)                    |
           |                          v
-          v                  PanelDefinition -> FirmwareConfiguration
+          v                  PanelDefinition (identity + package_id)
     PanelIdentification
           |
-    [Phase 2D] provisioning consumes it — NOT in this phase
+    PanelResourceService (app/panels/service.py) loads the panel's package,
+          |              which owns its scenario + firmware configuration
+    [later phase] provisioning consumes it — NOT in this phase
 
 WHY THIS DOES NOT READ THE MAC ITSELF. `DeviceMonitor` already obtains it,
 and owns the two invariants that make doing so safe: probe once per plug-in
@@ -29,8 +31,9 @@ the two — `identify_panel` — which takes values, not devices.
 IDENTIFICATION NEVER TRIGGERS ANYTHING. Resolving a panel returns data. It
 does not compile, flash, provision firmware, start a scenario, emit a
 `ScenarioEvent`, or record a Hack Mode row. Nothing in this module imports
-`app.build`, `app.scenarios`, or `app.events`, and no caller in Phase 2C.5
-acts on the result.
+`app.build`, `app.scenarios`, `app.events`, or `app.panels`, and no caller
+acts on the result — loading a panel's resource package is likewise inert,
+and happens one layer up in `app/panels/service.py`.
 """
 
 from __future__ import annotations
@@ -38,7 +41,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from app.hardware.firmware import FirmwareConfiguration
 from app.hardware.monitor import DeviceMonitor, device_monitor
 from app.hardware.panels import PanelDefinition, PanelMatch, PanelRegistry
 from app.hardware.state import DeviceState
@@ -47,8 +49,21 @@ from app.hardware.state import DeviceState
 class PanelIdentificationStatus(str, Enum):
     """Where identification of the attached board stands."""
 
-    #: No single ESP32 is attached (disconnected, ambiguous, not checked,
-    #: or detection could not run). There is no board to identify.
+    #: NO DETECTION HAS COMPLETED YET in this process, so there is nothing
+    #: to identify *from*. Deliberately not NOT_CONNECTED: the shared
+    #: `DeviceStatus` vocabulary keeps "we have not looked" apart from "we
+    #: looked and found nothing" (see `app/hardware/state.py`), and
+    #: flattening the two here would make a cold monitor indistinguishable
+    #: from an empty USB port — which is how a consumer ends up confidently
+    #: choosing a fallback for a board that is, in fact, plugged in.
+    #:
+    #: Transient by construction: the monitor's initial detection is started
+    #: by the application lifespan (`app/main.py`), so this is the state
+    #: between process start and that detection completing.
+    NOT_CHECKED = "not_checked"
+    #: A detection ran and no single ESP32 is attached (disconnected,
+    #: ambiguous, or detection could not run). There is no board to
+    #: identify.
     NOT_CONNECTED = "not_connected"
     #: A board is attached but its MAC has not been read — the probe has not
     #: run yet, is held off by a flash, or failed. Not "unknown panel": we do
@@ -77,14 +92,46 @@ class PanelIdentification:
         return self.status is PanelIdentificationStatus.IDENTIFIED
 
     @property
-    def firmware(self) -> FirmwareConfiguration | None:
-        """The identified panel's firmware configuration, if it has one."""
-        return self.panel.firmware if self.panel is not None else None
+    def package_id(self) -> str | None:
+        """The resource package this panel references, if it has one.
+
+        An identifier, not a path, and not the package itself: loading one
+        is `app/panels/loader.py`'s job, and this module stays free of the
+        filesystem so identification remains pure (see `identify_panel`).
+        Since Phase 2D.1 a panel's FIRMWARE configuration lives in that
+        package rather than on the definition, so there is deliberately no
+        `firmware` property here — `PanelResources.firmware`
+        (`app/panels/service.py`) is the one route to it.
+        """
+        return self.panel.package_id if self.panel is not None else None
 
 
 def identify_panel(state: DeviceState, registry: PanelRegistry) -> PanelIdentification:
-    """Map one device state to a panel identification. Pure — no I/O."""
-    if not state.connected:
+    """Map one device state to a panel identification. Pure — no I/O.
+
+    TWO QUESTIONS BEFORE ANY LOOKUP, AND NEITHER IS `connected`.
+
+    `checked` first: answering "no panel" for a monitor that has not run its
+    first detection would be an invention, not an observation, and a caller
+    acting on it (scenario selection, say) would act on that invention.
+
+    Then `board_present` rather than `connected`, for the same reason one
+    step further on. A re-detection publishes DETECTING over the previous
+    verdict, keeping its port, MAC and panel, so `connected` goes False for
+    a board that is still plugged in and this function would report
+    NOT_CONNECTED purely because a poll happens to be in flight. Nothing has
+    established that the panel disappeared — we are merely asking again — so
+    the honest answer is the one we already had, which is exactly what the
+    retained fields below resolve to. When the detection completes the
+    monitor replaces the state wholesale and the next call reports the new
+    verdict; there is nothing here to invalidate.
+
+    This function still performs no detection of its own — it only refuses
+    to turn silence, or an outstanding question, into a verdict.
+    """
+    if not state.checked:
+        return PanelIdentification(status=PanelIdentificationStatus.NOT_CHECKED)
+    if not state.board_present:
         return PanelIdentification(status=PanelIdentificationStatus.NOT_CONNECTED)
 
     resolution = registry.resolve(state.mac)

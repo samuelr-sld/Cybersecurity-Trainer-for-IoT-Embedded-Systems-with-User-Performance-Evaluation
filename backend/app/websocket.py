@@ -76,6 +76,30 @@ serial. Three things about *that* are load-bearing:
    forwards the board's output as ordinary `output` frames; a disconnected
    board becomes one controlled notice line, never an exception that would
    drop the session. Both the pump and the port are released on teardown.
+
+Phase 2D.4 behaviour: the session created at connect now runs the experiment
+the ATTACHED PANEL declares, instead of always the default one. The decision
+is made in `app/scenario_selection.py` (MAC -> panel -> package ->
+`scenario_id` -> `Scenario`) and injected into `SessionManager.create`, so
+this endpoint gained one call and one argument and nothing else:
+
+1. THE PROTOCOL IS UNCHANGED. Selection sends no frame, adds no field, emits
+   no `event` or `state`, prints nothing to the terminal, and dispatches no
+   command. A client cannot tell selection happened; the banner, the session
+   frame and every subsequent frame are byte-for-byte what they were.
+
+2. IT IS A LOOKUP, NOT AN ACTION. It reads the state the shared
+   `device_monitor` already holds — it does not detect, so no `arduino-cli`
+   runs and no MAC is probed (probing resets the board, which must never be
+   a side effect of opening a terminal). It opens no serial port, connects to
+   no broker, compiles, flashes and provisions nothing, and starts no
+   experiment: the scenario is constructed, exactly as it always was, and
+   sits waiting for the student's first command.
+
+3. IT CANNOT FAIL THE CONNECTION. No board, an unidentified board, an
+   unregistered board, a panel without courseware, a broken package, or a
+   package naming an unimplemented scenario id all yield the long-standing
+   default scenario. The reason goes to the log, never to the student.
 """
 
 from __future__ import annotations
@@ -112,6 +136,7 @@ from app.models.messages import (
     SessionMessage,
     StateMessage,
 )
+from app.scenario_selection import select_session_scenario
 from app.sessions import HackSession, session_manager
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -379,14 +404,35 @@ async def _handle_message(
 async def hack_websocket(websocket: WebSocket) -> None:
     """Serve one Hack Mode terminal session."""
     await websocket.accept()
-    session = await session_manager.create()
+    # PHASE 2D.4 — the one lifecycle change. Before creating the session, ask
+    # which experiment the attached panel provides: its MAC identifies a
+    # registered panel, that panel's package declares a `scenario_id`, and the
+    # scenario registry turns that id into a fresh `Scenario`. The whole chain
+    # lives in `app/scenario_selection.py`; this endpoint only calls it and
+    # passes the result on.
+    #
+    # It is a lookup, not an action: it reads the device state the shared
+    # monitor already holds (no `arduino-cli`, no MAC probe, no port opened),
+    # reads a trusted JSON manifest, and constructs an in-memory object.
+    # Nothing is compiled, flashed, provisioned or started, no MQTT client
+    # exists, no `ScenarioEvent` is emitted, and no frame is sent — the wire
+    # protocol below is byte-for-byte what it was.
+    #
+    # It also never fails: with no board attached — the ordinary development
+    # flow — or with a board whose panel, package or scenario id cannot be
+    # resolved, the selection is the long-standing default scenario, and the
+    # reason is logged rather than shown to the student.
+    selection = select_session_scenario()
+    session = await session_manager.create(scenario=selection.scenario)
     channel = _Channel(websocket)
     # Started here, but it opens nothing: it parks on an empty queue until a
     # serial command connects the board. See `_pump_serial`.
     pump = asyncio.create_task(
         _pump_serial(channel, session), name=f"serial-pump-{session.session_id}"
     )
-    logger.info("hack session opened: %s", session.session_id)
+    logger.info(
+        "hack session opened: %s [%s]", session.session_id, selection.describe()
+    )
 
     try:
         await channel.send(SessionMessage(session_id=session.session_id))

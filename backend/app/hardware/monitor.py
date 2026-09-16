@@ -166,6 +166,17 @@ class DeviceMonitor:
         return self._state
 
     @property
+    def initialized(self) -> bool:
+        """Whether the first detection has completed. No I/O, no awaiting.
+
+        What a consumer asks before trusting a negative answer out of
+        `snapshot()`. See `DeviceState.checked` — this is the same question
+        at monitor scope, and the reason it exists is that until it is True
+        the shared state says "nobody has looked", not "nothing is there".
+        """
+        return self._state.checked
+
+    @property
     def target_fqbn(self) -> str:
         """The platform's default board target, used when a caller names none."""
         return self._target_fqbn
@@ -234,6 +245,33 @@ class DeviceMonitor:
             # which must never happen as a side effect of someone else's
             # already-completed detection (a flash's, in particular).
             return await self._resolve_identity(state)
+
+    async def prime(self) -> DeviceState:
+        """Run the FIRST detection, once, so the shared state holds a verdict.
+
+        WHY THIS EXISTS, AND WHERE IT IS CALLED FROM. Consumers read the
+        cached state rather than detecting — that is the whole point of a
+        shared monitor, and it is what keeps opening a Hack Mode terminal
+        free of `arduino-cli`. But a cache nobody has filled answers
+        NOT_CHECKED, and a consumer that cannot tell that from DISCONNECTED
+        will quietly act on a board it has not looked for. So the cache is
+        filled once, at application startup, by the one component whose job
+        that is: `app/main.py`'s lifespan starts this as a background task
+        (see there for why it is not awaited). NOTHING ON A REQUEST PATH
+        CALLS IT — not the WebSocket endpoint, not session creation, not
+        scenario selection.
+
+        Idempotent and cheap once warm: already-initialized returns the
+        current state without detecting. It adds no detection path of its
+        own, delegating to `refresh()` so the initial detection obeys the
+        same lock, the same freshness cache, the same identity-probe rules
+        and the same "never raises" contract as every other one. A poll that
+        arrives while this is in flight therefore joins it instead of
+        starting a second `arduino-cli board list`.
+        """
+        if self.initialized:
+            return self._state
+        return await self.refresh()
 
     def publish(self, outcome: "DeviceDetectOutcome", *, fqbn: str) -> DeviceState:
         """Fold one already-completed detection into the shared state.

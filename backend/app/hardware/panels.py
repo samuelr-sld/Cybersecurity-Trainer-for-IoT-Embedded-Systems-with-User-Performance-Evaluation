@@ -1,17 +1,21 @@
 """Which registered training panel a given ESP32 is.
 
-Position in the architecture (Phase 2C.5):
+Position in the architecture (Phase 2C.5, extended by Phase 2D.1):
 
-    ESP32 MAC ──> PanelRegistry.resolve ──> PanelDefinition ──> FirmwareConfiguration
-    (identity.py)      (this module)          (this module)        (firmware.py)
+    ESP32 MAC ──> PanelRegistry.resolve ──> PanelDefinition ──> PanelPackage
+    (identity.py)      (this module)          (this module)     (app/panels/)
+                                                                      |
+                                                            FirmwareConfiguration
+                                                                (firmware.py)
 
 A "panel" is one of the trainer's physical activity stations. The ESP32 on
 it is an *interchangeable module*: the MAC burned into its OTP ROM
 identifies that physical board, and this registry decides which panel role
 the board is currently serving. The MAC therefore encodes nothing on its
-own — it is a key, and everything a later phase needs (display name,
-firmware configuration) hangs off the `PanelDefinition` it resolves to.
-Swapping a module means changing a binding, never a code path.
+own — it is a key, and everything a later phase needs (display name, and the
+resource package holding the scenario and firmware configuration) hangs off
+the `PanelDefinition` it resolves to. Swapping a module means changing a
+binding, never a code path.
 
 ONE ALGORITHM, NO PANEL BRANCHES. `PanelRegistry.resolve` is a normalized
 dictionary lookup, identical for every panel. Adding a sixth panel, or a
@@ -33,10 +37,25 @@ make the header lie about which station a student is sitting at.
 THE FIVE-PANEL SCOPE. All five panels have a definition so a module can be
 bound to any of them without a code change. Only one physical board is
 bound today — the ESP32 on this project's development machine, whose MAC was
-read from its OTP ROM with `esptool read_mac`. No panel has a firmware
-configuration yet: the vulnerable firmware for each panel is not in this
-repository, and inventing a source reference for it would hand Phase 2D a
-dangling pointer. `firmware=None` is the honest "not yet provisioned" state.
+read from its OTP ROM with `esptool read_mac`.
+
+IDENTITY HERE, EXPERIMENT ELSEWHERE (Phase 2D.1). A definition answers only
+"which panel is this board?". What that panel's experiment IS — its
+scenario, learning objectives, activity instructions, expected workflow,
+evaluation declaration and firmware configuration — lives in its resource
+package (`app/panels/`, loaded from `<root>/<package-id>/panel.json`), and a
+definition references it by a validated `package_id` and nothing more.
+
+That split is deliberate and load-bearing. This module sits on the hardware
+header's 10s poll path, so naming a panel must not read a file; and
+`package_id` being an identifier rather than a path is what keeps a MAC from
+ever resolving to a filesystem location. It is also why `firmware` is no
+longer a field here: a panel's firmware configuration is described in its
+package, so exactly one place answers "which firmware belongs to this
+panel?" instead of two that could disagree.
+
+`package_id=None` is the honest "no courseware integrated yet" state, and it
+is what four of the five panels carry: only Panel 1 has a package on `main`.
 """
 
 from __future__ import annotations
@@ -47,7 +66,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 
 from app import config
-from app.hardware.firmware import IDENTIFIER_PATTERN, FirmwareConfiguration
+from app.hardware.firmware import IDENTIFIER_PATTERN
 from app.hardware.mac import normalize_mac
 
 
@@ -58,8 +77,8 @@ class PanelDefinition:
 
     Deliberately carries NO attack behaviour, scenario logic, compile or
     flash capability — it is passive data. Hack Mode's scenarios and Build
-    Mode's toolchain stay where they are; a definition only points at the
-    firmware resources a later phase will act on.
+    Mode's toolchain stay where they are; a definition only names the
+    resource package a later phase will read.
     """
 
     #: Stable identifier, lower-case hyphenated. Never shown as the name.
@@ -69,9 +88,15 @@ class PanelDefinition:
     #: The physical ESP32 modules registered to this panel, canonical
     #: lower-case colon form. Empty is valid: a panel awaiting hardware.
     mac_addresses: tuple[str, ...] = ()
-    #: The firmware associated with this panel, or None while no firmware
-    #: for it exists in the repository.
-    firmware: FirmwareConfiguration | None = None
+    #: The resource package holding this panel's experiment (`app/panels/`),
+    #: or None while no package for it exists in the repository.
+    #:
+    #: AN IDENTIFIER, NEVER A PATH. It is validated to the same lower-case
+    #: hyphenated shape as `panel_id`, so it holds no separator, no dot and
+    #: no drive letter and cannot name a parent directory or an absolute
+    #: location. `app/panels/loader.py` joins it to ONE backend-configured
+    #: root and re-checks containment; nothing else may turn it into a path.
+    package_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.panel_id, str) or not re.fullmatch(
@@ -80,8 +105,14 @@ class PanelDefinition:
             raise ValueError(f"panel id must be a lower-case hyphenated identifier: {self.panel_id!r}")
         if not isinstance(self.display_name, str) or not self.display_name.strip():
             raise ValueError(f"panel {self.panel_id!r} needs a non-empty display name")
-        if self.firmware is not None and not isinstance(self.firmware, FirmwareConfiguration):
-            raise ValueError(f"panel {self.panel_id!r} firmware must be a FirmwareConfiguration")
+        if self.package_id is not None and (
+            not isinstance(self.package_id, str)
+            or not re.fullmatch(IDENTIFIER_PATTERN, self.package_id)
+        ):
+            raise ValueError(
+                f"panel {self.panel_id!r} package id must be a lower-case hyphenated "
+                f"identifier: {self.package_id!r}"
+            )
 
         # Normalize every MAC once, here, so the registry index can never
         # hold two spellings of one board. A malformed MAC in backend source
@@ -240,6 +271,9 @@ BUILT_IN_PANELS: tuple[PanelDefinition, ...] = (
         # The ESP32-D0WD-V3 on this project's development machine, read from
         # the chip's OTP ROM with `esptool read_mac` — not a placeholder.
         mac_addresses=("20:9b:a9:88:0b:e4",),
+        # Phase 2D.2: the one panel whose resource package exists on `main`
+        # — see `backend/panels/smart-home-mqtt-control/panel.json`.
+        package_id="smart-home-mqtt-control",
     ),
     PanelDefinition(
         panel_id="environmental-monitoring",

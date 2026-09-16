@@ -357,6 +357,54 @@ mock transport in `HackMode.jsx`, rendering the target panel from the `state`
 frame, appending `output`/`event` frames to the terminal, and acting on
 `action`), then **Phase 2E** — event recording and evaluation.
 
+## Panel/scenario packages — Phase 2D.1 + 2D.2
+
+A connected panel's *experiment* is a trusted resource package, loaded but
+never executed. The guiding split is **the engine provides the tools; the
+connected panel provides the experiment** — `app/commands/` keeps offering
+the same global toolbox to every panel, and a package only declares what a
+student should do with those tools.
+
+```
+ESP32 MAC -> PanelRegistry -> PanelDefinition -> PanelPackage -> FirmwareConfiguration
+ (fake/real)  app/hardware/     app/hardware/     app/panels/      app/hardware/
+              panels.py         panels.py         (this layer)     firmware.py
+```
+
+- `app/panels/models.py` — `PanelPackage`, frozen validated data:
+  `ScenarioDefinition` (which experiment, by `scenario_id` key),
+  `LearningContent` (objectives, activity instructions, expected findings),
+  a `WorkflowStep` sequence (each naming a *real* global tool), an
+  `EvaluationDeclaration` (success conditions citing the canonical Phase 2B
+  event vocabulary, plus which of the seven metrics ACR/RE/EAC/TTE/TTR/AID/DEI
+  are relevant), a reused `FirmwareConfiguration`, and scalar-only static
+  `parameters`. It holds no target network facts, no scenario behaviour, no
+  display name and no metric formulas — one source of truth for each.
+- `app/panels/loader.py` — `PanelPackageLoader`, the only filesystem-touching
+  piece: one algorithm for every panel (`<root>/<package-id>/panel.json`,
+  root = `TRAINER_PANEL_PACKAGE_ROOT`, default `backend/panels/`). Strict
+  about unknown keys; missing (`PanelPackageNotFoundError`), invalid
+  (`PanelPackageInvalidError`), and declared-but-absent firmware
+  (`FirmwareResourceMissingError`) are distinct. No `eval`/`exec`/`import`,
+  no `subprocess`, no command dispatch, no build-layer import, and no path
+  from a client — the `package_id` is a validated identifier, re-checked for
+  containment.
+- `app/panels/service.py` — `PanelResourceService`, composing the existing
+  panel identification service with the loader into one status
+  (`NOT_CONNECTED`/`UNIDENTIFIED`/`UNREGISTERED`/`NO_PACKAGE`/`PACKAGE_ERROR`/
+  `READY`). `PanelResources.firmware` is the single route to a panel's
+  firmware configuration.
+
+**Loading a package triggers nothing** — no compile, flash, scenario start,
+event, or router dispatch — and nothing in this phase is wired into a request
+path: identification stays silent, the Hack Mode `hardware` frame is
+unchanged, and the frontend is untouched. **Panel 1** (Smart Home MQTT
+Control System) is integrated as `backend/panels/smart-home-mqtt-control/`
+(`panel.json` plus a real `.ino` firmware resource under `firmware/`). What
+is **not** implemented: the complete Panel 1 attack/remediation/evaluation
+lifecycle, any Panel 2 activity, and all metric computation — later phases
+this seam exists to feed.
+
 ## Build Mode — Phase 3A + 3B + 3C, Phase 1 (Build Mode POC)
 
 Build Mode is the defender/developer side of the trainer: a firmware

@@ -156,6 +156,26 @@ HARDWARE_CACHE_SECONDS: float = float(
     os.getenv("TRAINER_HARDWARE_CACHE_SECONDS", "4")
 )
 
+# Whether the application lifespan runs the shared monitor's FIRST detection
+# at startup (`app/main.py`, `DeviceMonitor.prime`). On by default, because
+# the alternative is a backend whose device cache stays NOT_CHECKED until
+# something happens to poll it — and a consumer reading that cache before
+# then cannot distinguish "nobody has looked" from "nothing is plugged in".
+#
+# It changes WHEN the first `arduino-cli board list` runs, never whether a
+# request path may run one: no endpoint, session or scenario selection
+# detects, before or after this. Set TRAINER_HARDWARE_STARTUP_DETECT=0 for
+# an environment that must not touch the toolchain at boot — the backend
+# still works, it simply learns what is attached on the first poll instead.
+# The test suite disables it (see tests/conftest.py) so constructing a
+# TestClient never spawns a real CLI or resets a real board.
+HARDWARE_STARTUP_DETECT: bool = os.getenv("TRAINER_HARDWARE_STARTUP_DETECT", "1") not in {
+    "0",
+    "false",
+    "False",
+    "no",
+}
+
 # Canonical Linux/training serial path — see app/hardware/serial_alias.py.
 # The trainer deploys to a Raspberry Pi, so the courseware and Hack Mode
 # command examples speak one stable Linux path regardless of what the
@@ -242,6 +262,27 @@ HARDWARE_IDENTITY_TIMEOUT_SECONDS: float = float(
 # panel, rename one, or point at firmware — and malformed entries are
 # skipped. An unregistered board shows its MAC; nothing is ever guessed.
 PANEL_MACS_RAW: str = os.getenv("TRAINER_PANEL_MACS", "")
+
+# --- panel resource packages (Phase 2D.1) ----------------------------------
+#
+# Root of the trusted panel/scenario package tree — see app/panels/. One
+# directory per panel, named by the panel's `package_id`, each holding a
+# `panel.json` manifest and that panel's firmware resources.
+#
+# APPLICATION CONFIGURATION, NEVER CLIENT INPUT. No frontend, student, MAC
+# address or WebSocket frame can name this root, a package, or a file inside
+# one: a MAC resolves to a `PanelDefinition`, and only that definition's
+# validated `package_id` (a lower-case hyphenated identifier, so it cannot
+# traverse) selects a directory under here. The loader re-checks containment
+# on top of that.
+#
+# Defaults beside the backend package rather than to the working directory,
+# for the same reason EVENT_DB_PATH does: the resources a classroom runs must
+# not change depending on where uvicorn was launched from.
+PANEL_PACKAGE_ROOT: str = os.getenv(
+    "TRAINER_PANEL_PACKAGE_ROOT",
+    str(pathlib.Path(__file__).resolve().parent.parent / "panels"),
+)
 
 # Bounded upload timeout, in seconds. An ESP32 upload over a 921600-baud
 # USB-UART link commonly takes 15-40s for a sketch this size; this leaves

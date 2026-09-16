@@ -168,6 +168,28 @@ class DeviceState:
     checked_at: datetime | None = None
 
     @property
+    def checked(self) -> bool:
+        """Whether any detection has produced a verdict yet in this process.
+
+        THE DISTINCTION `connected` CANNOT MAKE. `connected` answers "is a
+        board available?", and both "we looked and found nothing" and "we
+        have not looked yet" answer it False — which is exactly the
+        conflation `DeviceStatus` was designed to prevent (see NOT_CHECKED
+        above). A consumer that must not invent a verdict asks this first.
+
+        False for precisely the two states that mean nobody has looked: the
+        initial NOT_CHECKED, and a DETECTING with no previous verdict behind
+        it — the very first detection, still in flight. A later DETECTING
+        keeps the `checked_at` of the verdict it is re-checking, so it stays
+        True: we do know what was plugged in a moment ago.
+        """
+        if self.status is DeviceStatus.NOT_CHECKED:
+            return False
+        if self.status is DeviceStatus.DETECTING:
+            return self.checked_at is not None
+        return True
+
+    @property
     def connected(self) -> bool:
         """Whether an ESP32 is available right now.
 
@@ -175,8 +197,47 @@ class DeviceState:
         impossible for a state to claim it is connected while carrying no
         port, or to report DISCONNECTED while a stale `connected=True` flag
         hangs off it.
+
+        STRICTLY INSTANTANEOUS. True only while `status` is CONNECTED, which
+        a re-detection interrupts (see `board_present` below). Callers that
+        act on the absence of a board — refusing to open a port, reporting
+        no panel — want `board_present` instead; callers asking "may I use
+        the device *this instant*" want this.
         """
         return self.status is DeviceStatus.CONNECTED
+
+    @property
+    def board_present(self) -> bool:
+        """Whether a board is present according to the latest COMPLETED
+        detection.
+
+        THE DISTINCTION `connected` CANNOT MAKE, part two. `DeviceMonitor`
+        deliberately publishes DETECTING over the *previous* state rather
+        than over a blank one — `replace(self._state, status=DETECTING)` —
+        so a re-check keeps the port, board, MAC, panel and `checked_at`
+        the last verdict established: a board does not stop being plugged
+        in because we are re-asking. But `status` is no longer CONNECTED
+        while that question is outstanding, so `connected` reads False for a
+        board that has not gone anywhere, and a consumer keying off it
+        concludes the device vanished mid-poll.
+
+        This asks the question that survives a re-check: what did the last
+        completed detection find? During DETECTING that is answered by the
+        retained `port`, which only the CONNECTED branch of
+        `_state_from_outcome` ever sets — a DISCONNECTED, AMBIGUOUS or ERROR
+        verdict carries no port, so a re-check over one of those correctly
+        stays False. `checked` still gates it, so the very first detection,
+        with no verdict behind it at all, is neither present nor absent but
+        simply unchecked.
+
+        It is a reading of existing state, not a new claim: no field is
+        added, nothing is remembered here, and the moment the detection
+        completes the monitor replaces the state wholesale and this reports
+        the new verdict — there is no stale value to expire.
+        """
+        if self.status is DeviceStatus.DETECTING:
+            return self.checked and self.port is not None
+        return self.connected
 
     def snapshot(self) -> dict:
         """A JSON-serialisable view for the wire.

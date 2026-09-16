@@ -34,7 +34,6 @@ import pathlib
 import pytest
 
 from app import config
-from app.build import create_blink_project, create_environmental_monitoring_project
 from app.build.flasher import DeviceDetectOutcome, SerialDevice
 from app.hardware import (
     BUILT_IN_PANELS,
@@ -84,13 +83,19 @@ def firmware(firmware_id: str = "alpha-firmware", **overrides) -> FirmwareConfig
     return FirmwareConfiguration(**fields)
 
 
+# A standalone FirmwareConfiguration fixture. Since Phase 2D.1 firmware
+# lives in a panel's resource package, not on the `PanelDefinition`, so this
+# is exercised by the firmware-shape tests (section E) and by the package
+# tests (`tests/test_panel_packages.py`) rather than attached to a panel.
 ALPHA_FIRMWARE = firmware()
 
+# ALPHA references a package (an identifier, not a path); BRAVO references
+# none — the two states a definition can be in.
 ALPHA = PanelDefinition(
     panel_id="test-panel-alpha",
     display_name="TEST PANEL ALPHA",
     mac_addresses=(MAC_ALPHA,),
-    firmware=ALPHA_FIRMWARE,
+    package_id="test-panel-alpha",
 )
 BRAVO = PanelDefinition(
     panel_id="test-panel-bravo",
@@ -209,7 +214,7 @@ def test_an_alternate_table_resolves_with_the_same_registry_class() -> None:
         panel_id="test-panel-charlie",
         display_name="TEST PANEL CHARLIE",
         mac_addresses=(MAC_SPARE,),
-        firmware=firmware("charlie-firmware"),
+        package_id="test-panel-charlie",
     )
     registry = PanelRegistry((ALPHA, BRAVO, charlie))
 
@@ -278,38 +283,44 @@ def test_the_built_in_registry_is_valid_and_covers_the_five_panel_scope() -> Non
     assert len({panel.panel_id for panel in BUILT_IN_PANELS}) == 5
 
 
-def test_built_in_firmware_references_point_at_real_build_projects() -> None:
-    """Guard for Phase 2D additions: a BUILD_PROJECT reference must name a
-    project that actually exists in `app/build/`, never a dangling id."""
-    known_projects = {
-        create_blink_project().project_id,
-        create_environmental_monitoring_project().project_id,
-    }
+def test_built_in_package_references_are_identifiers_not_paths() -> None:
+    """Since Phase 2D.1 a definition points at a resource PACKAGE, by id.
+    Firmware no longer lives on the definition, so the old dangling
+    BUILD_PROJECT guard moved to the package layer
+    (`tests/test_panel_packages.py`). Here we only assert the definition
+    field is a safe identifier — never a path — for every built-in panel
+    that has one."""
+    import re
+
+    from app.hardware.firmware import IDENTIFIER_PATTERN
+
     for panel in BUILT_IN_PANELS:
-        if panel.firmware is None:
-            continue
-        if panel.firmware.source.kind is FirmwareSourceKind.BUILD_PROJECT:
-            assert panel.firmware.source.reference in known_projects, panel.panel_id
+        assert not hasattr(panel, "firmware")
+        if panel.package_id is not None:
+            assert re.fullmatch(IDENTIFIER_PATTERN, panel.package_id), panel.panel_id
+
+
+def test_only_panel_one_has_a_package_on_main() -> None:
+    """Exactly one built-in panel references a package today (Panel 1). The
+    other four honestly carry `package_id=None` — courseware not yet written."""
+    with_package = [p.panel_id for p in BUILT_IN_PANELS if p.package_id is not None]
+    assert with_package == ["smart-home-mqtt-control"]
 
 
 # --- E: firmware configuration ---------------------------------------------
 
 
-def test_a_resolved_panel_exposes_its_firmware_configuration() -> None:
-    config_ = make_registry().resolve(MAC_ALPHA).panel.firmware
+def test_a_resolved_panel_exposes_its_package_reference() -> None:
+    # Firmware moved to the package (Phase 2D.1); a definition now only
+    # names which package holds it, by id.
+    panel = make_registry().resolve(MAC_ALPHA).panel
 
-    assert config_ is ALPHA_FIRMWARE
-    assert config_.firmware_id == "alpha-firmware"
-    assert config_.source.kind is FirmwareSourceKind.BUILD_PROJECT
-    assert config_.source.reference == "alpha-project"
-    assert config_.board.fqbn == FQBN
-    assert config_.compilation == CompilationSettings()
-    assert config_.flashing == FlashSettings()
-    assert config_.serial == SerialSettings()
+    assert panel.package_id == "test-panel-alpha"
+    assert not hasattr(panel, "firmware")
 
 
-def test_a_panel_without_firmware_says_so() -> None:
-    assert make_registry().resolve(MAC_BRAVO).panel.firmware is None
+def test_a_panel_without_a_package_says_so() -> None:
+    assert make_registry().resolve(MAC_BRAVO).panel.package_id is None
 
 
 def test_firmware_configuration_can_describe_every_provisioning_stage() -> None:
@@ -528,13 +539,19 @@ def test_the_service_delegates_mac_acquisition_to_the_monitor() -> None:
 
 
 def test_identify_performs_no_detection_and_no_probe() -> None:
+    """`identify()` reads the monitor's cached state and nothing else — so on
+    a monitor that has never detected, the honest answer is NOT_CHECKED.
+
+    It is emphatically NOT_CONNECTED: a board IS attached in this fixture,
+    and reporting "nothing is plugged in" because nobody has looked yet is
+    the invention `DeviceStatus.NOT_CHECKED` exists to prevent."""
     service, _, adapter, probe, _ = service_for(esp32())
 
     identification = service.identify()
 
     assert adapter.detections == 0
     assert probe.calls == 0
-    assert identification.status is PanelIdentificationStatus.NOT_CONNECTED
+    assert identification.status is PanelIdentificationStatus.NOT_CHECKED
 
 
 def test_the_header_name_and_the_service_answer_come_from_one_registry() -> None:
@@ -548,7 +565,7 @@ def test_the_header_name_and_the_service_answer_come_from_one_registry() -> None
 # --- identification outcomes ------------------------------------------------
 
 
-def test_an_identified_board_exposes_its_panel_and_firmware() -> None:
+def test_an_identified_board_exposes_its_panel_and_package() -> None:
     service, _, _, _, _ = service_for(esp32(port="COM7"))
 
     identification = run(service.refresh())
@@ -558,7 +575,9 @@ def test_an_identified_board_exposes_its_panel_and_firmware() -> None:
     assert identification.port == "COM7"
     assert identification.mac == MAC_ALPHA
     assert identification.panel is ALPHA
-    assert identification.firmware is ALPHA_FIRMWARE
+    # Firmware moved to the package (Phase 2D.1); identification exposes the
+    # package reference, and PanelResources is the route to the firmware.
+    assert identification.package_id == "test-panel-alpha"
 
 
 def test_an_unknown_board_is_unregistered() -> None:
@@ -569,7 +588,7 @@ def test_an_unknown_board_is_unregistered() -> None:
     assert identification.status is PanelIdentificationStatus.UNREGISTERED
     assert identification.mac == MAC_UNKNOWN
     assert identification.panel is None
-    assert identification.firmware is None
+    assert identification.package_id is None
     # The header keeps showing the MAC and no invented name.
     assert monitor.snapshot().panel is None
 
@@ -604,23 +623,42 @@ def test_identification_during_a_flash_hold_does_not_probe() -> None:
     assert identification.status is PanelIdentificationStatus.UNIDENTIFIED
 
 
-def test_a_panel_without_firmware_is_identified_with_no_firmware() -> None:
+def test_a_panel_without_a_package_is_identified_with_no_package() -> None:
     service, _, _, _, _ = service_for(esp32(), probe=FakeProbe(mac=MAC_BRAVO))
 
     identification = run(service.refresh())
 
     assert identification.identified is True
     assert identification.panel is BRAVO
-    assert identification.firmware is None
+    assert identification.package_id is None
 
 
 @pytest.mark.parametrize(
     "status",
-    [DeviceStatus.NOT_CHECKED, DeviceStatus.DISCONNECTED, DeviceStatus.AMBIGUOUS, DeviceStatus.ERROR],
+    [DeviceStatus.DISCONNECTED, DeviceStatus.AMBIGUOUS, DeviceStatus.ERROR],
 )
 def test_identify_panel_needs_a_single_connected_board(status: DeviceStatus) -> None:
+    """A detection RAN and there is no single board to identify."""
     state = DeviceState(status=status, mac=MAC_ALPHA)
     assert identify_panel(state, make_registry()).status is PanelIdentificationStatus.NOT_CONNECTED
+
+
+def test_a_monitor_that_has_not_detected_is_not_checked_not_disconnected() -> None:
+    """The distinction the device layer makes must survive the panel layer:
+    "we have not looked" is its own answer, never "nothing is there"."""
+    state = DeviceState(status=DeviceStatus.NOT_CHECKED, mac=MAC_ALPHA)
+    identification = identify_panel(state, make_registry())
+    assert identification.status is PanelIdentificationStatus.NOT_CHECKED
+    assert identification.panel is None
+
+
+def test_the_first_in_flight_detection_is_also_not_checked() -> None:
+    """DETECTING with no previous verdict behind it is still "nobody has
+    looked" — there is no earlier answer to fall back on."""
+    state = DeviceState(status=DeviceStatus.DETECTING)
+    assert identify_panel(state, make_registry()).status is (
+        PanelIdentificationStatus.NOT_CHECKED
+    )
 
 
 def test_identification_never_mutates_the_device_state() -> None:

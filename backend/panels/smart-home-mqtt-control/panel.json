@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "panel_id": "smart-home-mqtt-control",
+  "scenario": {
+    "scenario_id": "smart-home-mqtt-control",
+    "title": "Smart Home MQTT Control System",
+    "summary": "An ESP32 smart-home controller drives a relay from MQTT command topics on an authenticated broker that enforces no per-command authorization. The student recovers the broker configuration from the firmware, observes the control traffic, and demonstrates how an authenticated client can forge commands to the device without per-command authorization."
+  },
+  "learning": {
+    "objectives": [
+      "Explain why authenticating to an MQTT broker does not by itself authorize individual control commands.",
+      "Recover a device's broker address, port, and control topics from its firmware.",
+      "Observe live MQTT control traffic to understand the command protocol a device trusts.",
+      "Demonstrate a spoofed-command attack against a smart-home actuator and relate it to physical impact.",
+      "Identify the firmware and broker changes that would enforce per-command authorization."
+    ],
+    "activity_instructions": [
+      "Read the controller's firmware from flash and extract its printable strings.",
+      "Search the extracted strings for the broker address, port, and the topics the device subscribes and publishes to.",
+      "Scan the discovered broker host to confirm the MQTT service is reachable.",
+      "Subscribe to the control topics and observe the commands the legitimate controller exchanges.",
+      "Publish a forged command to the device's command topic and confirm the actuator responds to it."
+    ],
+    "expected_findings": [
+      {
+        "finding_id": "broker-endpoint",
+        "description": "The MQTT broker's network address and port, recovered from the firmware."
+      },
+      {
+        "finding_id": "command-topic",
+        "description": "The topic the controller subscribes to for actuator commands."
+      },
+      {
+        "finding_id": "state-topic",
+        "description": "The topic the controller publishes its actuator state to."
+      },
+      {
+        "finding_id": "missing-authentication",
+        "description": "That an authenticated MQTT client can issue motor-control commands without per-command authorization."
+      }
+    ]
+  },
+  "workflow": [
+    {
+      "step_id": "extract-firmware",
+      "title": "Read the controller firmware from flash",
+      "command": "esptool.py",
+      "description": "Perform an authorized read of the device flash to obtain the firmware image for analysis."
+    },
+    {
+      "step_id": "analyze-strings",
+      "title": "Extract and search the firmware strings",
+      "command": "strings",
+      "description": "Dump the printable strings from the firmware, then narrow to the broker and topic configuration."
+    },
+    {
+      "step_id": "grep-config",
+      "title": "Filter for the broker and topic configuration",
+      "command": "grep",
+      "description": "Search the extracted strings for the broker endpoint and the MQTT topics the device trusts."
+    },
+    {
+      "step_id": "scan-broker",
+      "title": "Confirm the broker is reachable",
+      "command": "nmap",
+      "description": "Scan the discovered broker host to confirm the MQTT service is exposed."
+    },
+    {
+      "step_id": "observe-traffic",
+      "title": "Observe the control traffic",
+      "command": "mosquitto_sub",
+      "description": "Subscribe to the control topics to learn the command protocol the device accepts."
+    },
+    {
+      "step_id": "forge-command",
+      "title": "Publish a forged command",
+      "command": "mosquitto_pub",
+      "description": "Publish a spoofed command to the device's command topic and confirm the actuator obeys it."
+    }
+  ],
+  "evaluation": {
+    "success_conditions": [
+      {
+        "condition_id": "config-recovered",
+        "description": "The student recovered the broker endpoint and control topics from the firmware.",
+        "required_events": ["firmware_extracted", "firmware_analyzed"]
+      },
+      {
+        "condition_id": "traffic-observed",
+        "description": "The student observed the broker and its control traffic.",
+        "required_events": ["broker_discovered", "mqtt_observed"]
+      },
+      {
+        "condition_id": "spoof-demonstrated",
+        "description": "The student published a forged command that the device accepted.",
+        "required_events": ["spoof_succeeded", "attack_completed"]
+      }
+    ],
+    "metrics": ["ACR", "RE", "EAC", "TTE"]
+  },
+  "firmware": {
+    "firmware_id": "smart-home-mqtt-control-firmware",
+    "source": {
+      "kind": "sketch_directory",
+      "reference": "firmware/smart_home_mqtt_control"
+    },
+    "board": {
+      "fqbn": "esp32:esp32:esp32"
+    },
+    "serial": {
+      "baud_rate": 115200
+    }
+  },
+  "parameters": {
+    "device_role": "smart-home-actuator",
+    "mqtt_transport": "tcp"
+  }
+}
