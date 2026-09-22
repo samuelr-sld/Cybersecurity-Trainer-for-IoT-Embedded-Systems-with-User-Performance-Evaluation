@@ -28,4 +28,5 @@ def to_command_result(outcome: ScenarioOutcome) -> CommandResult:
         lines=tuple(outcome.lines),
         exit_code=outcome.exit_code,
         events=outcome.events,
+        fields_correct=outcome.fields_correct,
     )

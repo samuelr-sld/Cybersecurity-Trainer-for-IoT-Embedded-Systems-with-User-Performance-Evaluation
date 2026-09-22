@@ -45,6 +45,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app import config
+from app.build.records import BuildAttemptRecord, BuildAttemptType, BuildSessionRecord
 from app.events.clock import from_iso, to_iso
 from app.events.records import (
     HackCommandRecord,
@@ -63,21 +64,23 @@ MEMORY_PATH = ":memory:"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS hack_sessions (
-    session_id  TEXT PRIMARY KEY,
-    scenario_id TEXT NOT NULL,
-    started_at  TEXT NOT NULL,
-    ended_at    TEXT
+    session_id     TEXT PRIMARY KEY,
+    scenario_id    TEXT NOT NULL,
+    started_at     TEXT NOT NULL,
+    ended_at       TEXT,
+    participant_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS hack_commands (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL,
-    sequence    INTEGER NOT NULL,
-    name        TEXT,
-    argv        TEXT NOT NULL,
-    exit_code   INTEGER NOT NULL,
-    handled     INTEGER NOT NULL,
-    occurred_at TEXT NOT NULL
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL,
+    sequence       INTEGER NOT NULL,
+    name           TEXT,
+    argv           TEXT NOT NULL,
+    exit_code      INTEGER NOT NULL,
+    handled        INTEGER NOT NULL,
+    occurred_at    TEXT NOT NULL,
+    fields_correct INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS hack_events (
@@ -98,7 +101,42 @@ CREATE INDEX IF NOT EXISTS idx_hack_events_session
     ON hack_events (session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_hack_events_type
     ON hack_events (session_id, event_type);
+
+-- Phase 2E.3: Build Mode's own session/attempt log, in the same file — see
+-- app/build/records.py for why this lives beside, not merged with, the Hack
+-- Mode tables above.
+CREATE TABLE IF NOT EXISTS build_sessions (
+    session_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    ended_at   TEXT,
+    panel_id   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS build_attempts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL,
+    sequence      INTEGER NOT NULL,
+    attempt_type  TEXT NOT NULL,
+    success       INTEGER NOT NULL,
+    occurred_at   TEXT NOT NULL,
+    detail        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_build_attempts_session
+    ON build_attempts (session_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_build_attempts_type
+    ON build_attempts (session_id, attempt_type);
 """
+
+
+def _optional_bool_to_int(value: bool | None) -> int | None:
+    """Tri-state bool -> SQLite `INTEGER` column: NULL / 0 / 1."""
+    return None if value is None else (1 if value else 0)
+
+
+def _int_to_optional_bool(value: int | None) -> bool | None:
+    """Inverse of `_optional_bool_to_int`, tolerating a NULL column."""
+    return None if value is None else bool(value)
 
 
 class StoreError(RuntimeError):
@@ -153,9 +191,33 @@ class SqliteEventStore:
                     self._connection.execute("PRAGMA journal_mode=WAL")
                     self._connection.execute("PRAGMA synchronous=NORMAL")
                 self._connection.executescript(_SCHEMA)
+                self._migrate_locked()
                 self._connection.commit()
             except sqlite3.Error as error:
                 raise StoreError(f"could not prepare the event store: {error}") from error
+
+    def _migrate_locked(self) -> None:
+        """Add columns a pre-Phase-2E.2 database file was created without.
+
+        `CREATE TABLE IF NOT EXISTS` above is a no-op against a table that
+        already exists, so a classroom database opened before this phase
+        would otherwise never gain these two nullable metric-seam columns
+        (`hack_sessions.participant_id`, `hack_commands.fields_correct`).
+        Guarded by `PRAGMA table_info` rather than a bare `ALTER TABLE`
+        because SQLite has no `ADD COLUMN IF NOT EXISTS`, and this must stay
+        safe to run on every process start, against both a fresh database
+        (where `CREATE TABLE` already added the column) and an old one.
+        Caller holds `self._lock`.
+        """
+        for table, column, coltype in (
+            ("hack_sessions", "participant_id", "TEXT"),
+            ("hack_commands", "fields_correct", "INTEGER"),
+        ):
+            existing = {
+                row[1] for row in self._connection.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in existing:
+                self._connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
     def close(self) -> None:
         """Close the connection. Safe to call more than once."""
@@ -183,12 +245,14 @@ class SqliteEventStore:
         """Write the session header. Re-opening an existing id is a no-op."""
         self._write(
             "INSERT OR IGNORE INTO hack_sessions "
-            "(session_id, scenario_id, started_at, ended_at) VALUES (?, ?, ?, ?)",
+            "(session_id, scenario_id, started_at, ended_at, participant_id) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 record.session_id,
                 record.scenario_id,
                 to_iso(record.started_at),
                 None if record.ended_at is None else to_iso(record.ended_at),
+                record.participant_id,
             ),
         )
 
@@ -209,8 +273,8 @@ class SqliteEventStore:
         """Append one submitted command."""
         self._write(
             "INSERT INTO hack_commands "
-            "(session_id, sequence, name, argv, exit_code, handled, occurred_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(session_id, sequence, name, argv, exit_code, handled, occurred_at, "
+            "fields_correct) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.session_id,
                 record.sequence,
@@ -219,6 +283,7 @@ class SqliteEventStore:
                 record.exit_code,
                 1 if record.handled else 0,
                 to_iso(record.occurred_at),
+                _optional_bool_to_int(record.fields_correct),
             ),
         )
 
@@ -258,7 +323,7 @@ class SqliteEventStore:
     def session(self, session_id: str) -> HackSessionRecord | None:
         """The session header, or None if this id was never opened."""
         rows = self._read(
-            "SELECT session_id, scenario_id, started_at, ended_at "
+            "SELECT session_id, scenario_id, started_at, ended_at, participant_id "
             "FROM hack_sessions WHERE session_id = ?",
             (session_id,),
         )
@@ -270,6 +335,7 @@ class SqliteEventStore:
             scenario_id=row["scenario_id"],
             started_at=from_iso(row["started_at"]),
             ended_at=None if row["ended_at"] is None else from_iso(row["ended_at"]),
+            participant_id=row["participant_id"],
         )
 
     def events_for_session(self, session_id: str) -> tuple[HackEventRecord, ...]:
@@ -297,8 +363,9 @@ class SqliteEventStore:
     def commands_for_session(self, session_id: str) -> tuple[HackCommandRecord, ...]:
         """Every command submitted in one session, in order."""
         rows = self._read(
-            "SELECT session_id, sequence, name, argv, exit_code, handled, occurred_at "
-            "FROM hack_commands WHERE session_id = ? ORDER BY sequence ASC, id ASC",
+            "SELECT session_id, sequence, name, argv, exit_code, handled, occurred_at, "
+            "fields_correct FROM hack_commands WHERE session_id = ? "
+            "ORDER BY sequence ASC, id ASC",
             (session_id,),
         )
         return tuple(
@@ -310,6 +377,7 @@ class SqliteEventStore:
                 exit_code=row["exit_code"],
                 handled=bool(row["handled"]),
                 occurred_at=from_iso(row["occurred_at"]),
+                fields_correct=_int_to_optional_bool(row["fields_correct"]),
             )
             for row in rows
         )
@@ -335,6 +403,111 @@ class SqliteEventStore:
             (),
         )
         return tuple(row["session_id"] for row in rows)
+
+    def sessions(self) -> tuple[HackSessionRecord, ...]:
+        """Every session header, oldest first.
+
+        The Phase 2E.2 EAC read path: Exploitation Attempt Count groups
+        sessions by (participant_id, scenario_id) and needs each session's
+        full header (not just its id) to do that grouping and to order the
+        group chronologically. See `app/metrics/eac.py`.
+        """
+        rows = self._read(
+            "SELECT session_id, scenario_id, started_at, ended_at, participant_id "
+            "FROM hack_sessions ORDER BY started_at ASC, rowid ASC",
+            (),
+        )
+        return tuple(
+            HackSessionRecord(
+                session_id=row["session_id"],
+                scenario_id=row["scenario_id"],
+                started_at=from_iso(row["started_at"]),
+                ended_at=None if row["ended_at"] is None else from_iso(row["ended_at"]),
+                participant_id=row["participant_id"],
+            )
+            for row in rows
+        )
+
+    # -- Build Mode (Phase 2E.3) --------------------------------------------
+    #
+    # Same file, same connection, same lock — a parallel pair of tables for
+    # Build Mode's own session/attempt shapes (`app/build/records.py`),
+    # written through by `app/build/recorder.py::BuildEventRecorder`. See
+    # that module's docstring for why this lives here rather than in a
+    # second store.
+
+    def open_build_session(self, record: BuildSessionRecord) -> None:
+        """Write the Build Mode session header. Re-opening an id is a no-op."""
+        self._write(
+            "INSERT OR IGNORE INTO build_sessions "
+            "(session_id, started_at, ended_at, panel_id) VALUES (?, ?, ?, ?)",
+            (
+                record.session_id,
+                to_iso(record.started_at),
+                None if record.ended_at is None else to_iso(record.ended_at),
+                record.panel_id,
+            ),
+        )
+
+    def close_build_session(self, session_id: str, ended_at: datetime) -> None:
+        """Stamp when a Build Mode session ended. Idempotent (first close wins)."""
+        self._write(
+            "UPDATE build_sessions SET ended_at = ? "
+            "WHERE session_id = ? AND ended_at IS NULL",
+            (to_iso(ended_at), session_id),
+        )
+
+    def build_session(self, session_id: str) -> BuildSessionRecord | None:
+        """The Build Mode session header, or None if this id was never opened."""
+        rows = self._read(
+            "SELECT session_id, started_at, ended_at, panel_id "
+            "FROM build_sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return BuildSessionRecord(
+            session_id=row["session_id"],
+            started_at=from_iso(row["started_at"]),
+            ended_at=None if row["ended_at"] is None else from_iso(row["ended_at"]),
+            panel_id=row["panel_id"],
+        )
+
+    def append_build_attempt(self, record: BuildAttemptRecord) -> None:
+        """Append one completed compile/flash/validation attempt."""
+        self._write(
+            "INSERT INTO build_attempts "
+            "(session_id, sequence, attempt_type, success, occurred_at, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                record.session_id,
+                record.sequence,
+                record.attempt_type.value,
+                1 if record.success else 0,
+                to_iso(record.occurred_at),
+                record.detail,
+            ),
+        )
+
+    def build_attempts_for_session(self, session_id: str) -> tuple[BuildAttemptRecord, ...]:
+        """Every compile/flash/validation attempt for one session, in order."""
+        rows = self._read(
+            "SELECT session_id, sequence, attempt_type, success, occurred_at, detail "
+            "FROM build_attempts WHERE session_id = ? ORDER BY sequence ASC, id ASC",
+            (session_id,),
+        )
+        return tuple(
+            BuildAttemptRecord(
+                session_id=row["session_id"],
+                sequence=row["sequence"],
+                attempt_type=BuildAttemptType(row["attempt_type"]),
+                success=bool(row["success"]),
+                occurred_at=from_iso(row["occurred_at"]),
+                detail=row["detail"],
+            )
+            for row in rows
+        )
 
 
 # --- process-wide default --------------------------------------------------

@@ -75,7 +75,8 @@
       "step_id": "forge-command",
       "title": "Publish a forged command",
       "command": "mosquitto_pub",
-      "description": "Publish a spoofed command to the device's command topic and confirm the actuator obeys it."
+      "description": "Publish a spoofed command to the device's command topic and confirm the actuator obeys it.",
+      "phase": "exploitation"
     }
   ],
   "evaluation": {
@@ -96,7 +97,34 @@
         "required_events": ["spoof_succeeded", "attack_completed"]
       }
     ],
-    "metrics": ["ACR", "RE", "EAC", "TTE"]
+    "objectives": [
+      {
+        "objective_id": "extract-firmware",
+        "description": "Extract the firmware from the ESP32.",
+        "required_events": ["firmware_extracted"]
+      },
+      {
+        "objective_id": "analyze-firmware",
+        "description": "Analyze the extracted firmware to identify relevant configuration and communication information.",
+        "required_events": ["firmware_analyzed"]
+      },
+      {
+        "objective_id": "discover-broker-and-topic",
+        "description": "Discover the MQTT broker and command topic used by the device.",
+        "required_events": ["broker_discovered", "topic_discovered"]
+      },
+      {
+        "objective_id": "observe-mqtt-communication",
+        "description": "Observe the MQTT communication associated with the device.",
+        "required_events": ["mqtt_observed"]
+      },
+      {
+        "objective_id": "demonstrate-unauthorized-command",
+        "description": "Demonstrate the identified vulnerability by issuing an unauthorized motor-control command.",
+        "required_events": ["attack_completed"]
+      }
+    ],
+    "metrics": ["ACR", "RE", "EAC", "TTE", "TTR", "AID", "DEI"]
   },
   "firmware": {
     "firmware_id": "smart-home-mqtt-control-firmware",
@@ -110,6 +138,11 @@
     "serial": {
       "baud_rate": 115200
     }
+  },
+  "remediation": {
+    "vulnerability": "An authenticated MQTT client can issue motor-control commands without per-command authorization.",
+    "remediation_goal": "Enforce per-command authorization for motor-control commands.",
+    "validation_requirement": "The remediated firmware must reject a motor-control command from a client that is not authorized to issue that specific command, while continuing to accept a properly authorized command."
   },
   "parameters": {
     "device_role": "smart-home-actuator",

@@ -25,6 +25,7 @@ import pytest
 
 from app import config
 from app.events import MEMORY_PATH, SqliteEventStore, set_default_store
+from app.hardware import device_monitor
 
 
 @pytest.fixture(autouse=True)
@@ -58,3 +59,51 @@ def no_startup_device_detection(monkeypatch: pytest.MonkeyPatch):
     `tests/test_monitor_readiness.py`.
     """
     monkeypatch.setattr(config, "HARDWARE_STARTUP_DETECT", False)
+
+
+@pytest.fixture(autouse=True)
+def reset_shared_device_monitor():
+    """Reset the process-wide `device_monitor` before AND after every test.
+
+    THE GAP THIS CLOSES. `no_startup_device_detection` above stops the
+    application LIFESPAN from priming this singleton with a real detection,
+    but nothing stopped a test from driving one directly — and one already
+    does, by design: `app/websocket.py`'s `hardware_status` handler calls
+    `device_monitor.refresh()` for REAL on every poll (never the passive
+    `snapshot()`), because in production that is exactly what keeps the
+    shared cache warm between the frontend's periodic header polls. A test
+    that sends that message — `test_polling_hardware_status_records_nothing`
+    does, on purpose, to prove polling is otherwise silent — leaves the
+    singleton CONNECTED and IDENTIFIED afterward whenever a real ESP32 is
+    physically attached to the machine running the suite, with nothing to
+    clean it up. The NEXT test to open a session then reads that leaked
+    state through `select_session_scenario()` and silently receives
+    whichever panel's `Scenario` the real board resolves to, instead of the
+    long-standing default it was written against.
+
+    THE BUG THIS PINS. That is precisely what made
+    `test_hack_events.py::test_the_full_flow_over_the_websocket_delivers_server_timestamps`
+    hang when run after `test_polling_hardware_status_records_nothing` with
+    Panel 1's board connected: the target test's session silently became a
+    `SmartHomeMQTTScenario` instead of the `EnvironmentalMonitoringScenario`
+    its `FULL_FLOW` arguments are written for, one command in that
+    now-mismatched sequence produced zero events, and
+    `test_hack_events.py::_drain` — which reads frames until a `state`
+    frame arrives — blocked forever on a `state` frame a zero-event command
+    never sends. Confirmed by direct reproduction: driving one real
+    `device_monitor.refresh()` and then calling `select_session_scenario()`
+    resolves Panel 1's `SmartHomeMQTTScenario` with no fixture involved.
+
+    Resetting before AND after — not just after — means a test gains no
+    benefit from, and leaves no trace for, whatever a real board happens to
+    answer: the suite behaves as if no physical hardware exists, regardless
+    of what is actually plugged into the machine running it. Cheap and
+    synchronous (`DeviceMonitor.reset()` performs no I/O), so this adds no
+    measurable time. Tests that deliberately exercise real hardware (see
+    `tests/test_hardware_in_the_loop.py`) use their OWN private
+    `DeviceMonitor` instances or restore this singleton themselves within
+    the test, and are unaffected by the extra reset around them.
+    """
+    device_monitor.reset()
+    yield
+    device_monitor.reset()

@@ -243,12 +243,15 @@ def default_panel_resource_service() -> PanelResourceService:
     Built at call time for the same reason `default_panel_registry()` and
     `default_panel_package_loader()` are.
 
-    ONE CALLER, SINCE PHASE 2D.4. `app/scenario_selection.py` resolves
+    TWO CALLERS, SINCE PHASE 2E.3. `app/scenario_selection.py` resolves
     resources once per Hack Mode connection, to choose the scenario that
-    session runs, and it uses `resolve()` — the passive read — so opening a
-    terminal still triggers no detection. Nothing else consults it: no
-    command handler, no frontend frame, and no provisioning path, because
-    there is none. Reading resources remains inert; the compile -> flash ->
-    verify -> start lifecycle is still a later phase with no caller here.
+    session runs; `app/build_panel_resolution.py` resolves the same
+    resources once per Build Mode connection, to read a panel's
+    `remediation` declaration and to record which panel a Build session's
+    evidence belongs to. Both use `resolve()` — the passive read — so
+    opening either a terminal or a Build Mode workspace still triggers no
+    detection. Still nobody calls `refresh()` through this factory: no
+    command handler, no frontend frame, and no provisioning path does, and
+    the compile -> flash -> verify -> start lifecycle stays inert here.
     """
     return PanelResourceService()

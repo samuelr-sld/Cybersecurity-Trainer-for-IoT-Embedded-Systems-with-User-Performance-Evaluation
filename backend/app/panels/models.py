@@ -184,6 +184,29 @@ class LearningContent:
                 raise ValueError(f"not an ExpectedFinding: {finding!r}")
 
 
+class WorkflowPhase(str, Enum):
+    """Which side of the reconnaissance/exploitation boundary a step is on.
+
+    Phase 2E.2 seam. Reconnaissance Efficiency (RE) is scoped to "commands
+    issued during the reconnaissance phase" (the final manuscript, Section
+    3.10.1), and nothing already in the package/workflow schema draws that
+    line: `CommandCategory` (app/commands/base.py) groups tools by KIND
+    (firmware/network/mqtt/...) and puts `mosquitto_sub` and `mosquitto_pub`
+    in the same MQTT bucket, so it cannot separate "observe" from "publish".
+    Workflow-step ORDER hints at it but is not a declared fact a metric
+    should infer by position — a later step could still be reconnaissance.
+
+    So the package declares it explicitly, per step, the same way it already
+    declares `required_events` on a `SuccessCondition`: data an evaluator
+    reads, not a rule an engine hardcodes. `RECONNAISSANCE` is the default —
+    the common case for a workflow step — so only the step(s) that actually
+    constitute the exploit/attack action need to say otherwise.
+    """
+
+    RECONNAISSANCE = "reconnaissance"
+    EXPLOITATION = "exploitation"
+
+
 @dataclass(frozen=True)
 class WorkflowStep:
     """One step of the expected student workflow.
@@ -195,12 +218,15 @@ class WorkflowStep:
     registry is unchanged and still closed, and a manifest naming a command
     that does not exist is caught by the test suite rather than reaching a
     router. None for a step performed outside the terminal.
+
+    `phase` is the Phase 2E.2 RE seam described on `WorkflowPhase`.
     """
 
     step_id: str
     title: str
     command: str | None = None
     description: str = ""
+    phase: WorkflowPhase = WorkflowPhase.RECONNAISSANCE
 
     def __post_init__(self) -> None:
         _require_identifier(self.step_id, "workflow step id")
@@ -216,6 +242,8 @@ class WorkflowStep:
                 )
         if not isinstance(self.description, str):
             raise ValueError(f"workflow step {self.step_id!r} description must be a string")
+        if not isinstance(self.phase, WorkflowPhase):
+            raise ValueError(f"workflow step {self.step_id!r} phase must be a WorkflowPhase")
 
 
 @dataclass(frozen=True)
@@ -244,6 +272,68 @@ class SuccessCondition:
 
 
 @dataclass(frozen=True)
+class ObjectiveDeclaration:
+    """One measurable ACTIVITY objective for the guided Hack Mode exercise,
+    used to compute Attack Completion Rate.
+
+    Phase 2E.2 seam, corrected after an initial modelling mistake (see
+    below). ACR's formula (final manuscript, Section 3.10.1) is "Objectives
+    Completed in Session / Total Objectives for Module", where a completion
+    is "the count of distinct objective-completion events logged during the
+    session". Nothing already in the package established that:
+    `LearningContent.objectives` (that class's own docstring) is
+    human-readable, often CONCEPTUAL prose ("explain why X") aimed at a
+    student, with no identifier and no link to the recorded event log; and
+    `SuccessCondition` is a DIFFERENT concept again — an evaluator's overall
+    pass/fail conjunction, not a per-objective breakdown. Conflating either
+    with ACR's objectives is exactly the "two sources of truth" mistake the
+    package architecture avoids elsewhere, so ACR needs its own declaration,
+    deliberately separate from both.
+
+    `evaluation.objectives` ARE NOT `learning.objectives`. The former are
+    the guided activity's own MEASURABLE milestones — "extract the
+    firmware", "observe the MQTT communication" — each naturally backed by
+    one or more scenario events; the latter are broader academic learning
+    outcomes a package may declare purely for display, which can legitimately
+    include something no terminal command could ever produce evidence for.
+    A correctly authored package's `evaluation.objectives` should therefore
+    all be completable from recorded activity — see
+    `backend/panels/smart-home-mqtt-control/panel.json` for the corrected
+    five, none of which duplicate the academic phrasing of
+    `learning.objectives` verbatim.
+
+    `objective_id` is the identity ACR counts distinct completions against —
+    "objective_1 completed twice" must not inflate the count, which requires
+    an id to de-duplicate against in the first place. `required_events`
+    mirrors `SuccessCondition.required_events` exactly (the scenario's own
+    canonical event vocabulary): an objective is complete once every one of
+    its required events has been recorded for the session.
+
+    `required_events == ()` REMAINS SUPPORTED AS A GENERIC FALLBACK, not
+    because any shipped package should use it. If a future package's
+    objective genuinely has no technical detection method, declaring it this
+    way is honest: `app/metrics/acr.py::compute_acr` counts it in "Total
+    Objectives for Module" (the module really does have that many declared
+    objectives) but never marks it complete on its own — surfaced plainly as
+    a capped ceiling rather than a guessed completion or a silently shrunk
+    denominator.
+    """
+
+    objective_id: str
+    description: str
+    required_events: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.objective_id, "objective id")
+        _require_text(self.description, f"objective {self.objective_id!r} description")
+        for event in self.required_events:
+            if not isinstance(event, str) or not re.fullmatch(_EVENT_NAME_PATTERN, event):
+                raise ValueError(
+                    f"objective {self.objective_id!r} names an invalid event: {event!r}"
+                )
+
+
+@dataclass(frozen=True)
 class EvaluationDeclaration:
     """WHICH events and metrics an evaluator should care about.
 
@@ -252,12 +342,20 @@ class EvaluationDeclaration:
     """
 
     success_conditions: tuple[SuccessCondition, ...] = ()
+    objectives: tuple[ObjectiveDeclaration, ...] = ()
     metrics: tuple[EvaluationMetric, ...] = ()
 
     def __post_init__(self) -> None:
         for condition in self.success_conditions:
             if not isinstance(condition, SuccessCondition):
                 raise ValueError(f"not a SuccessCondition: {condition!r}")
+        seen_objectives: set[str] = set()
+        for objective in self.objectives:
+            if not isinstance(objective, ObjectiveDeclaration):
+                raise ValueError(f"not an ObjectiveDeclaration: {objective!r}")
+            if objective.objective_id in seen_objectives:
+                raise ValueError(f"duplicate objective id: {objective.objective_id!r}")
+            seen_objectives.add(objective.objective_id)
         seen: set[EvaluationMetric] = set()
         for metric in self.metrics:
             if not isinstance(metric, EvaluationMetric):
@@ -265,6 +363,47 @@ class EvaluationDeclaration:
             if metric in seen:
                 raise ValueError(f"duplicate metric declared: {metric.value}")
             seen.add(metric)
+
+
+@dataclass(frozen=True)
+class RemediationDeclaration:
+    """WHAT a panel's Build Mode remediation activity is, for TTR/AID/DEI.
+
+    Phase 2E.3 seam — the Build Mode analogue of `workflow`/`evaluation` for
+    Hack Mode. It answers three questions purely as courseware TEXT, never
+    as an executable check: what vulnerability the student is fixing, what
+    a correct fix must achieve, and what validating that fix would need to
+    confirm. This module never invents a technical validation mechanism
+    (see `app/build/service.py::BuildService.record_validation_attempt`):
+    whether the remediated firmware is ACTUALLY secure is decided by a real
+    check that does not exist yet in this codebase, and this declaration
+    does not pretend otherwise.
+
+    THERE IS NO "WHICH EVENT MEANS SUCCESS" FIELD HERE, DELIBERATELY. Unlike
+    `SuccessCondition`/`ObjectiveDeclaration`, which each cite specific Hack
+    Mode `ScenarioEventType` values from an open-ended vocabulary, Build
+    Mode's generic attempt vocabulary (`app/build/records.py::
+    BuildAttemptType`) has exactly one validation category, full stop — a
+    successful remediation is structurally "a recorded VALIDATION attempt
+    with `success=True`" for every panel, the same way `attack_completed`
+    is Hack Mode's one generic success signal (see `app/metrics/eac.py`).
+    There is nothing for a package to select between, so nothing is
+    declared here that the generic metric layer would need to read.
+
+    `vulnerability` and `remediation_goal` restate — never contradict — the
+    package's own established Hack Mode facts (`learning`/`scenario`); they
+    exist here so Build Mode can show a student what they are fixing
+    without importing Hack Mode's courseware fields into a Build-side view.
+    """
+
+    vulnerability: str
+    remediation_goal: str
+    validation_requirement: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.vulnerability, "remediation vulnerability")
+        _require_text(self.remediation_goal, "remediation goal")
+        _require_text(self.validation_requirement, "remediation validation_requirement")
 
 
 #: What a `parameters` value may be. Scalars only: a static parameter is one
@@ -286,6 +425,10 @@ class PanelPackage:
     "which firmware, built how, for what board, talking at what line rate".
     It is None for a panel whose firmware does not exist yet — the honest
     "not yet provisioned" state, not a dangling reference.
+
+    `remediation` is the Phase 2E.3 Build Mode analogue: None for a panel
+    whose remediation activity has not been declared yet, the same honest
+    "not yet provisioned" state `firmware` uses.
     """
 
     schema_version: int
@@ -295,6 +438,7 @@ class PanelPackage:
     workflow: tuple[WorkflowStep, ...] = ()
     evaluation: EvaluationDeclaration = field(default_factory=EvaluationDeclaration)
     firmware: FirmwareConfiguration | None = None
+    remediation: RemediationDeclaration | None = None
     parameters: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
     #: The directory this package was loaded from. Set by the loader; it is
     #: how `firmware_sketch_path` resolves a relative sketch reference. A
@@ -324,6 +468,10 @@ class PanelPackage:
             step_ids.add(step.step_id)
         if self.firmware is not None and not isinstance(self.firmware, FirmwareConfiguration):
             raise ValueError("package firmware must be a FirmwareConfiguration")
+        if self.remediation is not None and not isinstance(
+            self.remediation, RemediationDeclaration
+        ):
+            raise ValueError("package remediation must be a RemediationDeclaration")
         for key, value in self.parameters.items():
             if not isinstance(key, str) or not key.strip():
                 raise ValueError(f"parameter name must be a non-empty string: {key!r}")

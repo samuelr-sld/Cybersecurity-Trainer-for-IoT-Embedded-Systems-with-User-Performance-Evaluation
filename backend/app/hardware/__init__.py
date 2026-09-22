@@ -60,6 +60,20 @@ Module map:
                 (cached per port, suppressed while flashing), coalesces
                 concurrent refreshes, and publishes results. Emits no
                 events and writes to no terminal.
+    flash_reader.py
+                `EsptoolFlashReader` / `FirmwareArtifact` — reads real flash
+                BYTES with `esptool read_flash` (Phase 2H.1), the same
+                argv-array/`process.py` pattern `identity.py` already uses.
+                Writes to a backend-controlled temp file, never a student-
+                named path; the artifact that survives the call is bytes,
+                held per-session (`HackSession.firmware_artifact`), never on
+                a `Scenario`.
+    firmware_strings.py
+                `extract_printable_strings` — a pure, generic `strings(1)`
+                equivalent over real bytes. Knows nothing about any panel's
+                expected findings; it is the seam `strings`/`grep` use to
+                analyse a real `FirmwareArtifact` instead of a scenario's
+                canned string table.
 
 PHASE 2A SCOPE: detection, shared state, AND real serial I/O for Hack Mode
 (`serial_transport.py`). `DeviceState.port` is what gets opened — the
@@ -87,6 +101,16 @@ from app.hardware.firmware import (
     FirmwareSourceKind,
     FlashSettings,
     SerialSettings,
+)
+from app.hardware.firmware_strings import DEFAULT_MIN_LENGTH, extract_printable_strings
+from app.hardware.flash_reader import (
+    EsptoolFlashReader,
+    FirmwareArtifact,
+    FlashReadFailure,
+    FlashReadOutcome,
+    FlashReadProbe,
+    FlashReadRequest,
+    default_flash_reader,
 )
 from app.hardware.monitor import DeviceDetector, DeviceMonitor, device_monitor
 from app.hardware.panel_identification import (
@@ -126,9 +150,16 @@ __all__ = [
     "BUILT_IN_PANELS",
     "BoardConfiguration",
     "CompilationSettings",
+    "DEFAULT_MIN_LENGTH",
+    "EsptoolFlashReader",
+    "FirmwareArtifact",
     "FirmwareConfiguration",
     "FirmwareSource",
     "FirmwareSourceKind",
+    "FlashReadFailure",
+    "FlashReadOutcome",
+    "FlashReadProbe",
+    "FlashReadRequest",
     "FlashSettings",
     "PanelDefinition",
     "PanelIdentification",
@@ -159,9 +190,11 @@ __all__ = [
     "IdentityRequest",
     "NullIdentityProbe",
     "canonical_alias",
+    "default_flash_reader",
     "default_identity_probe",
     "encode_send_payload",
     "device_monitor",
+    "extract_printable_strings",
     "normalize_mac",
     "open_pyserial_port",
     "resolve_serial_target",

@@ -21,6 +21,16 @@ Responsibility split:
                       vs. editable regions. Also the only thing that reads a
                       project's files onto disk (`materialize`), for compilation.
     environmental.py  the Environmental Monitoring reference project.
+    discovery/        `analyze_source` — passive C++ structural discovery
+                      (B1). Produces a `BuildDocument`/`CodeSection[]` and
+                      imports nothing else in this package.
+    document_project.py  the one conversion `CodeSection[] -> FileSegment[]`
+                      (B2). Pure; reads no file and knows no panel.
+    sketch_source.py  `load_sketch_project` — reads a real sketch directory
+                      through the two above into a `BuildProject` (B2). The
+                      only step here that opens a file; still knows no panel
+                      (`app/build_project_selection.py` supplies its
+                      arguments off a resolved `PanelPackage`).
     process.py        `run_capture` — the only module in this package (and in
                       the whole backend) allowed to spawn a subprocess.
     compiler.py       `CompilerAdapter` / `ArduinoCliCompiler` — builds the
@@ -86,6 +96,12 @@ from app.build.compiler import (
     CompilerAdapter,
     default_compiler,
 )
+from app.build.document_project import (
+    DocumentProjectError,
+    board_info_from_fqbn,
+    build_project_from_document,
+    firmware_file_from_document,
+)
 from app.build.environmental import (
     SECURITY_REGION_ID,
     create_environmental_monitoring_project,
@@ -113,6 +129,7 @@ from app.build.models import (
     RegionKind,
     ValidationStatus,
 )
+from app.build.sketch_source import SketchSourceError, load_sketch_project
 from app.build.workspace import (
     BuildWorkspace,
     BuildWorkspaceError,
@@ -157,6 +174,7 @@ __all__ = [
     "CompilerAdapter",
     "DeviceDetectOutcome",
     "DeviceDetectRequest",
+    "DocumentProjectError",
     "FileSegment",
     "FirmwareFile",
     "FlashFailureCategory",
@@ -170,10 +188,15 @@ __all__ = [
     "RegionNotEditableError",
     "RegionNotFoundError",
     "SerialDevice",
+    "SketchSourceError",
     "ValidationStatus",
+    "board_info_from_fqbn",
+    "build_project_from_document",
     "create_blink_project",
     "create_default_workspace",
     "create_environmental_monitoring_project",
     "default_compiler",
     "default_flasher",
+    "firmware_file_from_document",
+    "load_sketch_project",
 ]

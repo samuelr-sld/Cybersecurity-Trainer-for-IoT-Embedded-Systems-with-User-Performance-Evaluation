@@ -17,8 +17,9 @@ module, and a submitted edit can only ever replace one named EDITABLE
 region — see `app/build/workspace.py` for the enforcement.
 
 Phase 3A behaviour: accept the connection, create an isolated session with
-its default workspace already loaded (the LED Blink pipeline-proof project
-as of Phase 1 — see `app/build/blink.py`), announce the session id, emit
+its workspace already loaded — as of Phase B2 the attached panel's own
+firmware when one resolves (`app/build_project_selection.py`), and otherwise
+the LED Blink pipeline-proof project (`app/build/blink.py`), announce the session id, emit
 the session's bootstrap events, send one `state` snapshot, then handle
 `edit_region` requests — validating the region via the Build Service,
 emitting the resulting event(s), and sending a refreshed `state` snapshot.
@@ -64,6 +65,7 @@ from pydantic import ValidationError
 from app import config
 from app.build.events import BuildEvent
 from app.build.service import BuildActionResult, default_service
+from app.build_project_selection import select_build_project
 from app.build_sessions import BuildSession, build_session_manager
 from app.models.build_messages import (
     BUILD_CLIENT_MESSAGE_ADAPTER,
@@ -154,8 +156,26 @@ def _progress_sink(websocket: WebSocket, session: BuildSession):
 async def build_websocket(websocket: WebSocket) -> None:
     """Serve one Build Mode session."""
     await websocket.accept()
-    session = await build_session_manager.create()
-    logger.info("build session opened: %s", session.session_id)
+    # PHASE 2E.3 / B2 — a passive read of the shared panel-resolution layer
+    # (`app/build_panel_resolution.py`), mirroring Hack Mode's
+    # `select_session_scenario()` call in `app/websocket.py`. It reads the
+    # device monitor's current state (no `arduino-cli`, no MAC probe, no
+    # port opened) and never fails the connection.
+    #
+    # B2 extends what that one resolution is used for: as well as the
+    # `panel_id` recorded on the session, it now selects the PROJECT the
+    # session loads — the attached panel's real firmware, materialized
+    # through B1 structural discovery, or the default LED Blink project when
+    # no panel resolves. Both come off the single `BuildProjectSelection`, so
+    # the chain is resolved once per connection, and an unresolved panel
+    # still simply leaves `panel_id` as the honest `None` it already
+    # defaults to. The wire protocol is unchanged — this sends no frame of
+    # its own, and the `state` snapshot keeps exactly its existing shape.
+    selection = select_build_project()
+    session = await build_session_manager.create(
+        panel_id=selection.panel_id, workspace=selection.workspace
+    )
+    logger.info("build session opened: %s [%s]", session.session_id, selection.describe())
 
     try:
         await send(websocket, BuildSessionMessage(session_id=session.session_id))

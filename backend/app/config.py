@@ -254,6 +254,24 @@ HARDWARE_IDENTITY_TIMEOUT_SECONDS: float = float(
     os.getenv("TRAINER_HARDWARE_IDENTITY_TIMEOUT_SECONDS", "30")
 )
 
+# See app/hardware/flash_reader.py. A real `esptool read_flash` of the
+# student-facing command's documented full-image example (4 MiB) genuinely
+# takes tens of seconds even with the stub flasher; this is deliberately far
+# more generous than the MAC-read timeout above, which reads a handful of
+# bytes rather than an image.
+HARDWARE_FLASH_READ_TIMEOUT_SECONDS: float = float(
+    os.getenv("TRAINER_HARDWARE_FLASH_READ_TIMEOUT_SECONDS", "240")
+)
+
+# Upper bound on a real `esptool.py read_flash <offset> <size> <file>`, in
+# bytes. 4 MiB matches the ESP32's typical flash size and the size the
+# scenario's own simulated banner text has always quoted; it exists so a
+# student cannot ask the real hardware path for an arbitrarily large or slow
+# read merely by typing a bigger number.
+HARDWARE_MAX_FLASH_READ_BYTES: int = int(
+    os.getenv("TRAINER_HARDWARE_MAX_FLASH_READ_BYTES", str(0x400000))
+)
+
 # Extra MAC -> panel bindings, as comma-separated `mac=panel-id` pairs, e.g.
 # "02:00:00:00:00:02=environmental-monitoring". Applied over the built-in
 # registry in app/hardware/panels.py so a replacement or additional ESP32

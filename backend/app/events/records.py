@@ -87,12 +87,28 @@ class HackSessionRecord:
     WebSocket connects rather than when the first command arrives.
 
     `ended_at` is None while the session is live.
+
+    `participant_id` is the Phase 2E.2 EAC seam. Exploitation Attempt Count
+    (the final manuscript's actual name for the metric the task brief calls
+    "EAC" — see `app/metrics/eac.py`) counts SESSIONS by the same participant
+    at the same learning activity, and nothing in this backend identifies a
+    participant anywhere: there is no login, no auth, and the frontend's
+    student roster (`src/data.js`) is fabricated prototype data that never
+    reaches this WebSocket (see that module's own docstring). Inventing an
+    identity here to make the formula work is exactly what Phase 2E.2 was
+    told not to do, so this field stays honestly nullable — None for every
+    session today, since no caller has a real identity to supply — and is
+    the seam a future authentication phase fills in. `scenario_id` already
+    serves as "learning activity" (a MAC resolves through a panel to exactly
+    one scenario id), so no second field is needed for that half of the
+    grouping key.
     """
 
     session_id: str
     scenario_id: str
     started_at: datetime
     ended_at: datetime | None = None
+    participant_id: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -100,6 +116,7 @@ class HackSessionRecord:
             "scenario_id": self.scenario_id,
             "started_at": to_iso(self.started_at),
             "ended_at": None if self.ended_at is None else to_iso(self.ended_at),
+            "participant_id": self.participant_id,
         }
 
 
@@ -125,6 +142,13 @@ class HackCommandRecord:
     "the tool ran and reported failure" (handled, non-zero exit) from "there
     was no such tool" (not handled), which read identically from the exit
     code alone.
+
+    `fields_correct` is the Phase 2E.2 Reconnaissance Efficiency seam —
+    `ScenarioOutcome.fields_correct` (app/scenarios/base.py) forwarded
+    verbatim through `CommandResult` and the router. None means "not
+    assessed / not applicable" (an unrecognized command, or a tool with no
+    target-fact fields to get wrong); True/False is the scenario's own,
+    ground-truth-backed verdict for a tool that has such fields.
     """
 
     session_id: str
@@ -134,6 +158,7 @@ class HackCommandRecord:
     exit_code: int
     handled: bool
     occurred_at: datetime
+    fields_correct: bool | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -144,6 +169,7 @@ class HackCommandRecord:
             "exit_code": self.exit_code,
             "handled": self.handled,
             "occurred_at": to_iso(self.occurred_at),
+            "fields_correct": self.fields_correct,
         }
 
 

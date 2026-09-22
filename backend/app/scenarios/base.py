@@ -43,16 +43,45 @@ class ScenarioOutcome:
     owns CRLF. `success` and `exit_code` classify the operation for the
     handler and, later, the evaluator. `events` are the domain events this
     single call emitted; the engine also retains them in its own ordered log.
+
+    `fields_correct` is the Phase 2E.2 Reconnaissance Efficiency (RE) seam.
+    RE needs to know whether a RECOGNIZED command's required target-fact
+    fields (host, port, topic, ...) were correct — a genuinely different
+    question from `success`/`exit_code`, which a scenario reserves for
+    tool-realistic behaviour. The two can legitimately disagree: a real
+    `nmap` against a reachable host with the WRONG port is a successful scan
+    that correctly reports the port closed (`success=True`), even though the
+    port argument itself was wrong. Leaving `fields_correct` at its default
+    (`None`) means "not applicable / not assessed" — the right answer for a
+    tool with no target-fact fields to get wrong (`esptool.py`, `strings`,
+    `grep`), and the metric layer falls back to `exit_code == 0` for it. A
+    scenario sets it explicitly only where it already knows the ground truth
+    and `success` alone cannot distinguish "reached the right target" from
+    "reached A target with a wrong required field". This field carries no
+    metric arithmetic — it is one more fact the scenario reports, exactly
+    like `events`; see `app/metrics/re.py` for the computation that reads it.
     """
 
     lines: tuple[str, ...] = ()
     success: bool = True
     exit_code: int = EXIT_OK
     events: tuple[ScenarioEvent, ...] = ()
+    fields_correct: bool | None = None
 
     @classmethod
-    def ok(cls, *lines: str, events: tuple[ScenarioEvent, ...] = ()) -> "ScenarioOutcome":
-        return cls(lines=lines, success=True, exit_code=EXIT_OK, events=events)
+    def ok(
+        cls,
+        *lines: str,
+        events: tuple[ScenarioEvent, ...] = (),
+        fields_correct: bool | None = None,
+    ) -> "ScenarioOutcome":
+        return cls(
+            lines=lines,
+            success=True,
+            exit_code=EXIT_OK,
+            events=events,
+            fields_correct=fields_correct,
+        )
 
     @classmethod
     def failed(
@@ -60,12 +89,19 @@ class ScenarioOutcome:
         *lines: str,
         exit_code: int = EXIT_FAILURE,
         events: tuple[ScenarioEvent, ...] = (),
+        fields_correct: bool | None = None,
     ) -> "ScenarioOutcome":
-        return cls(lines=lines, success=False, exit_code=exit_code, events=events)
+        return cls(
+            lines=lines,
+            success=False,
+            exit_code=exit_code,
+            events=events,
+            fields_correct=fields_correct,
+        )
 
     @classmethod
     def usage(cls, *lines: str) -> "ScenarioOutcome":
-        return cls(lines=lines, success=False, exit_code=EXIT_USAGE)
+        return cls(lines=lines, success=False, exit_code=EXIT_USAGE, fields_correct=False)
 
 
 class Scenario(ABC):

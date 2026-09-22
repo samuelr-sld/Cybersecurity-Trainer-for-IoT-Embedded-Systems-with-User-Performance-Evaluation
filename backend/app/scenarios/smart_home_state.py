@@ -55,10 +55,10 @@ class MotorControlTarget:
     topic. See `SmartHomeMQTTScenario`'s module docstring.
     """
 
-    broker_host: str = "192.168.10.20"
+    broker_host: str = "192.168.50.1"
     broker_port: int = 1883
-    command_topic: str = "capstone/panel1/motor"
-    state_topic: str = "capstone/panel1/motor/state"
+    command_topic: str = "cybertrainer/smart-home/motor/control"
+    state_topic: str = "cybertrainer/smart-home/motor/state"
     device_status: str = "online"
     broker_auth_required: bool = True
 

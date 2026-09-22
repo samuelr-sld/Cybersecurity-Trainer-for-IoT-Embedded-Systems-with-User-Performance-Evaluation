@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react'
 import * as Blockly from 'blockly/core'
 import * as BlocklyEnMsg from 'blockly/msg/en'
-import { ARDUINO_TOOLBOX, registerArduinoBlocks } from '../blockly/arduinoBlocks'
+import { registerArduinoBlocks } from '../blockly/arduinoBlocks'
 import { generateArduinoCode } from '../blockly/arduinoGenerator'
+import { POPULATED_TOOLBOX } from '../blockly/catalog/masterCatalog.generated'
 
 // `blockly/core` (the modular entry point this file deliberately uses
 // instead of the "batteries included" `blockly` package — see the module
@@ -89,7 +90,9 @@ export default function BlocklyWorkspace({ onCodeChange }) {
     if (!host) return undefined
 
     const workspace = Blockly.inject(host, {
-      toolbox: ARDUINO_TOOLBOX,
+      // Every catalog category that has at least one usable block; the rest
+      // of the master catalog is metadata only (see src/blockly/catalog/).
+      toolbox: POPULATED_TOOLBOX,
       theme: buildBlocklyTheme(),
       renderer: 'zelos',
       grid: { spacing: 24, length: 2, colour: readCssVar('--line', '#263241'), snap: true },

@@ -1,0 +1,93 @@
+"""The semantic representation layer (Phase B3) — what supported code MEANS.
+
+    C++ source
+        -> B1 CodeSection            (app/build/discovery/)
+        -> B3 Semantic IR            (this package)
+        -> B4 Blockly adapter        (does not exist yet)
+        -> Blockly
+
+BLOCKLY IS AN ADAPTER, NOT A DEPENDENCY. Nothing in this package imports
+Blockly, `app.blockly`, a workspace, a block id, XML, a serialization format
+or any UI state, and nothing here is shaped by how Blockly draws anything.
+The IR is equally valid for code that came from handwritten C++, from a
+future parser, from another editor, or eventually from Blockly itself — B4
+converts between this model and Blockly, in its own module, in both
+directions. See `operations.py` for why the block catalog's
+`semantic_operation` vocabulary is nonetheless reused verbatim, and how that
+agreement is enforced without a type dependency.
+
+The dependency direction is one way and shallow:
+
+    app.build.semantic  ->  app.build.discovery
+
+and nothing else from `app`. No filesystem, no session, no panel package, no
+scenario, no MQTT, no permission model, no metric.
+"""
+
+from __future__ import annotations
+
+from app.build.semantic.analyzer import analyze_document
+from app.build.semantic.errors import (
+    SemanticAnalysisError,
+    SemanticError,
+    SemanticModelError,
+    UnknownOperationError,
+)
+from app.build.semantic.models import (
+    LiteralValue,
+    OperationStatement,
+    SemanticArgument,
+    SemanticProgram,
+    SemanticSection,
+    SemanticStatement,
+    SemanticValue,
+    SymbolValue,
+    UnsupportedReason,
+    UnsupportedStatement,
+)
+from app.build.semantic.operations import (
+    GPIO_DIGITAL_WRITE,
+    GPIO_PIN_MODE,
+    PROGRAM_LOOP,
+    PROGRAM_SETUP,
+    TIME_DELAY,
+    OperationForm,
+    SemanticOperation,
+    SemanticOperationRegistry,
+    SemanticParameter,
+    SemanticType,
+    build_default_operations,
+    default_semantic_operations,
+    is_operation_id,
+)
+
+__all__ = [
+    "GPIO_DIGITAL_WRITE",
+    "GPIO_PIN_MODE",
+    "PROGRAM_LOOP",
+    "PROGRAM_SETUP",
+    "TIME_DELAY",
+    "LiteralValue",
+    "OperationForm",
+    "OperationStatement",
+    "SemanticAnalysisError",
+    "SemanticArgument",
+    "SemanticError",
+    "SemanticModelError",
+    "SemanticOperation",
+    "SemanticOperationRegistry",
+    "SemanticParameter",
+    "SemanticProgram",
+    "SemanticSection",
+    "SemanticStatement",
+    "SemanticType",
+    "SemanticValue",
+    "SymbolValue",
+    "UnknownOperationError",
+    "UnsupportedReason",
+    "UnsupportedStatement",
+    "analyze_document",
+    "build_default_operations",
+    "default_semantic_operations",
+    "is_operation_id",
+]

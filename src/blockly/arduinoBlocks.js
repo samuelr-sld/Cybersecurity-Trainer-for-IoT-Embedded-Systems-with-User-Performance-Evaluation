@@ -43,8 +43,10 @@ const DIGITAL_VALUES = [
   ['LOW', 'LOW'],
 ]
 
-//: Block types this module defines, in toolbox order — reused by
-//: `ARDUINO_TOOLBOX` below and by anything that needs the full list.
+//: Block types this module defines. The toolbox is no longer built here: it
+//: comes from the master block catalog (`./catalog/`), which names these same
+//: five types as its IMPLEMENTED blocks — `catalog.test.js` fails if the two
+//: lists ever disagree.
 export const ARDUINO_BLOCK_TYPES = [
   'arduino_setup',
   'arduino_loop',
@@ -52,14 +54,6 @@ export const ARDUINO_BLOCK_TYPES = [
   'digitalwrite',
   'delay',
 ]
-
-//: A flat flyout toolbox — five blocks doesn't need category chrome, and a
-//: single flyout keeps the secondary UI as small as the ESP IDE-inspired
-//: "uncluttered, canvas-dominant" goal asks for.
-export const ARDUINO_TOOLBOX = {
-  kind: 'flyoutToolbox',
-  contents: ARDUINO_BLOCK_TYPES.map((type) => ({ kind: 'block', type })),
-}
 
 let registered = false
 

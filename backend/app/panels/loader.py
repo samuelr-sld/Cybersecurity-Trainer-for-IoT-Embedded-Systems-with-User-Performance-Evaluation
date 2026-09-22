@@ -80,9 +80,12 @@ from app.panels.models import (
     EvaluationMetric,
     ExpectedFinding,
     LearningContent,
+    ObjectiveDeclaration,
     PanelPackage,
+    RemediationDeclaration,
     ScenarioDefinition,
     SuccessCondition,
+    WorkflowPhase,
     WorkflowStep,
 )
 
@@ -189,17 +192,34 @@ def _learning(block: Any) -> LearningContent:
     )
 
 
+def _workflow_phase(data: Mapping[str, Any]) -> WorkflowPhase:
+    """Parse `phase`, defaulting to reconnaissance — see `WorkflowPhase`."""
+    raw = data.get("phase", WorkflowPhase.RECONNAISSANCE.value)
+    if not isinstance(raw, str):
+        raise PanelPackageInvalidError("workflow step phase must be a string")
+    try:
+        return WorkflowPhase(raw)
+    except ValueError as error:
+        raise PanelPackageInvalidError(
+            f"workflow step names an unknown phase {raw!r}; expected one of "
+            + ", ".join(member.value for member in WorkflowPhase)
+        ) from error
+
+
 def _workflow(block: Any) -> tuple[WorkflowStep, ...]:
     steps = []
     for entry in _as_list(block, "workflow"):
         data = _as_mapping(entry, "workflow step")
-        _reject_unknown(data, ("step_id", "title", "command", "description"), "workflow step")
+        _reject_unknown(
+            data, ("step_id", "title", "command", "description", "phase"), "workflow step"
+        )
         steps.append(
             WorkflowStep(
                 step_id=_require(data, "step_id", "workflow step"),
                 title=_require(data, "title", "workflow step"),
                 command=data.get("command"),
                 description=data.get("description", ""),
+                phase=_workflow_phase(data),
             )
         )
     return tuple(steps)
@@ -207,7 +227,7 @@ def _workflow(block: Any) -> tuple[WorkflowStep, ...]:
 
 def _evaluation(block: Any) -> EvaluationDeclaration:
     data = _as_mapping(block, "evaluation")
-    _reject_unknown(data, ("success_conditions", "metrics"), "evaluation")
+    _reject_unknown(data, ("success_conditions", "objectives", "metrics"), "evaluation")
     conditions = []
     for entry in _as_list(data.get("success_conditions", []), "evaluation.success_conditions"):
         condition = _as_mapping(entry, "success condition")
@@ -223,6 +243,21 @@ def _evaluation(block: Any) -> EvaluationDeclaration:
                 ),
             )
         )
+    objectives = []
+    for entry in _as_list(data.get("objectives", []), "evaluation.objectives"):
+        objective = _as_mapping(entry, "objective")
+        _reject_unknown(
+            objective, ("objective_id", "description", "required_events"), "objective"
+        )
+        objectives.append(
+            ObjectiveDeclaration(
+                objective_id=_require(objective, "objective_id", "objective"),
+                description=_require(objective, "description", "objective"),
+                required_events=_as_str_tuple(
+                    objective.get("required_events", []), "objective required_events"
+                ),
+            )
+        )
     metrics = []
     for name in _as_str_tuple(data.get("metrics", []), "evaluation.metrics"):
         try:
@@ -233,7 +268,9 @@ def _evaluation(block: Any) -> EvaluationDeclaration:
                 + ", ".join(metric.value for metric in EvaluationMetric)
             ) from error
     return EvaluationDeclaration(
-        success_conditions=tuple(conditions), metrics=tuple(metrics)
+        success_conditions=tuple(conditions),
+        objectives=tuple(objectives),
+        metrics=tuple(metrics),
     )
 
 
@@ -295,6 +332,33 @@ def _firmware(block: Any) -> FirmwareConfiguration:
         )
     except ValueError as error:
         raise PanelPackageInvalidError(f"invalid firmware configuration: {error}") from error
+
+
+def _remediation(block: Any) -> RemediationDeclaration | None:
+    """Parse the optional `remediation` block — see `RemediationDeclaration`.
+
+    Absent entirely for a panel whose Build Mode remediation activity has
+    not been declared yet (the honest "not yet provisioned" state, same as
+    a package with no `firmware` block).
+    """
+    if block is None:
+        return None
+    data = _as_mapping(block, "remediation")
+    _reject_unknown(
+        data,
+        ("vulnerability", "remediation_goal", "validation_requirement"),
+        "remediation",
+    )
+    try:
+        return RemediationDeclaration(
+            vulnerability=_require(data, "vulnerability", "remediation"),
+            remediation_goal=_require(data, "remediation_goal", "remediation"),
+            validation_requirement=_require(
+                data, "validation_requirement", "remediation"
+            ),
+        )
+    except ValueError as error:
+        raise PanelPackageInvalidError(f"invalid remediation declaration: {error}") from error
 
 
 class PanelPackageLoader:
@@ -382,6 +446,7 @@ class PanelPackageLoader:
                 "workflow",
                 "evaluation",
                 "firmware",
+                "remediation",
                 "parameters",
             ),
             f"package {package_id!r}",
@@ -399,6 +464,7 @@ class PanelPackageLoader:
                 workflow=_workflow(data.get("workflow", [])),
                 evaluation=_evaluation(data.get("evaluation", {})),
                 firmware=firmware,
+                remediation=_remediation(data.get("remediation")),
                 parameters=_as_mapping(data.get("parameters", {}), "parameters"),
                 directory=directory,
             )

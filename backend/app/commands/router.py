@@ -154,7 +154,13 @@ class CommandRouter:
             return CommandResult.text(_INTERNAL_ERROR_LINE, exit_code=EXIT_FAILURE)
 
         self._record(
-            context, spec.name, command.argv, result.exit_code, handled=True, at=started_at
+            context,
+            spec.name,
+            command.argv,
+            result.exit_code,
+            handled=True,
+            at=started_at,
+            fields_correct=result.fields_correct,
         )
         # The scenario engine already decided which transitions actually
         # occurred; this only stamps and stores them. A command that changed
@@ -173,15 +179,26 @@ class CommandRouter:
         *,
         handled: bool,
         at: datetime,
+        fields_correct: bool | None = None,
     ) -> None:
         """Record one submitted command against its own session's log.
 
         Routed through `context.session.recorder`, so a command can only ever
         be written to the log of the session that ran it — there is no
         process-wide event list for it to land in by mistake.
+
+        `fields_correct` defaults to None (not applicable) for every path
+        that never reached a handler — a syntax error or an unknown command
+        was never "recognized" in the RE sense, so there is nothing to grade
+        for correctness (see `app/scenarios/base.py::ScenarioOutcome`).
         """
         context.session.recorder.record_command(
-            name=name, argv=argv, exit_code=exit_code, handled=handled, occurred_at=at
+            name=name,
+            argv=argv,
+            exit_code=exit_code,
+            handled=handled,
+            occurred_at=at,
+            fields_correct=fields_correct,
         )
 
 

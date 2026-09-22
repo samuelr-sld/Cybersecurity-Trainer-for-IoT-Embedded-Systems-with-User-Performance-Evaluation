@@ -4,7 +4,8 @@ The conceptual target is the Smart Home MQTT Control System: an ESP32 that
 drives a small DC motor through an L293D driver, with local START/STOP
 buttons, a green "running" LED, a red "stopped" LED, and a buzzer that chirps
 on a state change. It is remote-controlled over MQTT on a command topic
-(`capstone/panel1/motor`) and republishes its state on a state topic.
+(`cybertrainer/smart-home/motor/control`) and republishes its state on a
+state topic (`cybertrainer/smart-home/motor/state`).
 
 THE VULNERABILITY IS AUTHORIZATION, NOT AUTHENTICATION. This is the whole
 reason Panel 1 is not the Environmental Monitoring target and must not
@@ -306,9 +307,17 @@ class SmartHomeMQTTScenario(Scenario):
                 f"Nmap scan report for {echoed}",
                 "Host seems to be down or filtered.",
                 "Nmap done: 1 IP address (0 hosts up) scanned",
+                fields_correct=False,
             )
 
         if port is not None and port != target.broker_port:
+            # Realistic nmap behaviour: scanning a reachable host on the
+            # WRONG port is a successful scan that correctly reports the
+            # port closed (`success=True` stays unchanged — no existing test
+            # asserts otherwise). But the student's `-p` argument was still
+            # wrong, which `success`/`exit_code` alone cannot say — this is
+            # exactly RE's "correct tool, correct host, incorrect port"
+            # example, so `fields_correct` says it explicitly.
             return ScenarioOutcome.ok(
                 f"Starting Nmap scan against {echoed}",
                 f"Nmap scan report for {echoed}",
@@ -316,6 +325,7 @@ class SmartHomeMQTTScenario(Scenario):
                 "PORT      STATE   SERVICE",
                 f"{port}/tcp closed  unknown",
                 "Nmap done: 1 IP address (1 host up) scanned",
+                fields_correct=False,
             )
 
         first_time = not self._state.discovery.service_discovered
@@ -339,6 +349,7 @@ class SmartHomeMQTTScenario(Scenario):
             "Service detected: Mosquitto MQTT broker (authentication required)",
             "Nmap done: 1 IP address (1 host up) scanned",
             events=tuple(bucket),
+            fields_correct=True,
         )
 
     # -- interface: stage 4, MQTT observation ------------------------------
@@ -362,20 +373,26 @@ class SmartHomeMQTTScenario(Scenario):
         if not self._reaches_broker(host, port):
             shown_port = port if port is not None else target.broker_port
             return ScenarioOutcome.failed(
-                f"Error: Unable to connect to {_short(host)}:{shown_port} (connection refused)."
+                f"Error: Unable to connect to {_short(host)}:{shown_port} (connection refused).",
+                fields_correct=False,
             )
 
         connected = f"Client connected to {target.broker_host}:{target.broker_port}."
 
         # The state topic carries the device's retained status, not the
         # control traffic the activity is about; subscribing there is valid
-        # but does not count as observing the command protocol.
+        # (`success` stays True — no existing test asserts otherwise) but
+        # does not count as observing the command protocol, so the `-t`
+        # argument was still the wrong required field for this objective —
+        # the same "reached the target, wrong required field" shape as
+        # nmap's wrong-port case above.
         if topic == target.state_topic:
             return ScenarioOutcome.ok(
                 connected,
                 f"Subscribed to '{target.state_topic}'.",
                 f"{target.state_topic} {_STOP if not self._state.motor.running else _START}",
                 "(retained device state; no control traffic here)",
+                fields_correct=False,
             )
 
         if topic != target.command_topic:
@@ -383,6 +400,7 @@ class SmartHomeMQTTScenario(Scenario):
                 connected,
                 f"Subscribed to '{_short(topic)}'.",
                 "Waiting for messages... (no publisher on this topic)",
+                fields_correct=False,
             )
 
         first_time = not self._state.discovery.mqtt_observed
@@ -403,6 +421,7 @@ class SmartHomeMQTTScenario(Scenario):
             f"{target.command_topic} {_STOP}",
             "(the local buttons publish START/STOP here; the device acts on every message)",
             events=tuple(bucket),
+            fields_correct=True,
         )
 
     # -- interface: stages 5-6, spoofing and physical impact ---------------
@@ -447,6 +466,7 @@ class SmartHomeMQTTScenario(Scenario):
             return ScenarioOutcome.failed(
                 f"Error: Unable to connect to {_short(host)}:{shown_port} (connection refused).",
                 events=tuple(bucket),
+                fields_correct=False,
             )
 
         published = (
@@ -467,6 +487,7 @@ class SmartHomeMQTTScenario(Scenario):
                 published,
                 "The controller is not subscribed to this topic; the command has no effect.",
                 events=tuple(bucket),
+                fields_correct=False,
             )
 
         # Correct topic, but the payload must be a command the firmware's
@@ -485,6 +506,7 @@ class SmartHomeMQTTScenario(Scenario):
                 "The controller received an unrecognised command and ignored it "
                 "(it accepts only START or STOP).",
                 events=tuple(bucket),
+                fields_correct=False,
             )
 
         # The vulnerability: the command topic has no per-sender
@@ -517,6 +539,7 @@ class SmartHomeMQTTScenario(Scenario):
             buzzer,
             "Broker authentication did not prevent this: the command carried no authorization.",
             events=tuple(bucket),
+            fields_correct=True,
         )
 
     # -- interface: state serialisation for Phase 2D -----------------------

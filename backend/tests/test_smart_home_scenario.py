@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import pathlib
+import re
 
 import pytest
 
@@ -41,10 +42,10 @@ from app.sessions import HackSession
 
 APP_SCENARIOS = pathlib.Path(__file__).resolve().parents[1] / "app" / "scenarios"
 
-BROKER = "192.168.10.20"
+BROKER = "192.168.50.1"
 PORT = 1883
-COMMAND_TOPIC = "capstone/panel1/motor"
-STATE_TOPIC = "capstone/panel1/motor/state"
+COMMAND_TOPIC = "cybertrainer/smart-home/motor/control"
+STATE_TOPIC = "cybertrainer/smart-home/motor/state"
 PANEL_ONE_ID = "smart-home-mqtt-control"
 
 
@@ -292,7 +293,7 @@ def test_any_publish_records_a_spoof_attempt() -> None:
 
 def test_publish_to_the_wrong_topic_is_rejected() -> None:
     sc = fresh()
-    outcome = sc.publish(BROKER, None, "capstone/panel1/other", "START")
+    outcome = sc.publish(BROKER, None, "cybertrainer/smart-home/motor/other", "START")
     assert outcome.success is False
     assert "spoof_rejected" in types(outcome)
     assert "spoof_succeeded" not in types(outcome)
@@ -546,14 +547,105 @@ def test_the_generic_router_drives_the_panel_one_scenario_unchanged() -> None:
 
     _dispatch(session, "esptool.py read_flash 0x0 0x400000 firmware.bin")
     _dispatch(session, "strings firmware.bin")
-    _dispatch(session, "nmap 192.168.10.20")
-    _dispatch(session, "mosquitto_sub -h 192.168.10.20 -t capstone/panel1/motor")
+    _dispatch(session, "nmap 192.168.50.1")
+    _dispatch(session, "mosquitto_sub -h 192.168.50.1 -t cybertrainer/smart-home/motor/control")
     result = _dispatch(
         session,
-        "mosquitto_pub -h 192.168.10.20 -t capstone/panel1/motor -m START",
+        "mosquitto_pub -h 192.168.50.1 -t cybertrainer/smart-home/motor/control -m START",
     )
 
     emitted = [e.type.value for e in result.events]
     assert "spoof_succeeded" in emitted
     assert "attack_completed" in emitted
     assert session.scenario.state.motor.running is True
+
+
+# --- Phase 2H.1: package / scenario / firmware source coherence -------------
+#
+# `panel.json`, `SmartHomeMQTTScenario`/`SmartHomeState`, and the committed
+# `.ino` firmware source used to disagree: the package and scenario always
+# described a motor controller on `capstone/panel1/motor` with START/STOP,
+# but the firmware resource was a relay/light placeholder on
+# `home/livingroom/light/set` with ON/OFF — explicitly self-documented as
+# "deliberately NOT the finalized vulnerable firmware". These tests pin the
+# one coherent definition Phase 2H.1 aligned them to, by reading the actual
+# committed `.ino` text (no compilation, no execution) rather than assuming
+# it matches.
+
+
+def _firmware_source() -> str:
+    package = default_panel_package_loader().load(PANEL_ONE_ID)
+    sketch = package.firmware_sketch_path
+    assert sketch is not None, "package declares no firmware sketch"
+    ino_files = list(sketch.glob("*.ino"))
+    assert len(ino_files) == 1, f"expected exactly one .ino, found {ino_files}"
+    return ino_files[0].read_text(encoding="utf-8")
+
+
+def test_firmware_source_uses_the_packages_declared_broker_and_topics() -> None:
+    source = _firmware_source()
+    target = fresh().state.target
+    assert f'"{target.broker_host}"' in source
+    assert str(target.broker_port) in source
+    assert f'"{target.command_topic}"' in source
+    assert f'"{target.state_topic}"' in source
+
+
+def test_firmware_source_speaks_start_stop_not_the_old_on_off_vocabulary() -> None:
+    source = _firmware_source()
+    assert "START" in source
+    assert "STOP" in source
+    # The retired relay/light placeholder's vocabulary must not reappear.
+    assert "home/livingroom" not in source
+    assert '"ON"' not in source
+    assert '"OFF"' not in source
+
+
+def test_firmware_source_authenticates_to_the_broker() -> None:
+    """The vulnerability is AUTHORIZATION, not authentication (see
+    `SmartHomeMQTTScenario`'s module docstring and `MotorControlTarget.
+    broker_auth_required`) — so the firmware's own MQTT client must actually
+    present credentials, not connect anonymously. A bare
+    `mqtt.connect("some-id")` (the old placeholder's call, one argument) is
+    exactly the wrong shape for this activity: it would make the broker
+    itself unauthenticated, which is the interpretation this activity
+    explicitly rejects.
+    """
+    source = _firmware_source()
+    assert fresh().state.target.broker_auth_required is True
+    assert re.search(r"client\.connect\([^)]*,[^)]*,[^)]*\)", source), (
+        "expected client.connect(client_id, username, password) — an "
+        "authenticated connection, not an anonymous one"
+    )
+    # No genuine secret may ever be committed here — only a lab placeholder.
+    assert "CHANGE_ME_LAB" in source
+
+
+def test_firmware_source_applies_a_command_with_no_per_sender_check() -> None:
+    """The one thing that must be true for the lesson to hold: the message
+    handler acts on ANY message it receives on the command topic, with no
+    token/signature/sender comparison anywhere in its CODE — mirroring
+    exactly what `SmartHomeMQTTScenario.publish` already simulates. Comments
+    are stripped first: the file's own header prose names these words while
+    explaining the vulnerability it deliberately does NOT implement, which
+    must not trip a scan meant to catch the words appearing in real code.
+    """
+    source = _firmware_source()
+    without_block_comments = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    code_only = re.sub(r"//[^\n]*", "", without_block_comments)
+    forbidden_authorization_hints = ("token", "signature", "hmac", "authorized_sender")
+    lowered = code_only.lower()
+    assert not any(hint in lowered for hint in forbidden_authorization_hints), code_only
+
+
+def test_firmware_source_matches_the_remediation_declarations_vulnerability_model() -> None:
+    """`panel.json`'s own `remediation.vulnerability` text is the authoritative
+    one-sentence description; this pins that it still says what the
+    architecture has always intended, not the retired "open broker"
+    interpretation."""
+    package = default_panel_package_loader().load(PANEL_ONE_ID)
+    assert package.remediation is not None
+    vulnerability = package.remediation.vulnerability.lower()
+    assert "per-command authorization" in vulnerability
+    assert "unauthenticated broker" not in vulnerability
+    assert "open broker" not in vulnerability

@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 
 from app import config
 from app.events import HackEventRecorder
-from app.hardware import SerialTransport
+from app.hardware import FirmwareArtifact, SerialTransport
 from app.scenarios import Scenario, create_default_scenario
 
 
@@ -56,6 +56,11 @@ class HackSession:
     #: package selected. The `default_factory` remains the fallback for the
     #: no-panel development flow and for every existing caller.
     scenario: Scenario = field(default_factory=create_default_scenario)
+    #: The Phase 2E.2 EAC seam (see `HackSessionRecord`). No caller in this
+    #: backend supplies a real value today — there is no authentication
+    #: anywhere on this WebSocket — so this stays None end to end, honestly,
+    #: rather than being filled with an invented identity.
+    participant_id: str | None = None
     #: This session's own link to the physical ESP32 (Phase 2A). A fresh
     #: transport per session, for the same isolation reason `scenario` is
     #: per-session: one student's serial stream is unreachable from another's.
@@ -75,12 +80,23 @@ class HackSession:
     #: resolved lazily on the first write (see `app/events/recorder.py`), so
     #: a `HackSession` built in a test is as cheap as it was before.
     recorder: HackEventRecorder = field(init=False)
+    #: Real bytes captured by a successful hardware-backed `esptool.py
+    #: read_flash` (Phase 2H.1) — see `app/hardware/flash_reader.py`. None
+    #: until (and unless) that command actually reads a real, physically
+    #: attached board for THIS session; `strings`/`grep` fall back to the
+    #: scenario's simulated string table whenever this is None, which is
+    #: every session today with no hardware attached. Deliberately held
+    #: here rather than on `scenario`: a `Scenario` must stay a pure logical
+    #: simulation (see `app/scenarios/base.py`), and real hardware bytes are
+    #: exactly the kind of fact it must never hold or reason about.
+    firmware_artifact: FirmwareArtifact | None = None
 
     def __post_init__(self) -> None:
         self.recorder = HackEventRecorder(
             session_id=self.session_id,
             scenario_id=self.scenario.scenario_id,
             started_at=self.created_at,
+            participant_id=self.participant_id,
         )
 
     def resize(self, cols: int, rows: int) -> None:

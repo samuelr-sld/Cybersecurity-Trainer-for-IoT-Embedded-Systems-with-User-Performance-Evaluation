@@ -20,6 +20,18 @@ This module also adds `hardware_status`/`hardware_board_name`/
 flash attempt, set by `BuildService.detect_hardware` (and, incidentally, by
 `flash_workspace`'s own discovery call). See `app/build/models.py`
 `HardwareStatus`.
+
+PHASE 2E.3 adds `panel_id` and `recorder`. `panel_id` is captured once, at
+session creation (`BuildSessionManager.create`), from whatever the shared
+panel-resolution layer already knows — see `app/build_panel_resolution.py`
+— and is None whenever no panel resolves (no board, unidentified,
+unregistered, no package): the honest "unknown" state, never guessed.
+`recorder` is this session's own `BuildEventRecorder`
+(`app/build/recorder.py`), the durable-evidence seam TTR/AID/DEI read from;
+built in `__post_init__` (not a `default_factory`) because, like Hack
+Mode's `HackSession.recorder`, it is not independent of the session — it
+needs this session's id, its `created_at` as the TTR anchor, and its
+`panel_id`.
 """
 
 from __future__ import annotations
@@ -40,6 +52,7 @@ from app.build import (
 )
 from app.build.compiler import CompiledArtifact, CompileOutcome
 from app.build.flasher import FlashOutcome
+from app.build.recorder import BuildEventRecorder
 from app.hardware import DeviceState
 
 
@@ -56,7 +69,10 @@ class BuildSession:
     #: The per-session firmware workspace. Isolation lives here, exactly as
     #: `HackSession.scenario` isolates Hack Mode state: a fresh instance per
     #: session means one student's firmware edits are unreachable from
-    #: another's.
+    #: another's. Since Phase B2 the connection lifecycle may hand one in
+    #: (the attached panel's real firmware — see
+    #: `app/build_project_selection.py`); the `default_factory` remains the
+    #: no-hardware default and is what every other caller still gets.
     workspace: BuildWorkspace = field(default_factory=create_default_workspace)
     #: Every `BuildEvent` this session has caused so far, in order — the
     #: Phase 3B+ evaluation seam, mirroring `Scenario.events`.
@@ -101,6 +117,20 @@ class BuildSession:
     #: a flash can ever upload; see `app/build/compiler.py::CompiledArtifact`
     #: and `app/build/service.py::discard_artifact`, which owns its lifetime.
     compiled_artifact: CompiledArtifact | None = None
+    #: The Phase 2E.3 panel-resolution seam — see the module docstring.
+    #: Captured once at session creation, never re-resolved mid-session.
+    panel_id: str | None = None
+    #: This session's own attempt recorder (Phase 2E.3) — see the module
+    #: docstring. Built in `__post_init__`, not a `default_factory`: unlike
+    #: `workspace`, it needs this session's own id/created_at/panel_id.
+    recorder: BuildEventRecorder = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.recorder = BuildEventRecorder(
+            session_id=self.session_id,
+            started_at=self.created_at,
+            panel_id=self.panel_id,
+        )
 
     @property
     def flash_ready(self) -> bool:
@@ -187,9 +217,40 @@ class BuildSessionManager:
         self._sessions: dict[str, BuildSession] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self) -> BuildSession:
-        """Create and register a session with a fresh unique id."""
-        session = BuildSession(session_id=str(uuid.uuid4()))
+    async def create(
+        self, panel_id: str | None = None, workspace: BuildWorkspace | None = None
+    ) -> BuildSession:
+        """Create and register a session with a fresh unique id.
+
+        `panel_id` is dependency injection, mirroring
+        `app.sessions.SessionManager.create`'s `scenario` argument: the
+        caller that owns the connection lifecycle
+        (`app/build_websocket.py`) resolves the attached panel — via
+        `app/build_panel_resolution.py`, a passive read of the shared
+        device monitor's current state — and hands the result in. This
+        manager and `BuildSession` never resolve one themselves. Omitting
+        it (every existing caller and test) leaves `panel_id` at its
+        honest `None` default.
+
+        `workspace` is the SAME kind of injection, added in Phase B2 for the
+        project the session loads. The connection lifecycle chooses it
+        through `app/build_project_selection.py` — the attached panel's own
+        firmware when one resolves, the default LED Blink project otherwise
+        — so this manager and `BuildSession` stay exactly as ignorant of
+        panels, packages and sketch directories as they were. Omitting it
+        (every existing caller and test) falls back to
+        `create_default_workspace()`, the long-standing default.
+
+        The recorder is started here, at connect, for the same reason
+        `HackEventRecorder.start()` is: `started_at` is TTR's anchor, so it
+        must mean "opened Build Mode", not "ran the first compile".
+        """
+        session = BuildSession(
+            session_id=str(uuid.uuid4()),
+            panel_id=panel_id,
+            **({} if workspace is None else {"workspace": workspace}),
+        )
+        session.recorder.start()
         async with self._lock:
             self._sessions[session.session_id] = session
         return session

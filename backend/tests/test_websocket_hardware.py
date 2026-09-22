@@ -405,20 +405,30 @@ def test_the_simulated_hack_engine_still_works_alongside_hardware_polling(
 
     A real scenario command still produces its terminal output, its scenario
     events and its state frame, interleaved with hardware polls.
+
+    Deliberately `nmap`, not `esptool.py`: since Phase 2H.1, `esptool.py
+    read_flash` genuinely reaches for real hardware whenever the SHARED
+    `device_monitor` reports a board connected (see
+    `app/commands/handlers/esptool_py.py`) — and this test's own `detector`
+    fixture makes it report exactly that, on a fake port (`COM7`) nothing
+    can actually open, purely so the poll-silence assertions above have a
+    "connected" state to poll. `nmap` stays unconditionally simulated (no
+    non-serial tool touches hardware), so it is what proves the point this
+    test is actually about — a scenario command still works normally
+    alongside polling — without coupling that proof to whether the fake
+    port happens to be openable.
     """
     with client.websocket_connect("/ws/hack") as ws:
         _open_session(ws)
         _hardware_status(ws)
 
-        ws.send_json(
-            {"type": "input", "data": "esptool.py read_flash 0x0 0x400000 firmware.bin"}
-        )
+        ws.send_json({"type": "input", "data": "nmap -p 1883 192.168.10.10"})
         output = ws.receive_json()
         assert output["type"] == "output"
 
         event = ws.receive_json()
         assert event["type"] == "event"
-        assert event["event"] == "firmware_extracted"
+        assert event["event"] == "scan"
 
         state = ws.receive_json()
         assert state["type"] == "state"

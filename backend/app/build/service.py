@@ -63,7 +63,8 @@ from app.build.flasher import (
     FlashRequest,
     default_flasher,
 )
-from app.build.models import CompileStatus, FlashStatus
+from app.build.models import CompileStatus, FlashStatus, ValidationStatus
+from app.build.records import BuildAttemptType
 from app.build.workspace import BuildWorkspaceError
 from app.hardware import (
     DeviceMonitor,
@@ -244,7 +245,11 @@ class BuildService:
             ),
             BuildEvent.create(
                 BuildEventType.WORKSPACE_LOADED,
-                "default workspace loaded",
+                # Not "default workspace loaded" since Phase B2: the session
+                # may have been handed the attached panel's real firmware
+                # instead. Which one it is remains carried by the event's own
+                # `project_id`/`scenario_id` data, where it always was.
+                "workspace loaded",
                 scenario_id=session.workspace.project.scenario_id,
                 project_id=session.workspace.project.project_id,
             ),
@@ -405,6 +410,15 @@ class BuildService:
             )
         session.events.append(finished)
         events.append(finished)
+        # PHASE 2E.3 — AID/DEI evidence. One attempt row per completed
+        # compile, success or failure alike: this is the durable record
+        # `app/metrics/aid.py`/`dei.py` read, distinct from `session.events`
+        # (which is live-session-only and untimestamped).
+        session.recorder.record_attempt(
+            BuildAttemptType.COMPILE,
+            outcome.success,
+            detail="" if outcome.success else outcome.category.value,
+        )
         return BuildActionResult.ok(*events)
 
     async def flash_workspace(self, session: "BuildSession") -> BuildActionResult:
@@ -601,6 +615,48 @@ class BuildService:
         _mirror_device_state(session, await self._monitor.refresh(fqbn=board.fqbn))
         return BuildActionResult.ok()
 
+    async def record_validation_attempt(
+        self, session: "BuildSession", *, success: bool, detail: str = ""
+    ) -> BuildActionResult:
+        """Record one validation attempt's outcome. Phase 2E.3 EVIDENCE SEAM.
+
+        THIS METHOD DOES NOT VALIDATE ANYTHING. No real security/functional
+        validation mechanism exists anywhere in this codebase yet (see the
+        module docstring: `ValidationStatus` has never left `NOT_STARTED`,
+        and the Validate/Security-Test frontend controls remain disabled
+        placeholders). `success`/`detail` must come from an ACTUAL check a
+        later phase performs — reading device state over serial, replaying
+        the Hack Mode attack and confirming it no longer works, or whatever
+        real mechanism that phase builds — never from "the compile
+        succeeded" or "the flash succeeded", which the Phase 2E.3 brief is
+        explicit are not evidence of a secure fix.
+
+        What this method DOES provide, so that infrastructure exists ahead
+        of the check itself: it moves `validation_status` through the
+        already-declared `ValidationStatus` vocabulary
+        (`app/build/models.py`) for real, emits the already-reserved
+        `VALIDATION_SUCCEEDED`/`VALIDATION_FAILED` `BuildEvent`
+        (`app/build/events.py` has named these since Phase 3B and emitted
+        neither), and records a `BuildAttemptRecord` — the row
+        `app/metrics/ttr.py` looks for as "successful remediation evidence"
+        and `aid.py`/`dei.py` count as a validation attempt. No caller in
+        this codebase invokes this method automatically; it is exercised
+        directly by tests as the seam a real validation implementation will
+        call into.
+        """
+        session.validation_status = (
+            ValidationStatus.SUCCEEDED if success else ValidationStatus.FAILED
+        )
+        event = BuildEvent.create(
+            BuildEventType.VALIDATION_SUCCEEDED
+            if success
+            else BuildEventType.VALIDATION_FAILED,
+            detail or ("validation succeeded" if success else "validation failed"),
+        )
+        session.events.append(event)
+        session.recorder.record_attempt(BuildAttemptType.VALIDATION, success, detail=detail)
+        return BuildActionResult.ok(event)
+
     def _finish_flash(
         self,
         session: "BuildSession",
@@ -631,6 +687,17 @@ class BuildService:
         )
         session.events.append(finished)
         events.append(finished)
+        # PHASE 2E.3 — AID/DEI evidence, same discipline as the compile
+        # path: one attempt row per completed flash, including a NO_DEVICE
+        # outcome (the student did attempt to flash; nothing was uploaded).
+        # `outcome.success` is the same truth value the FLASH_SUCCEEDED/
+        # FLASH_FAILED event above already used — this records it, it does
+        # not reinterpret it.
+        session.recorder.record_attempt(
+            BuildAttemptType.FLASH,
+            outcome.success,
+            detail="" if outcome.success else outcome.category.value,
+        )
         return BuildActionResult.ok(*events)
 
     async def end_session(self, session: "BuildSession") -> BuildActionResult:
@@ -647,6 +714,7 @@ class BuildService:
         path to it.
         """
         discard_artifact(session)
+        session.recorder.finish()
         event = BuildEvent.create(
             BuildEventType.BUILD_SESSION_ENDED,
             "build session ended",

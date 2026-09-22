@@ -100,6 +100,13 @@ class CommandResult:
     so what the terminal shows and what the database holds are the same rows.
     An empty tuple alongside a non-empty `events` means the result never went
     through the router (a handler called directly in a test).
+
+    `fields_correct` is `ScenarioOutcome.fields_correct` forwarded verbatim
+    (Phase 2E.2) — see that field's docstring. It is the Reconnaissance
+    Efficiency seam: `CommandRouter.dispatch` passes it to
+    `HackEventRecorder.record_command`, which is how "were this recognized
+    command's required fields correct" reaches the durable log the metric
+    layer reads, alongside `exit_code` and `handled`.
     """
 
     lines: tuple[str, ...] = ()
@@ -107,6 +114,7 @@ class CommandResult:
     exit_code: int = 0
     events: tuple["ScenarioEvent", ...] = ()
     records: tuple["HackEventRecord", ...] = ()
+    fields_correct: bool | None = None
 
     @classmethod
     def text(cls, *lines: str, exit_code: int = 0) -> CommandResult:

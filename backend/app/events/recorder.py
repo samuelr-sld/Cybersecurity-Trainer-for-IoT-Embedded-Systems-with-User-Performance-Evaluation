@@ -63,10 +63,12 @@ class HackEventRecorder:
         scenario_id: str = "scenario",
         started_at: datetime | None = None,
         store: SqliteEventStore | None = None,
+        participant_id: str | None = None,
     ) -> None:
         self._session_id = session_id
         self._scenario_id = scenario_id
         self._started_at = started_at if started_at is not None else utc_now()
+        self._participant_id = participant_id
         self._store = store
         self._sequence = 0
         self._events: list[HackEventRecord] = []
@@ -85,6 +87,11 @@ class HackEventRecorder:
     def started_at(self) -> datetime:
         """When this session began — Phase 2E's TTE/TTR anchor."""
         return self._started_at
+
+    @property
+    def participant_id(self) -> str | None:
+        """The Phase 2E.2 EAC grouping seam — see `HackSessionRecord`."""
+        return self._participant_id
 
     @property
     def events(self) -> tuple[HackEventRecord, ...]:
@@ -164,6 +171,7 @@ class HackEventRecorder:
             session_id=self._session_id,
             scenario_id=self._scenario_id,
             started_at=self._started_at,
+            participant_id=self._participant_id,
         )
         self._persist("open the session", lambda store: store.open_session(record))
 
@@ -199,6 +207,7 @@ class HackEventRecorder:
         exit_code: int,
         handled: bool,
         occurred_at: datetime | None = None,
+        fields_correct: bool | None = None,
     ) -> HackCommandRecord:
         """Record one submitted command line.
 
@@ -207,6 +216,8 @@ class HackEventRecorder:
         the student's action later than it happened. It is still a
         server-generated stamp from `app/events/clock.py`; no caller may
         supply a time that came from a client.
+
+        `fields_correct` is the Phase 2E.2 RE seam — see `HackCommandRecord`.
         """
         self.start()
         record = HackCommandRecord(
@@ -217,6 +228,7 @@ class HackEventRecorder:
             exit_code=exit_code,
             handled=handled,
             occurred_at=occurred_at if occurred_at is not None else utc_now(),
+            fields_correct=fields_correct,
         )
         self._commands.append(record)
         self._persist("record a command", lambda store: store.append_command(record))

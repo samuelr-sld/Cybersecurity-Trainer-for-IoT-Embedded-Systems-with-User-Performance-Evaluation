@@ -87,9 +87,23 @@ class BuildProject:
 
     `security_region_id` names the one region this scenario's remediation
     lives in — the region a future Blockly workspace will target (see
-    `app/build/environmental.py`). It must be the `region_id` of an EDITABLE
-    segment in one of `files`; nothing here enforces that at construction
-    time, but `app/build/workspace.py` and the test suite do.
+    `app/build/environmental.py`). When set, it must be the `region_id` of an
+    EDITABLE segment in one of `files`; nothing here enforces that at
+    construction time, but `app/build/workspace.py` and the test suite do.
+
+    PHASE B2 made it OPTIONAL. A project materialized from a panel package's
+    real firmware (`app/build/sketch_source.py`) is discovered structurally —
+    B1 says which spans are `setup`, `loop`, a callback or a helper, and says
+    nothing whatever about which of them a student may edit or where that
+    panel's remediation belongs. Declaring one anyway would mean inventing a
+    permission decision that only the panel's own remediation activity (a
+    later phase) can make, and an empty-string sentinel would be the same
+    invention with worse ergonomics. `None` is the honest "no remediation
+    region has been declared for this project yet": `BuildService.edit_region`
+    compares a submitted region id against it, and `None` simply never
+    matches, so no `SECURITY_REGION_EDITED` event is claimed for a project
+    that has not named one. The two hand-authored projects (`blink.py`,
+    `environmental.py`) still declare theirs as a string and are unaffected.
     """
 
     project_id: str
@@ -98,7 +112,7 @@ class BuildProject:
     firmware_name: str
     board: BoardInfo
     files: tuple[FirmwareFile, ...]
-    security_region_id: str
+    security_region_id: str | None
 
     def file(self, path: str) -> FirmwareFile | None:
         """The file at this path, or None if this project has none."""
