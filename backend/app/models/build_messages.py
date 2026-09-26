@@ -10,16 +10,31 @@ validated the same strict way Hack Mode's frames are: unknown keys and lax
 type coercion are rejected rather than guessed at.
 
 Client -> server
+    {"type": "section_blockly",    "path": "main.ino", "section_id": "setup"}
+    {"type": "edit_section_blocks","path": "main.ino", "section_id": "setup",
+     "workspace": {...}, "preserved": [...]}
     {"type": "edit_region", "path": "main.ino", "region_id": "blink_program", "source": "..."}
     {"type": "compile"}
     {"type": "flash"}
+    {"type": "validate"}
     {"type": "hardware_status"}
 
 Server -> client
     {"type": "session", "session_id": "...", "protocol_version": 2}
     {"type": "state",   "data": {}}
+    {"type": "section", "data": {}}
     {"type": "event",   "event": "...", "data": {}}
     {"type": "error",   "message": "..."}
+
+BUILD MODE IS A SECTION-BASED BLOCKLY EDITOR, AND THIS PROTOCOL SAYS SO SINCE
+VERSION 6. The student's flow is: the `state` snapshot lists every discovered
+section with its `InteractionPolicy`; clicking one sends `section_blockly` and
+gets that section's blocks back; editing them sends `edit_section_blocks`. The
+generated C++ is an OUTPUT of that — the backend writes it (B6), reconstructs
+the firmware around it, and the student never types it. `edit_region`, which
+carries raw C++ text, is the LEGACY path: the Blink POC uses it and the toolbox
+cannot yet draw every construct, so it remains, but it is not the remediation
+interface and no new client should be built on it.
 
 Neither the `compile` nor the `flash` request carries any fields at all:
 both always target the session's own current workspace and the project's own
@@ -60,7 +75,27 @@ from app import config
 #   the backend's own discovery from the last flash attempt (or never, if
 #   one hasn't happened). A version-3 client has no way to render this and
 #   would keep showing a hardcoded/assumed connection state instead.
-BUILD_PROTOCOL_VERSION = 4
+# 5 (Phase B7): added the `validate` client message and a `validation_output`
+#   block in the `state` snapshot, and `validation_status` now actually
+#   moves off `not_started`. A version-4 client has no way to request a
+#   validation and no way to render its verdict — it would show only the
+#   four-member status, which cannot distinguish a fix that failed its check
+#   from a check that could not run.
+# 6 (Phase B8 correction): added the `section_blockly` and
+#   `edit_section_blocks` client messages and the `section` server frame —
+#   the section -> Blockly contract Build Mode's actual interaction model
+#   needs. Until version 6 the only way to change firmware on this wire was
+#   `edit_region`'s raw C++ text, so a client had no way to be a Blockly
+#   editor at all: B4/B5 existed but nothing could reach them. A version-5
+#   client cannot request a section's blocks and cannot submit one.
+# 7 (Phase 1.2): added a `remediation` block to the `state` snapshot — the
+#   connected panel's own `RemediationSpec` prose (vulnerability /
+#   remediation_goal / validation_requirement), verbatim, when its package
+#   declared one; `null` otherwise. No new client message: the plan already
+#   existed server-side (Phase B7) and was simply never sent. A version-6
+#   client has no way to render what a remediation must achieve before
+#   running validation.
+BUILD_PROTOCOL_VERSION = 7
 
 
 class _BuildFrame(BaseModel):
@@ -88,6 +123,57 @@ class EditRegionMessage(_BuildFrame):
     path: str = Field(min_length=1, max_length=config.MAX_BUILD_IDENTIFIER_CHARS)
     region_id: str = Field(min_length=1, max_length=config.MAX_BUILD_IDENTIFIER_CHARS)
     source: str = Field(max_length=config.MAX_BUILD_REGION_SOURCE_CHARS)
+
+
+class SectionBlocklyMessage(_BuildFrame):
+    """A request for one discovered section's Blockly representation.
+
+    The read half of the section -> Blockly contract (B8). `section_id` is the
+    stable id B1 derived from the construct and B2/B3/B4 all reuse — never a
+    display name and never a C++ function name — so a client selects a section
+    by the same identity every backend layer uses.
+
+    Read-only, and carrying no `source`, no `workspace` and no policy field: it
+    cannot change anything, cannot assert what a section contains, and cannot
+    claim a permission. A section of ANY policy may be requested, which is what
+    EXPLORE exists for; whether it may be WRITTEN is decided when a write
+    arrives, against the project's own policy.
+    """
+
+    type: Literal["section_blockly"] = "section_blockly"
+    path: str = Field(min_length=1, max_length=config.MAX_BUILD_IDENTIFIER_CHARS)
+    section_id: str = Field(min_length=1, max_length=config.MAX_BUILD_IDENTIFIER_CHARS)
+
+
+class EditSectionBlocksMessage(_BuildFrame):
+    """A request to rewrite one section from the blocks a student arranged.
+
+    THE INTENDED EDITING FRAME. `workspace` is the Blockly serialization state
+    the editor produced for this one section, and `preserved` is the fragment
+    list that came with it (a Blockly workspace cannot hold a node that is not
+    a block, so source the toolbox has no vocabulary for travels beside it —
+    see `app/build/blockly_bridge/models.py`).
+
+    Both are untrusted structure: the backend reads them with
+    `app/build/blockly_bridge/workspace_state.py`, which validates every node
+    against the block catalog and repairs nothing. Neither field is C++ the
+    backend executes or compiles as given — the firmware that reaches the
+    compiler is REGENERATED from what these blocks mean (B5 -> B6), and
+    `app/build/workspace.py` refuses the whole request before parsing if
+    `section_id` names a region this project's policy does not open.
+
+    There is no `source` field, deliberately: a client cannot submit C++
+    through this frame, which is the whole point of it existing beside
+    `edit_region` rather than replacing it with one more text channel.
+    """
+
+    type: Literal["edit_section_blocks"] = "edit_section_blocks"
+    path: str = Field(min_length=1, max_length=config.MAX_BUILD_IDENTIFIER_CHARS)
+    section_id: str = Field(min_length=1, max_length=config.MAX_BUILD_IDENTIFIER_CHARS)
+    workspace: dict[str, Any] = Field(default_factory=dict)
+    preserved: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=config.MAX_BUILD_PRESERVED_FRAGMENTS
+    )
 
 
 class CompileMessage(_BuildFrame):
@@ -118,6 +204,24 @@ class FlashMessage(_BuildFrame):
     type: Literal["flash"] = "flash"
 
 
+class ValidateMessage(_BuildFrame):
+    """A request to validate the remediation now running on the device.
+
+    Field-less, for the same reason `CompileMessage` and `FlashMessage` are,
+    and for one more specific to this operation: a `success`, `outcome`,
+    `result` or `evidence` field here would let a client ASSERT that its own
+    firmware passed. The verdict comes from a backend validator
+    (`app/build/validation/`) judging the firmware the backend itself
+    compiled and uploaded; there is nothing on this wire but the request.
+
+    What it validates is never named either: it is always this session's own
+    workspace, and `BuildService.validate_workspace` refuses unless that
+    exact workspace was successfully flashed.
+    """
+
+    type: Literal["validate"] = "validate"
+
+
 class HardwareStatusMessage(_BuildFrame):
     """A request to refresh the session's live ESP32 presence check.
 
@@ -133,11 +237,19 @@ class HardwareStatusMessage(_BuildFrame):
 
 
 #: Phase 3A had only `edit_region`; Phase 3B added `compile`, Phase 3C added
-#: `flash`, and protocol version 4 adds `hardware_status` — each a proper
-#: discriminated Union member, exactly as anticipated when this was a bare
-#: alias for `EditRegionMessage`.
+#: `flash`, protocol version 4 added `hardware_status`, and version 5 (Phase
+#: B7) adds `validate` — each a proper discriminated Union member, exactly as
+#: anticipated when this was a bare alias for `EditRegionMessage`.
 BuildClientMessage = Annotated[
-    Union[EditRegionMessage, CompileMessage, FlashMessage, HardwareStatusMessage],
+    Union[
+        SectionBlocklyMessage,
+        EditSectionBlocksMessage,
+        EditRegionMessage,
+        CompileMessage,
+        FlashMessage,
+        ValidateMessage,
+        HardwareStatusMessage,
+    ],
     Field(discriminator="type"),
 ]
 
@@ -170,6 +282,25 @@ class BuildStateMessage(_BuildFrame):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class BuildSectionMessage(_BuildFrame):
+    """One section's Blockly representation, answering a `section_blockly`.
+
+    Its own frame rather than a block inside `state` (B8): a student opens one
+    section at a time, and putting sixteen sections' workspaces in every
+    snapshot would make each compile, flash and hardware poll carry the whole
+    firmware as blocks. It is also not an `event` — nothing happened.
+
+    `data` is `{path, sectionId, representable, workspace, preserved}` exactly
+    as `BlocklySection.to_representation()` builds it, with no reshaping at
+    this layer. `representable` is the field that keeps a client honest: false
+    means the toolbox has no vocabulary for this construct yet, so it must be
+    shown read-only rather than as an empty canvas.
+    """
+
+    type: Literal["section"] = "section"
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 class BuildEventMessage(_BuildFrame):
     """One structured Build Mode domain event.
 
@@ -192,6 +323,7 @@ class BuildErrorMessage(_BuildFrame):
 BuildServerMessage = Union[
     BuildSessionMessage,
     BuildStateMessage,
+    BuildSectionMessage,
     BuildEventMessage,
     BuildErrorMessage,
 ]

@@ -42,21 +42,20 @@
  * enable pin is tied HIGH in hardware, so run/stop is driven through IN1/IN2
  * and there is no software enable GPIO.
  *
- * LAB-SAFE PLACEHOLDERS ONLY. WIFI_PASSWORD/MQTT_USERNAME/MQTT_PASSWORD below
- * are intentionally fake training-lab values, not real secrets -- this file
- * is committed to the repository and must never carry a genuine credential.
- * Replace them with the actual CyberTrainer AP password and the Mosquitto
- * lab credentials at provisioning time; until those are configured, this
- * sketch cannot authenticate to a real broker.
+ * LIVE LAB CREDENTIALS, COMMITTED ON PURPOSE. WIFI_PASSWORD/MQTT_USERNAME/
+ * MQTT_PASSWORD below are the real CyberTrainer AP and Mosquitto lab
+ * credentials for this isolated training network -- not placeholders, and
+ * no longer injected at compile time. This panel's firmware is
+ * self-contained: no provisioning step is required before flashing, and none
+ * rewrites these values.
  */
 
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-// --- finalized local training network (placeholders -- see file header) -----
+// --- finalized local training network -----------------------------------
 static const char *WIFI_SSID = "CyberTrainer";
-// TODO(provisioning): set to the real CyberTrainer AP password before flash.
-static const char *WIFI_PASSWORD = "CHANGE_ME_LAB_AP_PASSWORD";
+static const char *WIFI_PASSWORD = "CyberTrainer2026";
 
 static const char *MQTT_BROKER = "192.168.50.1";
 static const uint16_t MQTT_PORT = 1883;
@@ -66,9 +65,8 @@ static const uint16_t MQTT_PORT = 1883;
 // as the activity's "expected findings" describe. They authorize the
 // CONNECTION, not any individual motor command (see file header).
 static const char *MQTT_CLIENT_ID = "panel1-motor-controller";
-// TODO(provisioning): set to the real Mosquitto lab username/password.
 static const char *MQTT_USERNAME = "panel1-device";
-static const char *MQTT_PASSWORD = "CHANGE_ME_LAB_MQTT_PASSWORD";
+static const char *MQTT_PASSWORD = "cybertrainer";
 
 static const char *COMMAND_TOPIC = "cybertrainer/smart-home/motor/control";
 static const char *STATE_TOPIC = "cybertrainer/smart-home/motor/state";
@@ -190,9 +188,29 @@ void setup() {
   pinMode(BUZZER, OUTPUT);
   setMotorOutputs(false);
 
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+
+  Serial.println("Connecting to WiFi...");
+  Serial.print("SSID: ");
+  Serial.println(WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
+
+  const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000;
+  unsigned long wifiConnectStart = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - wifiConnectStart < WIFI_CONNECT_TIMEOUT_MS) {
     delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("WiFi connected, IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.print("WiFi connection FAILED, status code: ");
+    Serial.println(WiFi.status());
   }
 
   client.setServer(MQTT_BROKER, MQTT_PORT);

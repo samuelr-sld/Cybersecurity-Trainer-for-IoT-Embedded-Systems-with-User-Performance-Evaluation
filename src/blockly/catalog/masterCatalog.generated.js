@@ -610,6 +610,42 @@ export const MASTER_CATALOG = {
       "generatorId": null
     },
     {
+      "id": "logic.if_equals",
+      "categoryId": "logic",
+      "displayName": "if equal to",
+      "description": "Runs a body when a value equals (or differs from) another value.",
+      "kind": "statement",
+      "semanticOperation": "logic.if_equals",
+      "inputs": [
+        {
+          "name": "LEFT",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "OPERATOR",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "RIGHT",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "DO",
+          "valueType": "statements",
+          "description": ""
+        }
+      ],
+      "output": null,
+      "dependencies": [],
+      "capabilities": [],
+      "status": "implemented",
+      "blocklyType": "if_equals",
+      "generatorId": "arduino_cpp:if_equals"
+    },
+    {
       "id": "loops.repeat",
       "categoryId": "loops",
       "displayName": "repeat",
@@ -1695,6 +1731,48 @@ export const MASTER_CATALOG = {
       "status": "cataloged",
       "blocklyType": null,
       "generatorId": null
+    },
+    {
+      "id": "functions.implementation",
+      "categoryId": "functions",
+      "displayName": "function body",
+      "description": "The body of an existing named function or callback, whose signature is fixed by the firmware.",
+      "kind": "container",
+      "semanticOperation": "functions.implementation",
+      "inputs": [
+        {
+          "name": "BODY",
+          "valueType": "statements",
+          "description": ""
+        }
+      ],
+      "output": null,
+      "dependencies": [],
+      "capabilities": [],
+      "status": "implemented",
+      "blocklyType": "function_implementation",
+      "generatorId": "arduino_cpp:function_implementation"
+    },
+    {
+      "id": "functions.call_existing",
+      "categoryId": "functions",
+      "displayName": "call function",
+      "description": "Calls an existing, already-defined function with no arguments, for its effect.",
+      "kind": "statement",
+      "semanticOperation": "functions.call_existing",
+      "inputs": [
+        {
+          "name": "NAME",
+          "valueType": "text",
+          "description": ""
+        }
+      ],
+      "output": null,
+      "dependencies": [],
+      "capabilities": [],
+      "status": "implemented",
+      "blocklyType": "call_existing_function",
+      "generatorId": "arduino_cpp:call_existing_function"
     },
     {
       "id": "lists.create",
@@ -5364,7 +5442,12 @@ export const FULL_TOOLBOX = {
       "kind": "category",
       "name": "Logic",
       "colour": "30",
-      "contents": []
+      "contents": [
+        {
+          "kind": "block",
+          "type": "if_equals"
+        }
+      ]
     },
     {
       "kind": "category",
@@ -5394,7 +5477,16 @@ export const FULL_TOOLBOX = {
       "kind": "category",
       "name": "Functions",
       "colour": "290",
-      "contents": []
+      "contents": [
+        {
+          "kind": "block",
+          "type": "function_implementation"
+        },
+        {
+          "kind": "block",
+          "type": "call_existing_function"
+        }
+      ]
     },
     {
       "kind": "category",
@@ -5564,6 +5656,35 @@ export const FULL_TOOLBOX = {
 export const POPULATED_TOOLBOX = {
   "kind": "categoryToolbox",
   "contents": [
+    {
+      "kind": "category",
+      "name": "Logic",
+      "colour": "30",
+      "contents": [
+        {
+          "kind": "block",
+          "type": "if_equals"
+        }
+      ]
+    },
+    {
+      "kind": "category",
+      "name": "Functions",
+      "colour": "290",
+      "contents": [
+        {
+          "kind": "block",
+          "type": "function_implementation"
+        },
+        {
+          "kind": "block",
+          "type": "call_existing_function"
+        }
+      ]
+    },
+    {
+      "kind": "sep"
+    },
     {
       "kind": "category",
       "name": "Program",

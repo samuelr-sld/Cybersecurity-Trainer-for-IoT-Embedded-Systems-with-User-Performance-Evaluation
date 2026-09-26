@@ -20,6 +20,33 @@ values here, because a student must be able to make real mistakes inside
 the security region (see `app/build/environmental.py`). Region protection
 does not require a compiler; it only requires knowing which named span of
 text a caller is allowed to touch.
+
+THREE WAYS IN, ONE RULE, AND ONLY ONE OF THEM IS THE INTENDED INTERFACE:
+
+    update_region(path, region_id, source)          C++ text  (Phase 3A)
+    apply_program(path, program)                    a file's IR (B7)
+    apply_section_blockly(path, section_id, …)      BLOCKS    (B8) <- intended
+
+Build Mode is a section-based BLOCKLY editor: a student clicks a discovered
+section and that section opens as blocks. `apply_section_blockly` is therefore
+the path the interface is built on, and generated C++ is an OUTPUT of it, never
+the thing the student types. `update_region` remains — the Blink POC uses it
+and the toolbox cannot yet draw every construct — but it is the legacy text
+path, not the remediation interface. All three are addressed by a stable id and
+all three are refused the same way when they reach a region the student may not
+write.
+
+PHASE B7 ADDS A SECOND WAY IN, AND IT OBEYS THE SAME RULE. `apply_program`
+accepts an edit expressed as a `SemanticProgram` (what B5 builds from a
+Blockly workspace) instead of as one region's text, writes B6's generated
+C++ back into the project, and is refused — loudly, as an exception, exactly
+like `update_region` — if the result would change a LOCKED region or the set
+of regions the file has. The conversion itself is `app/build/
+program_source.py`; what lives here is still only the decision to mutate.
+THE PROJECT REMAINS THE SINGLE SOURCE OF TRUTH: an applied program becomes
+the project's own file text immediately, so `fingerprint()` moves with it,
+`materialize()` writes it, and the compiler cannot be handed pre-edit source
+that no longer exists anywhere.
 """
 
 from __future__ import annotations
@@ -27,8 +54,21 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from pathlib import Path
+from typing import Iterable
 
 from app.build.models import BuildProject, FileSegment, FirmwareFile, RegionKind
+from app.build.program_source import (
+    ProgramSourceError,
+    apply_program_to_file,
+    program_for_source,
+)
+from app.build.section_blockly import (
+    SectionBlocklyError,
+    program_with_section,
+    section_from_state,
+    section_representation,
+)
+from app.build.semantic import SemanticProgram
 
 
 class BuildWorkspaceError(ValueError):
@@ -45,6 +85,18 @@ class RegionNotFoundError(BuildWorkspaceError):
 
 class RegionNotEditableError(BuildWorkspaceError):
     """The region id names a real segment, but it is LOCKED."""
+
+
+class ProgramApplyError(BuildWorkspaceError):
+    """A semantic program could not become this workspace's source.
+
+    Every `ProgramSourceError` from `app/build/program_source.py` — source
+    that cannot be read or written, a changed set of sections, a changed
+    LOCKED region — surfaces as this one workspace-level type, so
+    `BuildService` keeps catching exactly `BuildWorkspaceError` and a
+    rejected Blockly edit reaches the student the same way a rejected region
+    edit does.
+    """
 
 
 class BuildWorkspace:
@@ -106,6 +158,117 @@ class BuildWorkspace:
         )
         self._project = replace(self._project, files=new_files)
 
+    def program(self, path: str) -> SemanticProgram:
+        """This file's CURRENT source, read as the semantic IR (B1 -> B3).
+
+        Read-only and derived on demand — the program is not cached, stored
+        on the workspace, or kept in sync with the files, because a cached
+        copy would be the second source of truth this phase exists to avoid.
+        Every caller reads the project, which is the only place the source
+        lives.
+        """
+        try:
+            return program_for_source(self.full_source(path))
+        except ProgramSourceError as error:
+            raise ProgramApplyError(f"{path}: {error}") from error
+
+    def section_blockly(self, path: str, section_id: str) -> dict:
+        """ONE section's Blockly representation, for the editor that opens it.
+
+        THE READ LEG OF THE SECTION -> BLOCKLY CONTRACT (B8). A student clicks a
+        section; this is what that section opens as. Derived on demand from the
+        project's own current source for the same reason `program()` is — a
+        cached workspace would be a second source of truth — and narrowed to
+        one section so the caller never reconstructs the firmware to find it.
+
+        Read-only. Asking for a section changes nothing, so a section of any
+        policy may be asked for — which is exactly what EXPLORE is for: reading
+        the surrounding code to understand how the part under remediation is
+        reached before changing it. The answer carries `representable`, so a consumer
+        can tell "Blockly draws this" from "the toolbox has no vocabulary for
+        this construct yet" instead of rendering an empty canvas either way.
+
+        The policy that decides whether it may be WRITTEN is not repeated here:
+        it lives on the project and is enforced by `apply_section_blockly`.
+
+        Raises `RegionNotFoundError` for a section this file does not have, and
+        `ProgramApplyError` for source this project's regions do not correspond
+        to (see `UnstructuredFileError`).
+        """
+        if self._file(path).segment(section_id) is None:
+            raise RegionNotFoundError(f"no such region in {path}: {section_id}")
+        try:
+            return section_representation(self.program(path), section_id)
+        except SectionBlocklyError as error:
+            raise ProgramApplyError(f"{path}: {error}") from error
+
+    def apply_section_blockly(
+        self, path: str, section_id: str, workspace: dict, preserved: Iterable[dict] = ()
+    ) -> None:
+        """Rewrite ONE section from the Blockly workspace a student edited.
+
+        THE WRITE LEG, AND THE ONE BUILD MODE INTENDS STUDENTS TO USE (B8).
+        `update_region` takes C++ text and `apply_program` takes a whole file's
+        IR; this takes a single section's blocks, which is the unit the
+        interface actually presents. The chain is B5 -> splice -> B6 ->
+        re-discover -> replace, and every step of it already existed: what was
+        missing was a way in that was addressed by section and shaped like
+        Blockly.
+
+        PERMISSION IS CHECKED FIRST, AGAINST THE SAME BINARY `RegionKind`
+        `update_region` checks. A LOCKED segment — which is every EXPLORE
+        section too, by design (see `app/build/policy.py`) — is refused by name
+        before a single block is read, so an unreadable or hostile workspace
+        for a section nobody may write never gets parsed at all.
+
+        Raises `RegionNotEditableError` for a section the student may not write,
+        `RegionNotFoundError` for one this file does not have, and
+        `ProgramApplyError` for a malformed workspace, a construct Blockly
+        cannot draw yet, or a result that would move a locked region or change
+        which sections exist — the last two re-proved independently by
+        `apply_program_to_file`, exactly as for `apply_program`.
+        """
+        segment = self._segment(path, section_id)
+        if segment.kind is not RegionKind.EDITABLE:
+            raise RegionNotEditableError(
+                f"region is locked and cannot be edited: {path}#{section_id}"
+            )
+        try:
+            submitted = section_from_state(section_id, workspace, preserved)
+            program = program_with_section(self.program(path), submitted)
+        except SectionBlocklyError as error:
+            raise ProgramApplyError(f"{path}#{section_id}: {error}") from error
+        self.apply_program(path, program)
+
+    def apply_program(self, path: str, program: SemanticProgram) -> None:
+        """Rewrite one file from a semantic program. Mutates this workspace.
+
+        The B5/B6 counterpart of `update_region`: an edit made as blocks
+        rather than as text. B6 generates the C++, B1 re-discovers its
+        sections, and the result replaces this file in the project — so the
+        very next `materialize()` hands the compiler the generated source and
+        `fingerprint()` already reflects it. There is no deferred rendering
+        step and no stale copy left behind.
+
+        Raises `ProgramApplyError` — and changes nothing — if the program
+        would alter a LOCKED region or the set of regions this file has. The
+        locked comparison is made against a regeneration of the current
+        source rather than against its raw text, so B6's own layout is not
+        mistaken for a student's edit; see `app/build/program_source.py`.
+        """
+        firmware_file = self._file(path)
+        try:
+            new_file = apply_program_to_file(firmware_file, program)
+        except ProgramSourceError as error:
+            raise ProgramApplyError(str(error)) from error
+        self._project = replace(
+            self._project,
+            files=tuple(
+                new_file if existing.path == path else existing
+                for existing in self._project.files
+            ),
+        )
+
     def materialize(self, root: Path) -> Path:
         """Write this project's current files into a fresh sketch directory.
 
@@ -166,6 +329,13 @@ class BuildWorkspace:
         id, and current text — so the frontend can draw locked vs. editable
         code without reimplementing this module's region logic, and can
         reconstruct the full file by concatenation for a read-only full view.
+
+        PHASE B8 ADDS `policy`, BESIDE `kind` AND NEVER INSTEAD OF IT. `kind`
+        stays the permission the backend enforces; `policy` is the richer
+        LOCKED/EXPLORE/EDITABLE classification the UI renders (see
+        `app/build/policy.py`). Both are emitted per segment so a client never
+        has to infer one from the other — and, critically, never has to decide
+        editability by matching a C++ function name.
         """
         project = self._project
         return {
@@ -180,6 +350,9 @@ class BuildWorkspace:
                     "fqbn": project.board.fqbn,
                 },
                 "security_region_id": project.security_region_id,
+                "policy": (
+                    None if project.policy is None else project.policy.snapshot()
+                ),
             },
             "files": {
                 firmware_file.path: {
@@ -187,6 +360,7 @@ class BuildWorkspace:
                         {
                             "kind": segment.kind.value,
                             "region_id": segment.region_id,
+                            "policy": project.section_policy(segment.region_id).value,
                             "text": segment.text,
                         }
                         for segment in firmware_file.segments

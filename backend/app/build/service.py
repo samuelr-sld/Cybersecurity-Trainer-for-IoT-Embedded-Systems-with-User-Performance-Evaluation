@@ -34,27 +34,45 @@ A successful compile never implies a successful flash: `compile_status` and
 `flash_status` move independently, and the only link between them is a
 one-directional precondition — `flash_workspace` refuses to upload unless
 the last compile succeeded *and* the workspace still hashes to what that
-compile was given. Neither implies anything about whether the firmware is
-correct or secure; no validation exists in this codebase.
+compile was given.
+
+AND NEITHER IS VALIDATION. Phase B7 adds `validate_workspace`, which closes
+the pipeline `generated source -> compile -> flash -> validation` without
+ever letting one stage's success stand in for the next one's. `arduino-cli`
+exiting 0 twice proves source became a binary and a binary reached a board;
+`validation_status` moves only when a `ValidationStrategy`
+(`app/build/validation/`) actually returns a verdict, and there is no path in
+this module from `FlashStatus.SUCCEEDED` to `ValidationStatus.SUCCEEDED`. The
+dependency runs one way only — validation requires a successful flash of the
+*current* workspace, and refuses to run otherwise — exactly as flashing
+requires a successful compile of it. THE ENGINE ORCHESTRATES; THE VALIDATOR
+VALIDATES: nothing here knows what any panel's vulnerability is, and no
+panel-specific check exists in this codebase yet (see
+`app/build/validation/strategy.py`).
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app import config
 from app.build.compiler import (
     CompiledArtifact,
+    CompileFailureCategory,
     CompilerAdapter,
+    CompileOutcome,
     CompileRequest,
     default_compiler,
 )
 from app.build.events import BuildEvent, BuildEventType
+from app.build.provisioning import ProvisioningError
 from app.build.flasher import (
     DeviceDetectRequest,
     FlasherAdapter,
@@ -65,7 +83,13 @@ from app.build.flasher import (
 )
 from app.build.models import CompileStatus, FlashStatus, ValidationStatus
 from app.build.records import BuildAttemptType
+from app.build.validation import (
+    ValidationContext,
+    ValidationOutcome,
+    ValidationResult,
+)
 from app.build.workspace import BuildWorkspaceError
+from app.events.clock import utc_now
 from app.hardware import (
     DeviceMonitor,
     DeviceState,
@@ -75,6 +99,8 @@ from app.hardware import (
 
 if TYPE_CHECKING:  # pragma: no cover
     from app.build_sessions import BuildSession
+
+logger = logging.getLogger(__name__)
 
 
 #: How a caller asks to be told about an event *while* a long action is still
@@ -97,15 +123,29 @@ class BuildActionResult:
     caller-safe message (built from this module's own vocabulary, never
     reflecting the student's submitted source) for the WebSocket layer to
     surface as an `error` frame; it is set only when `success` is False.
+
+    `data` is what a READ call produced (B8). Every action before B8 changed
+    something, so "what happened" was fully described by its events and a
+    refreshed snapshot. `read_section_blockly` changes nothing and answers a
+    question instead, and its answer is too large and too specific to one
+    request to belong in the whole-session `state` snapshot — a student opens
+    one section at a time, not sixteen. It is JSON-safe data, never an object
+    with behaviour, and it is `None` for every action that causes events.
     """
 
     success: bool
     events: tuple[BuildEvent, ...] = ()
     error: str | None = None
+    data: dict | None = None
 
     @classmethod
     def ok(cls, *events: BuildEvent) -> "BuildActionResult":
         return cls(success=True, events=events)
+
+    @classmethod
+    def answered(cls, data: dict) -> "BuildActionResult":
+        """A successful READ: no events, no state change, one answer."""
+        return cls(success=True, data=data)
 
     @classmethod
     def failed(cls, error: str) -> "BuildActionResult":
@@ -116,6 +156,31 @@ class BuildActionResult:
 #: second flash, and any compile (which would delete the build directory the
 #: upload is reading), are refused while the status is one of these.
 _FLASH_IN_PROGRESS = frozenset({FlashStatus.DETECTING, FlashStatus.RUNNING})
+
+#: No-device correction. `session.has_active_project` is False exactly when
+#: no panel resolved to a real activity and the workspace is the inert
+#: `create_no_device_workspace()` placeholder (see `app/build/no_device.py`);
+#: every action that would edit, compile, flash or validate it is refused
+#: with this message rather than operating on a placeholder nobody authored.
+#: `read_section_blockly` and `detect_hardware` are deliberately NOT gated by
+#: it — reading a placeholder section is harmless, and hardware polling must
+#: keep working with no activity loaded.
+_NO_ACTIVE_PROJECT_ERROR = "no panel is connected; there is no firmware to edit"
+
+
+def _validation_detail(result: ValidationResult) -> str:
+    """The short note a validation attempt row carries.
+
+    A verdict's own message for a check that ran, and the outcome name in
+    front of it otherwise — so a stored `ERROR` or `NOT_RUN` row can never
+    be mistaken for a plain judgement about the student's firmware by
+    someone reading the evidence table later.
+    """
+    if result.ran:
+        return result.message
+    if result.message:
+        return f"{result.outcome.value}: {result.message}"
+    return result.outcome.value
 
 
 def discard_artifact(session: "BuildSession") -> None:
@@ -267,6 +332,8 @@ class BuildService:
         what happens once it is — marking the session dirty and building the
         events the edit caused.
         """
+        if not session.has_active_project:
+            return BuildActionResult.failed(_NO_ACTIVE_PROJECT_ERROR)
         try:
             session.workspace.update_region(path, region_id, source)
         except BuildWorkspaceError as exc:
@@ -288,6 +355,85 @@ class BuildService:
                     "student edited the security region",
                     path=path,
                     region_id=region_id,
+                )
+            )
+        session.events.extend(events)
+        return BuildActionResult.ok(*events)
+
+    async def read_section_blockly(
+        self, session: "BuildSession", path: str, section_id: str
+    ) -> BuildActionResult:
+        """One section's Blockly representation, for the editor opening it.
+
+        THE READ LEG OF THE SECTION -> BLOCKLY CONTRACT (B8). Build Mode is a
+        section-based Blockly editor: a student clicks a discovered section and
+        this is what that section opens as.
+
+        READ-ONLY, AND THEREFORE NOT AN EDIT. It emits no `BuildEvent`, sets no
+        status, and does not mark the session dirty — opening a section to look
+        at it is not a remediation attempt and must never be recorded as one
+        (the same reason `hardware_status` produces no event). Any section may
+        be read whatever its policy, which is precisely what EXPLORE is for;
+        writing is what `edit_section_blocks` gates.
+
+        This method adds no knowledge of Blockly, sections or C++ of its own —
+        it calls `BuildWorkspace.section_blockly` and returns what comes back,
+        exactly as `edit_region` delegates protection to `update_region`.
+        """
+        if not session.has_active_project:
+            return BuildActionResult.failed(_NO_ACTIVE_PROJECT_ERROR)
+        try:
+            representation = session.workspace.section_blockly(path, section_id)
+        except BuildWorkspaceError as exc:
+            return BuildActionResult.failed(str(exc))
+        return BuildActionResult.answered({"path": path, **representation})
+
+    async def edit_section_blocks(
+        self,
+        session: "BuildSession",
+        path: str,
+        section_id: str,
+        workspace: dict,
+        preserved: list | tuple = (),
+    ) -> BuildActionResult:
+        """Apply one student edit made as BLOCKS — the intended interface (B8).
+
+        The Blockly counterpart of `edit_region`, and deliberately its twin in
+        every respect that matters downstream: the same `CODE_EDITED` and
+        `SECURITY_REGION_EDITED` events, the same `dirty` flag, the same
+        rejection shape. An evaluator reading the activity log cannot tell
+        which mechanism produced an edit, and should not need to — what a
+        student changed is the fact worth recording, not which widget they
+        changed it with.
+
+        Protection is `BuildWorkspace.apply_section_blockly`'s, which refuses a
+        section the policy does not open BEFORE reading a single block, so an
+        untrusted workspace for a locked section is never even parsed. This
+        method adds nothing to whether an edit is allowed.
+        """
+        if not session.has_active_project:
+            return BuildActionResult.failed(_NO_ACTIVE_PROJECT_ERROR)
+        try:
+            session.workspace.apply_section_blockly(path, section_id, workspace, preserved)
+        except BuildWorkspaceError as exc:
+            return BuildActionResult.failed(str(exc))
+
+        session.dirty = True
+        events = [
+            BuildEvent.create(
+                BuildEventType.CODE_EDITED,
+                "student edited firmware blocks",
+                path=path,
+                region_id=section_id,
+            )
+        ]
+        if section_id == session.workspace.project.security_region_id:
+            events.append(
+                BuildEvent.create(
+                    BuildEventType.SECURITY_REGION_EDITED,
+                    "student edited the security region",
+                    path=path,
+                    region_id=section_id,
                 )
             )
         session.events.extend(events)
@@ -336,6 +482,8 @@ class BuildService:
         earlier build — flashing something the student can no longer see is
         exactly the failure mode this ordering rules out.
         """
+        if not session.has_active_project:
+            return BuildActionResult.failed(_NO_ACTIVE_PROJECT_ERROR)
         if session.compile_status is CompileStatus.RUNNING:
             return BuildActionResult.failed(
                 "a compilation is already running for this session"
@@ -371,13 +519,29 @@ class BuildService:
             # compiler is about to see, which is precisely what an upload
             # must be allowed to correspond to.
             fingerprint = session.workspace.fingerprint()
-            request = CompileRequest(
-                sketch_dir=sketch_dir,
-                fqbn=session.workspace.project.board.fqbn,
-                build_path=build_path,
-                timeout_seconds=config.BUILD_COMPILE_TIMEOUT_SECONDS,
-            )
-            outcome = await self._compiler.run_compile(request)
+            # Option A — inject this session's real, non-committed
+            # credentials (if any) into the throwaway copy above, strictly
+            # before the real compiler ever sees it. `strategy` is whatever
+            # this session's `ProvisioningPlan` carries (a no-op for every
+            # panel that registers none); this call never knows what it is
+            # provisioning, only that it may raise `ProvisioningError` for a
+            # fixture that is not provisioned, which is reported exactly like
+            # any other failed compile rather than as a silently-kept
+            # placeholder.
+            try:
+                session.compile_provisioning.strategy.provision(sketch_dir)
+            except ProvisioningError as error:
+                outcome = CompileOutcome.failed(
+                    CompileFailureCategory.INTERNAL_ERROR, stderr=str(error)
+                )
+            else:
+                request = CompileRequest(
+                    sketch_dir=sketch_dir,
+                    fqbn=session.workspace.project.board.fqbn,
+                    build_path=build_path,
+                    timeout_seconds=config.BUILD_COMPILE_TIMEOUT_SECONDS,
+                )
+                outcome = await self._compiler.run_compile(request)
             if outcome.success:
                 artifact = CompiledArtifact(
                     root=tmp_root,
@@ -450,6 +614,8 @@ class BuildService:
         works, or is actually secure is not checked anywhere in this
         codebase.
         """
+        if not session.has_active_project:
+            return BuildActionResult.failed(_NO_ACTIVE_PROJECT_ERROR)
         if session.flash_status in _FLASH_IN_PROGRESS:
             return BuildActionResult.failed(
                 "a flash is already running for this session"
@@ -615,47 +781,195 @@ class BuildService:
         _mirror_device_state(session, await self._monitor.refresh(fqbn=board.fqbn))
         return BuildActionResult.ok()
 
+    async def validate_workspace(
+        self, session: "BuildSession", *, emit: BuildEventSink | None = None
+    ) -> BuildActionResult:
+        """Run this session's validator against the firmware it just flashed.
+
+        PHASE B7 — THE LAST LINK OF THE PIPELINE, AND THE ONE THAT MAY NOT
+        BE INFERRED. Compiling and flashing are this backend's own
+        operations and their success is its own to assert; whether the
+        remediated firmware actually fixes anything is not, so this method
+        delegates the verdict to `session.validation.strategy` (see
+        `app/build/validation/`) and does no judging of its own. There is no
+        branch here that reads `flash_status` and concludes anything about
+        security.
+
+        THREE GATES, ALL REJECTIONS — nothing is attempted, so no status
+        moves, no event is emitted and, crucially, NO `BuildAttemptRecord`
+        is written (a request that was refused is not an attempt, and AID
+        must not count one):
+
+        1. No second validation while one is running, the same check-then-set
+           with no `await` between the two that `compile_workspace` and
+           `flash_workspace` rely on.
+        2. A successful flash must have happened. `validation` measures the
+           firmware on the board, so with nothing uploaded there is nothing
+           to measure — this is what keeps a failed (or never attempted)
+           flash from being followed by a validation verdict.
+        3. The workspace must still be the one that was flashed
+           (`session.flash_ready`, the same content-hash check flashing
+           itself uses). Validating firmware the student has already edited
+           past would attribute a verdict to code that is not on the device.
+
+        Then a fourth, asked of the validator rather than of the session:
+        `unavailable_reason` — "there is no check to run here". Every panel
+        shipped today answers with one, because no package declares a
+        machine-checkable remediation criterion. That refusal is deliberately
+        NOT a failed validation: a fix nobody checked has not been found
+        wanting.
+
+        Past the gates this always returns `BuildActionResult.ok(...)`: a
+        check that ran and reported the fix does not work is a *successful
+        action* that produced a truthful `validation_failed` event, exactly
+        as a compile that reports an error is.
+        """
+        if not session.has_active_project:
+            return BuildActionResult.failed(_NO_ACTIVE_PROJECT_ERROR)
+        plan = session.validation
+        if session.validation_status is ValidationStatus.RUNNING:
+            return BuildActionResult.failed(
+                "a validation is already running for this session"
+            )
+        if session.flash_status is not FlashStatus.SUCCEEDED:
+            return BuildActionResult.failed(
+                "flash the compiled firmware to the device successfully before validating"
+            )
+        if not session.flash_ready:
+            return BuildActionResult.failed(
+                "the workspace changed after the firmware that was flashed; "
+                "compile and flash again before validating"
+            )
+
+        context = self._validation_context(session)
+        unavailable = plan.strategy.unavailable_reason(context)
+        if unavailable:
+            return BuildActionResult.failed(unavailable)
+
+        session.validation_status = ValidationStatus.RUNNING
+        started = BuildEvent.create(
+            BuildEventType.VALIDATION_STARTED,
+            "validation started",
+            project_id=session.workspace.project.project_id,
+        )
+        session.events.append(started)
+        if emit is not None:
+            await emit(started)
+            events: list[BuildEvent] = []
+        else:
+            events = [started]
+
+        began = time.monotonic()
+        try:
+            result = await plan.strategy.validate(context)
+            if not isinstance(result, ValidationResult):
+                raise TypeError(
+                    f"validator returned {type(result).__name__}, not a ValidationResult"
+                )
+        except Exception as error:  # noqa: BLE001 - a broken check is a result
+            # A validator that raises has not proved the firmware wrong; it
+            # has proved itself broken. Recorded as ERROR (never FAILURE) so
+            # an evaluator can tell the two apart, and never propagated —
+            # a crashing check must not take the student's session with it.
+            logger.warning(
+                "validation strategy failed for build session %s: %s",
+                session.session_id,
+                error,
+                exc_info=True,
+            )
+            result = ValidationResult.error(f"the validation check did not complete: {error}")
+
+        result = dataclass_replace(
+            result,
+            duration_seconds=time.monotonic() - began,
+            occurred_at=utc_now(),
+        )
+        return self._finish_validation(session, events, result)
+
+    def _validation_context(self, session: "BuildSession") -> ValidationContext:
+        """What the validator is told. Backend state only — see the context's
+        own docstring for why nothing from the wire can reach it."""
+        project = session.workspace.project
+        artifact = session.compiled_artifact
+        flash_output = session.flash_output
+        return ValidationContext(
+            session_id=session.session_id,
+            project_id=project.project_id,
+            scenario_id=project.scenario_id,
+            module_id=project.module_id,
+            board_fqbn=project.board.fqbn,
+            firmware_fingerprint=(
+                artifact.fingerprint if artifact is not None else session.workspace.fingerprint()
+            ),
+            panel_id=session.panel_id,
+            flashed_port=None if flash_output is None else flash_output.port,
+            remediation=session.validation.remediation,
+            parameters=session.validation.parameters,
+        )
+
+    def _finish_validation(
+        self,
+        session: "BuildSession",
+        events: list[BuildEvent],
+        result: ValidationResult,
+    ) -> BuildActionResult:
+        """Record one validation attempt's truthful ending. Never raises.
+
+        ONE PLACE DECIDES WHAT AN OUTCOME MEANS, so the status, the event and
+        the evidence row cannot drift apart. Only `SUCCESS` is recorded as a
+        successful attempt — the row `app/metrics/ttr.py` reads as "validated
+        successful fix" — and `FAILURE`, `ERROR` and a `NOT_RUN` that somehow
+        came back from a validator that said it could run are all recorded as
+        unsuccessful attempts with their own `detail`. All three are still
+        *attempts*: the student asked for a check that was available, so
+        `app/metrics/aid.py` counting them is correct.
+        """
+        succeeded = result.succeeded
+        session.validation_result = result
+        session.validation_status = (
+            ValidationStatus.SUCCEEDED if succeeded else ValidationStatus.FAILED
+        )
+        finished = BuildEvent.create(
+            BuildEventType.VALIDATION_SUCCEEDED
+            if succeeded
+            else BuildEventType.VALIDATION_FAILED,
+            result.message or ("validation succeeded" if succeeded else "validation failed"),
+            outcome=result.outcome.value,
+            duration_seconds=round(result.duration_seconds, 2),
+        )
+        session.events.append(finished)
+        events.append(finished)
+        session.recorder.record_attempt(
+            BuildAttemptType.VALIDATION, succeeded, detail=_validation_detail(result)
+        )
+        return BuildActionResult.ok(*events)
+
     async def record_validation_attempt(
         self, session: "BuildSession", *, success: bool, detail: str = ""
     ) -> BuildActionResult:
-        """Record one validation attempt's outcome. Phase 2E.3 EVIDENCE SEAM.
+        """Record one validation attempt's outcome, given the verdict. SEAM.
 
-        THIS METHOD DOES NOT VALIDATE ANYTHING. No real security/functional
-        validation mechanism exists anywhere in this codebase yet (see the
-        module docstring: `ValidationStatus` has never left `NOT_STARTED`,
-        and the Validate/Security-Test frontend controls remain disabled
-        placeholders). `success`/`detail` must come from an ACTUAL check a
-        later phase performs — reading device state over serial, replaying
-        the Hack Mode attack and confirming it no longer works, or whatever
-        real mechanism that phase builds — never from "the compile
-        succeeded" or "the flash succeeded", which the Phase 2E.3 brief is
-        explicit are not evidence of a secure fix.
+        THIS METHOD DOES NOT VALIDATE ANYTHING — it is the recording half of
+        `validate_workspace` (above), reachable directly for a caller that
+        already holds a verdict from somewhere else. `success`/`detail` must
+        come from an ACTUAL check: never from "the compile succeeded" or
+        "the flash succeeded", which are not evidence of a secure fix.
 
-        What this method DOES provide, so that infrastructure exists ahead
-        of the check itself: it moves `validation_status` through the
-        already-declared `ValidationStatus` vocabulary
-        (`app/build/models.py`) for real, emits the already-reserved
-        `VALIDATION_SUCCEEDED`/`VALIDATION_FAILED` `BuildEvent`
-        (`app/build/events.py` has named these since Phase 3B and emitted
-        neither), and records a `BuildAttemptRecord` — the row
-        `app/metrics/ttr.py` looks for as "successful remediation evidence"
-        and `aid.py`/`dei.py` count as a validation attempt. No caller in
-        this codebase invokes this method automatically; it is exercised
-        directly by tests as the seam a real validation implementation will
-        call into.
+        Since Phase B7 this is a thin wrapper over `_finish_validation`, so a
+        directly-recorded attempt produces exactly the same
+        `ValidationStatus`, `BuildEvent` and `BuildAttemptRecord` as one the
+        real validation path produced — there is one definition of what a
+        recorded validation looks like, not two that could drift. It
+        deliberately keeps its Phase 2E.3 signature, and it bypasses the
+        compile/flash gates `validate_workspace` enforces, which is why it is
+        not what the WebSocket layer calls.
         """
-        session.validation_status = (
-            ValidationStatus.SUCCEEDED if success else ValidationStatus.FAILED
+        result = ValidationResult(
+            outcome=ValidationOutcome.SUCCESS if success else ValidationOutcome.FAILURE,
+            message=detail,
+            occurred_at=utc_now(),
         )
-        event = BuildEvent.create(
-            BuildEventType.VALIDATION_SUCCEEDED
-            if success
-            else BuildEventType.VALIDATION_FAILED,
-            detail or ("validation succeeded" if success else "validation failed"),
-        )
-        session.events.append(event)
-        session.recorder.record_attempt(BuildAttemptType.VALIDATION, success, detail=detail)
-        return BuildActionResult.ok(event)
+        return self._finish_validation(session, [], result)
 
     def _finish_flash(
         self,

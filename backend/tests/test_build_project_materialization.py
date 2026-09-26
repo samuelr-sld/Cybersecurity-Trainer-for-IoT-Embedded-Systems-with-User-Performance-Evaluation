@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import dataclasses
 import pathlib
 
 import pytest
 
 from app.build import create_default_workspace
 from app.build.blink import BLINK_REGION_ID
+from app.build.no_device import NO_DEVICE_PROJECT_ID
 from app.build.discovery import analyze_source
 from app.build.discovery.models import SectionKind
 from app.build.document_project import (
@@ -434,14 +436,47 @@ def test_panel_one_identity_values_all_come_from_its_package() -> None:
     assert project.board.fqbn == package.firmware.board.fqbn
 
 
-def test_a_panel_project_is_read_only_and_names_no_security_region() -> None:
-    """B2 is integration, not editing capability — see the module docstring."""
+def test_a_panel_project_opens_only_what_its_own_package_declares() -> None:
+    """B2 decided nothing about editability; B8 reads the panel's decision.
+
+    What B2 actually guaranteed — that this module invents no permission
+    model and that everything undeclared stays locked — is unchanged and is
+    what this asserts. The one region that opens is the one Panel 1's own
+    package names, and it opens because the package names it, not because
+    anything here recognised a function. The full policy (including EXPLORE)
+    is covered by `tests/test_build_pipeline_b8.py`.
+    """
     selection = selector_over(panel_one_identification()).select()
     project = selection.workspace.project
-    assert project.security_region_id is None
-    assert {s.kind for s in project.file(PANEL_ONE_SKETCH_NAME).segments} == {RegionKind.LOCKED}
+    package = default_panel_package_loader().load(PANEL_ONE_ID)
+    declared = package.remediation
+
+    assert project.security_region_id == declared.security_section_id
+    editable = {
+        s.region_id
+        for s in project.file(PANEL_ONE_SKETCH_NAME).segments
+        if s.kind is RegionKind.EDITABLE
+    }
+    assert editable == set(declared.editable_section_ids)
+    # Everything the package did not open — including the sections it marked
+    # for exploring — is still a LOCKED segment and still rejected by name.
+    # `setup`/`callback_onMessage` are real editable regions under the
+    # widened policy now; `global_2`/`global_4` (GLOBAL_DECLARATIONS runs,
+    # never opened) are the genuinely locked targets this test needs.
     with pytest.raises(RegionNotEditableError):
-        selection.workspace.update_region(PANEL_ONE_SKETCH_NAME, "setup", "void setup() {}")
+        selection.workspace.update_region(PANEL_ONE_SKETCH_NAME, "global_2", "// tampered")
+    with pytest.raises(RegionNotEditableError):
+        selection.workspace.update_region(PANEL_ONE_SKETCH_NAME, "global_4", "// tampered")
+
+
+def test_a_package_with_no_remediation_declaration_stays_fully_read_only() -> None:
+    """The pre-B8 behaviour, preserved for every panel that declares nothing."""
+    package = default_panel_package_loader().load(PANEL_ONE_ID)
+    selector = selector_over(panel_one_identification())
+    project = selector._project_for(dataclasses.replace(package, remediation=None))
+    assert project.security_region_id is None
+    assert project.policy is None
+    assert {s.kind for s in project.file(PANEL_ONE_SKETCH_NAME).segments} == {RegionKind.LOCKED}
 
 
 @pytest.mark.parametrize(
@@ -453,7 +488,12 @@ def test_a_panel_project_is_read_only_and_names_no_security_region() -> None:
         PanelIdentificationStatus.UNREGISTERED,
     ],
 )
-def test_every_unresolved_board_falls_back_to_blink(status) -> None:
+def test_every_unresolved_board_falls_back_to_no_device(status) -> None:
+    # CORRECTED: no longer LED Blink — see `app/build/no_device.py`. A
+    # disconnected/unidentified/unregistered board gets the inert no-activity
+    # placeholder, never a real firmware project, and `has_active_project` is
+    # what tells the connection lifecycle (and the frontend) that this
+    # selection names no activity at all.
     identification = PanelIdentification(
         status=status,
         port=None if status is PanelIdentificationStatus.NOT_CONNECTED else "COM3",
@@ -463,12 +503,13 @@ def test_every_unresolved_board_falls_back_to_blink(status) -> None:
         panel=None,
     )
     selection = selector_over(identification).select()
-    assert selection.source is BuildProjectSource.DEFAULT
-    assert selection.workspace.project.project_id == "led-blink-poc"
-    assert selection.workspace.project.security_region_id == BLINK_REGION_ID
+    assert selection.source is BuildProjectSource.NONE
+    assert selection.has_active_project is False
+    assert selection.workspace.project.project_id == NO_DEVICE_PROJECT_ID
+    assert selection.workspace.project.project_id != "led-blink-poc"
 
 
-def test_a_registered_panel_with_no_package_falls_back_to_blink() -> None:
+def test_a_registered_panel_with_no_package_falls_back_to_no_device() -> None:
     panel = PanelDefinition(
         panel_id="panel-without-courseware",
         display_name="Panel Without Courseware",
@@ -483,13 +524,14 @@ def test_a_registered_panel_with_no_package_falls_back_to_blink() -> None:
     )
     selection = selector_over(identification).select()
     assert selection.panel_status is PanelResourceStatus.NO_PACKAGE
-    assert selection.source is BuildProjectSource.DEFAULT
-    assert selection.workspace.project.project_id == "led-blink-poc"
+    assert selection.source is BuildProjectSource.NONE
+    assert selection.has_active_project is False
+    assert selection.workspace.project.project_id == NO_DEVICE_PROJECT_ID
     assert selection.panel_id == "panel-without-courseware"
     assert selection.detail
 
 
-def test_a_ready_package_declaring_no_firmware_falls_back_to_blink() -> None:
+def test_a_ready_package_declaring_no_firmware_falls_back_to_no_device() -> None:
     from app.panels.models import PanelPackage, ScenarioDefinition
 
     package = PanelPackage(
@@ -512,8 +554,9 @@ def test_a_ready_package_declaring_no_firmware_falls_back_to_blink() -> None:
         PanelResourceStatus.READY, identification, package=package
     )
     selection = BuildProjectSelector().select_for(resources)
-    assert selection.source is BuildProjectSource.DEFAULT
-    assert selection.workspace.project.project_id == "led-blink-poc"
+    assert selection.source is BuildProjectSource.NONE
+    assert selection.has_active_project is False
+    assert selection.workspace.project.project_id == NO_DEVICE_PROJECT_ID
     assert "no firmware" in selection.detail.lower()
 
 

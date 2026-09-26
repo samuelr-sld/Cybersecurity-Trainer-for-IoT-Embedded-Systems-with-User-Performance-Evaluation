@@ -60,7 +60,10 @@ from app.build.semantic import (
     PROGRAM_SETUP,
     TIME_DELAY,
     LiteralValue,
+    OperationStatement,
+    SemanticArgument,
     SemanticProgram,
+    SemanticSection,
     SemanticType,
     SymbolValue,
     UnsupportedReason,
@@ -327,6 +330,30 @@ def test_a_mode_outside_the_dropdowns_options_is_preserved_not_invented():
     assert item.reason is BridgeReason.FIELD_VALUE_NOT_REPRESENTABLE
 
 
+def test_an_undrawable_authored_statement_has_nothing_to_preserve_and_says_so():
+    # The one case B6's optional provenance opens here: a statement with no
+    # recorded source whose operand no real field can hold. There is no block
+    # to build AND no text to carry, so there is nothing faithful to produce.
+    # Reported rather than coerced into a field that would change what it says
+    # — its C++ still exists (the generator writes it from the operation), but
+    # this workspace cannot show it.
+    authored = OperationStatement(
+        operation=default_semantic_operations.require(TIME_DELAY),
+        arguments=(SemanticArgument("MS", SymbolValue("BUZZER_CHIRP_MS")),),
+    )
+    program = SemanticProgram(
+        sections=(
+            SemanticSection(
+                section_id="loop",
+                operation=default_semantic_operations.require(PROGRAM_LOOP),
+                statements=(authored,),
+            ),
+        )
+    )
+    with pytest.raises(UnrepresentableOperationError, match="records no source"):
+        program_to_blockly(program)
+
+
 def test_a_free_text_field_accepts_both_value_kinds():
     binding = FieldBinding("PIN", FieldKind.TEXT)
     assert binding.render(LiteralValue(7, SemanticType.NUMBER)) == "7"
@@ -501,23 +528,25 @@ def test_b3s_reason_travels_through_unchanged():
 
 
 def test_an_unsupported_section_becomes_preserved_source_and_no_block():
-    program = convert(
-        "void helper() {\n  digitalWrite(1, HIGH);\n}\n\nvoid setup() {\n}\n"
-    )
-    section = program.section("helper_helper")
+    # CORRECTED FIXTURE: a HELPER_FUNCTION no longer demonstrates this — it
+    # gained a container form (`functions.implementation`, the no-device/
+    # Blockly-integration correction). GLOBAL_DECLARATIONS is the one kind
+    # that still has none: it names no single construct a container could
+    # represent.
+    program = convert("int counter = 0;\n\nvoid setup() {\n}\n")
+    section = program.section("global")
     assert section.block is None
     assert len(section.preserved) == 1
     assert section.preserved[0].reason is UnsupportedReason.UNSUPPORTED_SECTION
-    assert "digitalWrite(1, HIGH);" in section.preserved[0].text
+    assert "int counter = 0;" in section.preserved[0].text
 
 
 def test_an_unsupported_sections_body_is_never_drawn_as_blocks():
-    # The helper above contains a statement B4 could draw in another context.
-    # It is not drawn, because B3 never interpreted that body — claiming
-    # otherwise would assert knowledge no layer established.
-    program = convert(
-        "void helper() {\n  digitalWrite(1, HIGH);\n}\n\nvoid setup() {\n}\n"
-    )
+    # A global-scope, call-shaped fragment is a statement B4 could draw
+    # inside a function body. It is not drawn here, because
+    # GLOBAL_DECLARATIONS has no container form at all — B3 never interpreted
+    # it as a body to split into statements in the first place.
+    program = convert("digitalWrite(1, HIGH);\n\nvoid setup() {\n}\n")
     assert [block.block_type for block in program.blocks] == ["arduino_setup"]
 
 
@@ -767,7 +796,17 @@ _FRONTEND_FIELD_KINDS = {
 
 def test_the_frontend_block_definitions_were_read_at_all():
     frontend = _frontend_block_fields()
-    assert set(frontend) == {"arduino_setup", "arduino_loop", "pinmode", "digitalwrite", "delay"}
+    assert set(frontend) == {
+        "arduino_setup",
+        "arduino_loop",
+        "pinmode",
+        "digitalwrite",
+        "delay",
+        # The no-device/Blockly-integration correction's three additions.
+        "function_implementation",
+        "call_existing_function",
+        "if_equals",
+    }
     assert frontend["pinmode"]["MODE"][1] == ("OUTPUT", "INPUT", "INPUT_PULLUP")
 
 
@@ -898,42 +937,81 @@ def test_panel_one_setup_draws_its_seven_pin_modes():
 def test_panel_one_setup_keeps_its_wifi_and_mqtt_source_between_the_blocks():
     program = convert(panel_one_source())
     items = body_types(program.section("setup").block)
+
+    # The stable prefix -- Serial.begin, the seven pin_mode blocks, then the
+    # initial motor-safe state -- is unaffected by the real Wi-Fi connect
+    # sequence appended after it, so it is still pinned by position.
     assert items[0] == "Serial.begin(115200);"
     assert items[1:8] == ["pinmode"] * 7
     assert items[8] == "setMotorOutputs(false);"
-    assert items[9].startswith("WiFi.begin(")
-    assert items[10].startswith("while (WiFi.status()")
-    assert items[11].startswith("client.setServer(")
-    assert items[12].startswith("client.setCallback(")
+
+    # The real Wi-Fi connect and MQTT client wiring that follows must survive
+    # the semantic/block transformation as preserved source, in the order the
+    # firmware performs it. Content-based rather than pinned to an exact
+    # index: the diagnostic Serial output interleaved between these calls is
+    # free to grow or shrink independently of what this test actually cares
+    # about, which is that these statements are not lost or reordered.
+    def index_of(prefix: str) -> int:
+        for i, item in enumerate(items):
+            if item.startswith(prefix):
+                return i
+        raise AssertionError(f"no preserved item starts with {prefix!r}: {items}")
+
+    wifi_begin = index_of("WiFi.begin(")
+    wifi_wait = index_of("while (WiFi.status()")
+    set_server = index_of("client.setServer(")
+    set_callback = index_of("client.setCallback(")
+
+    assert wifi_begin > 8
+    assert wifi_begin < wifi_wait < set_server < set_callback
 
 
-def test_panel_one_loop_is_a_container_block_with_no_drawable_statement():
+def test_panel_one_loop_draws_its_two_zero_arg_calls_and_preserves_the_rest():
+    # CORRECTED: `ensureConnected()`/`pollButtons()` are zero-argument calls
+    # to functions this firmware defines itself — both draw as
+    # `call_existing_function` blocks now (the no-device/Blockly-integration
+    # correction). `client.loop();` is a method call on an object and stays
+    # preserved.
     loop = convert(panel_one_source()).section("loop")
     assert loop.block is not None
-    assert loop.block.child_blocks == ()
-    assert [item.text for item in loop.block.body] == [
-        "ensureConnected();",
-        "client.loop();",
-        "pollButtons();",
+    assert [block.block_type for block in loop.block.child_blocks] == [
+        "call_existing_function",
+        "call_existing_function",
     ]
+    preserved_texts = [
+        item.text for item in loop.block.body if isinstance(item, PreservedSource)
+    ]
+    assert preserved_texts == ["client.loop();"]
 
 
 def test_panel_one_mqtt_logic_is_never_claimed_as_a_block():
+    # CORRECTED: both sections are representable CONTAINERS now
+    # (`functions.implementation`), but their MQTT-specific bodies are still
+    # never drawn — only the generic pieces this phase actually models (a
+    # comparison-gated `if`) are.
     program = convert(panel_one_source())
-    for section_id in ("callback_onMessage", "helper_applyCommand"):
-        assert program.section(section_id).block is None
-    assert [block.block_type for block in program.blocks] == ["arduino_setup", "arduino_loop"]
+    on_message = program.section("callback_onMessage")
+    assert on_message.block is not None
+    assert on_message.block.child_blocks == ()
+
+    apply_command = program.section("helper_applyCommand")
+    assert apply_command.block is not None
+    assert [block.block_type for block in apply_command.block.child_blocks] == ["if_equals"]
+
+    for block_type in ("mosquitto_pub", "mqtt_publish", "mqtt_subscribe"):
+        assert block_type not in [block.block_type for block in program.blocks]
 
 
 def test_panel_one_produces_a_loadable_workspace_and_a_full_preserved_list():
     program = convert(panel_one_source())
     state = program.to_workspace_state()
-    assert [block["type"] for block in state["blocks"]["blocks"]] == [
-        "arduino_setup",
-        "arduino_loop",
-    ]
+    block_types = [block["type"] for block in state["blocks"]["blocks"]]
+    assert block_types.count("arduino_setup") == 1
+    assert block_types.count("arduino_loop") == 1
+    # Every HELPER_FUNCTION/CALLBACK section is its own container now.
+    assert block_types.count("function_implementation") >= 8
     # Every fragment the workspace cannot hold is still reported, located.
-    assert len(program.preserved) > 10
+    assert len(program.preserved) > 5
     for record in program.preserved:
         assert record.source.text.strip()
         assert record.index >= 0
@@ -993,6 +1071,10 @@ def test_the_bridge_modules_were_found():
         "models.py",
         # B5's direction. Every static check in this section covers it too.
         "reverse.py",
+        # B8's correction: Blockly's own serialization JSON read back into
+        # B4's shape, so B5 is reachable from an editor and not only from
+        # inside this codebase. Every static check in this section covers it.
+        "workspace_state.py",
     }
 
 

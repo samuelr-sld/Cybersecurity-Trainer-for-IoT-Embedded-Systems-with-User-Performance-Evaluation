@@ -27,11 +27,15 @@ import pytest
 
 from app.build.discovery import BuildDocument, CodeSection, SectionKind, analyze_source
 from app.build.semantic import (
+    FUNCTIONS_IMPLEMENTATION,
     GPIO_DIGITAL_WRITE,
     GPIO_PIN_MODE,
     PROGRAM_LOOP,
     PROGRAM_SETUP,
     TIME_DELAY,
+    CallStatement,
+    ComparisonValue,
+    ConditionalStatement,
     LiteralValue,
     OperationForm,
     OperationStatement,
@@ -223,6 +227,7 @@ def test_the_default_registry_declares_exactly_the_supported_subset():
     assert set(default_semantic_operations.operation_ids) == {
         PROGRAM_SETUP,
         PROGRAM_LOOP,
+        FUNCTIONS_IMPLEMENTATION,
         GPIO_PIN_MODE,
         GPIO_DIGITAL_WRITE,
         TIME_DELAY,
@@ -267,7 +272,11 @@ def test_an_unknown_operation_is_a_clean_miss_not_a_guess():
 def test_container_and_statement_forms_are_separated():
     containers = default_semantic_operations.with_form(OperationForm.CONTAINER)
     statements = default_semantic_operations.with_form(OperationForm.STATEMENT)
-    assert {op.operation_id for op in containers} == {PROGRAM_SETUP, PROGRAM_LOOP}
+    assert {op.operation_id for op in containers} == {
+        PROGRAM_SETUP,
+        PROGRAM_LOOP,
+        FUNCTIONS_IMPLEMENTATION,
+    }
     assert {op.operation_id for op in statements} == {
         GPIO_PIN_MODE,
         GPIO_DIGITAL_WRITE,
@@ -491,7 +500,6 @@ def test_delay_with_the_wrong_argument_count_is_carried_verbatim():
         ("motorRunning = true;", UnsupportedReason.NOT_A_CALL),
         ("if (ready) return;", UnsupportedReason.NOT_A_CALL),
         ("pinMode(2, OUTPUT)", UnsupportedReason.NOT_A_CALL),
-        ("ensureConnected();", UnsupportedReason.UNKNOWN_CALL),
         ("analogWrite(2, 128);", UnsupportedReason.UNKNOWN_CALL),
         ("digitalWrite(2);", UnsupportedReason.ARGUMENT_COUNT),
         ("delay(millis() + 5);", UnsupportedReason.UNSUPPORTED_ARGUMENT),
@@ -505,6 +513,26 @@ def test_unsupported_statements_keep_their_text_and_say_why(statement_source, re
     assert statement.reason is reason
     assert statement.source_text == statement_source
     assert statement.supported is False
+
+
+def test_a_zero_argument_call_to_an_unregistered_function_is_a_call_statement():
+    # The no-device/Blockly-integration correction: a call to a function this
+    # firmware defines itself (not a platform operation) is representable —
+    # but only with no arguments; see `CallStatement`.
+    program = analyze("void loop() {\n  ensureConnected();\n}\n")
+    (statement,) = program.loop.statements
+    assert isinstance(statement, CallStatement)
+    assert statement.function_name == "ensureConnected"
+    assert statement.source_text == "ensureConnected();"
+    assert statement.supported is True
+
+
+def test_a_call_to_an_unregistered_function_with_arguments_stays_unsupported():
+    # Deliberately NOT widened: `CallStatement` is zero-argument only.
+    program = analyze("void loop() {\n  setBrightness(128);\n}\n")
+    (statement,) = program.loop.statements
+    assert isinstance(statement, UnsupportedStatement)
+    assert statement.reason is UnsupportedReason.UNKNOWN_CALL
 
 
 def test_an_unsupported_construct_never_raises():
@@ -556,7 +584,13 @@ def test_a_semicolon_inside_a_string_literal_does_not_end_a_statement():
     assert statement.source_text == 'Serial.println("a; b");'
 
 
-def test_a_comment_between_statements_produces_no_statement():
+def test_a_comment_between_statements_is_preserved_not_dropped():
+    # CORRECTED: `code_mask` blanks every comment to whitespace, and
+    # `_statement_spans` walks straight past whitespace — so without
+    # `_body_statements` explicitly noticing the gap, a comment sitting
+    # between two statements (or trailing after the last one) would open no
+    # span, carry nothing, and simply vanish from a regenerated file. That
+    # silent loss is what this test now pins the ABSENCE of.
     source = (
         "void setup() {\n"
         "  // configure the indicator\n"
@@ -570,7 +604,17 @@ def test_a_comment_between_statements_produces_no_statement():
         GPIO_PIN_MODE,
         TIME_DELAY,
     ]
-    assert len(program.setup.statements) == 2
+    # Two recognized statements plus two comment gaps: one before pinMode,
+    # one (merging the inline "// drive it" and the block comment) before
+    # delay.
+    assert len(program.setup.statements) == 4
+    comments = [s for s in program.setup.statements if isinstance(s, UnsupportedStatement)]
+    assert len(comments) == 2
+    assert comments[0].source_text == "// configure the indicator"
+    assert "// drive it" in comments[1].source_text
+    assert "/* and wait */" in comments[1].source_text
+    for comment in comments:
+        assert comment.reason is UnsupportedReason.NOT_A_CALL
 
 
 def test_a_call_that_is_supported_only_because_the_registry_declares_it():
@@ -612,11 +656,21 @@ def test_every_code_section_produces_exactly_one_semantic_section_in_order():
 def test_a_semantic_section_references_its_code_section_by_id_only():
     program = analyze(BLINK_SOURCE)
     setup = program.setup
-    for field in ("start_offset", "end_offset", "kind", "signature", "text"):
+    for field in ("start_offset", "end_offset", "kind", "text"):
         assert not hasattr(setup, field), f"the IR must not carry a CodeSection's {field}"
+    # `signature` DOES exist (the no-device/Blockly-integration correction) —
+    # but it is None for `program.setup`/`program.loop`, whose declarator is a
+    # fixed `emissions.py` row, never a `CodeSection`'s own text carried
+    # through. Only a `functions.implementation` container (see below) sets it.
+    assert setup.signature is None
 
 
-def test_helper_functions_callbacks_and_globals_are_unsupported_sections():
+def test_helper_functions_and_callbacks_are_representable_containers():
+    # CORRECTED: HELPER_FUNCTION and CALLBACK sections used to have no
+    # container operation at all. They do now (`functions.implementation`,
+    # see `_SECTION_OPERATIONS` in analyzer.py) — only a run of
+    # GLOBAL_DECLARATIONS text still has none, because it names no single
+    # construct a container could represent.
     source = (
         "#include <WiFi.h>\n"
         "\n"
@@ -636,23 +690,44 @@ def test_helper_functions_callbacks_and_globals_are_unsupported_sections():
     program = analyze_document(document)
     for section in document.sections:
         semantic = program.section(section.section_id)
-        if section.kind in (SectionKind.SETUP, SectionKind.LOOP):
-            assert semantic.supported is True
-        else:
+        if section.kind is SectionKind.GLOBAL_DECLARATIONS:
             assert semantic.supported is False
-            assert all(not s.supported for s in semantic.statements)
+        else:
+            assert semantic.supported is True
+
+    helper_section = next(s for s in document.sections if s.kind is SectionKind.HELPER_FUNCTION)
+    helper_semantic = program.section(helper_section.section_id)
+    assert helper_semantic.operation_id == FUNCTIONS_IMPLEMENTATION
+    assert helper_semantic.signature == "static void helper()"
+    (delay_statement,) = helper_semantic.statements
+    assert isinstance(delay_statement, OperationStatement)
+    assert delay_statement.operation_id == TIME_DELAY
+
+    callback_section = next(s for s in document.sections if s.kind is SectionKind.CALLBACK)
+    callback_semantic = program.section(callback_section.section_id)
+    assert callback_semantic.operation_id == FUNCTIONS_IMPLEMENTATION
+    (call_statement,) = callback_semantic.statements
+    assert isinstance(call_statement, CallStatement)
+    assert call_statement.function_name == "helper"
+
+    # `setup()`'s own `client.setCallback(onMessage);` is a method call on an
+    # object — still not a construct this layer recognizes.
+    (setup_statement,) = program.section("setup").statements
+    assert isinstance(setup_statement, UnsupportedStatement)
 
 
-def test_a_helper_functions_body_is_never_interpreted():
-    # `delay(1)` inside a helper is real, supported C++ — but the helper has
-    # no container operation, so the IR represents the function whole rather
-    # than claiming to understand its body.
+def test_a_helper_functions_body_is_now_interpreted():
+    # CORRECTED: `delay(1)` inside a helper is real, supported C++, and the
+    # helper now HAS a container operation (`functions.implementation`), so
+    # its body is split into statements and recognized exactly like
+    # `program.setup`'s — the whole point of the correction.
     program = analyze("static void helper() {\n  delay(1);\n}\n")
     section = program.section("helper_helper")
-    assert section.supported is False
+    assert section.supported is True
+    assert section.signature == "static void helper()"
     (statement,) = section.statements
-    assert statement.reason is UnsupportedReason.UNSUPPORTED_SECTION
-    assert statement.source_text.startswith("static void helper()")
+    assert isinstance(statement, OperationStatement)
+    assert statement.operation_id == TIME_DELAY
 
 
 def test_a_whitespace_only_section_produces_no_statement_at_all():
@@ -717,6 +792,11 @@ _SEMANTIC_MODULES = (
     SEMANTIC_DIR / "operations.py",
     SEMANTIC_DIR / "models.py",
     SEMANTIC_DIR / "analyzer.py",
+    # B6's two modules live in this package and are held to the same
+    # boundaries: a generator that could reach a filesystem, a session or a
+    # toolchain would be the beginning of a compiler, which B7 owns.
+    SEMANTIC_DIR / "emissions.py",
+    SEMANTIC_DIR / "generator.py",
 )
 
 #: Everything the semantic layer must not import. Blockly heads the list:
@@ -973,27 +1053,73 @@ def test_panel_one_setup_recovers_its_real_pin_configuration():
 def test_panel_one_setup_mixes_supported_and_unsupported_statements():
     program = analyze(PANEL_ONE_INO.read_text(encoding="utf-8"))
     setup = program.setup
+
+    # The seven pin_mode() calls remain the only statements the semantic
+    # layer claims as recognized operations.
     assert len(setup.operation_statements) == 7
-    assert len(setup.unsupported_statements) == 6
-    assert len(setup.statements) == 13
+    assert {s.operation.operation_id for s in setup.operation_statements} == {
+        "gpio.pin_mode"
+    }
+
+    # Everything else -- the serial diagnostics and the real Wi-Fi/MQTT
+    # connect sequence this firmware performs -- is carried verbatim as
+    # unsupported rather than dropped, approximated, or misclassified as
+    # understood. Checked by content rather than by a raw count, since that
+    # count is free to change as the connect/diagnostic sequence does without
+    # affecting what this test actually cares about: the supported/
+    # unsupported split itself.
+    unsupported_texts = {s.source_text for s in setup.unsupported_statements}
+    for expected in (
+        "Serial.begin(115200);",
+        "setMotorOutputs(false);",
+        "WiFi.begin(WIFI_SSID, WIFI_PASSWORD);",
+        "client.setServer(MQTT_BROKER, MQTT_PORT);",
+        "client.setCallback(onMessage);",
+    ):
+        assert expected in unsupported_texts
+
+    # No statement is claimed twice or silently dropped between the two
+    # buckets.
+    assert len(setup.statements) == len(setup.operation_statements) + len(
+        setup.unsupported_statements
+    )
 
 
-def test_panel_one_loop_is_entirely_unsupported_and_that_is_fine():
+def test_panel_one_loop_mixes_call_statements_and_one_unsupported_method():
+    # CORRECTED: `ensureConnected()` and `pollButtons()` are zero-argument
+    # calls to functions this firmware defines itself — both are
+    # `CallStatement`s now. `client.loop();` is a method call on an object and
+    # stays unsupported; no `OperationStatement` is claimed either way.
     program = analyze(PANEL_ONE_INO.read_text(encoding="utf-8"))
     loop = program.loop
     assert loop.supported is True
     assert loop.operation_statements == ()
-    assert [s.source_text for s in loop.unsupported_statements] == [
-        "ensureConnected();",
-        "client.loop();",
-        "pollButtons();",
-    ]
+    calls = [s for s in loop.statements if isinstance(s, CallStatement)]
+    assert [s.function_name for s in calls] == ["ensureConnected", "pollButtons"]
+    assert [s.source_text for s in loop.unsupported_statements] == ["client.loop();"]
 
 
 def test_panel_one_mqtt_implementation_is_never_semantically_claimed():
-    # B3 explicitly does not represent this panel's MQTT logic. The callback
-    # and every helper stay carried-verbatim, and no MQTT operation exists.
+    # CORRECTED: the callback and the vulnerable handler are now
+    # representable CONTAINERS (`functions.implementation` — the no-device/
+    # Blockly-integration correction), but their MQTT-specific logic is still
+    # never claimed as understood: no MQTT operation exists anywhere, and
+    # `onMessage()`'s own statements — string/object method calls the
+    # analyzer does not recognize — all stay carried-verbatim.
     program = analyze(PANEL_ONE_INO.read_text(encoding="utf-8"))
-    assert program.section("callback_onMessage").supported is False
-    assert program.section("helper_applyCommand").supported is False
-    assert program.operations_used == (GPIO_PIN_MODE, PROGRAM_LOOP, PROGRAM_SETUP)
+    on_message = program.section("callback_onMessage")
+    assert on_message.supported is True
+    assert on_message.operation_statements == ()
+    assert all(isinstance(s, UnsupportedStatement) for s in on_message.statements)
+
+    # applyCommand() IS partially understood now — its `if (message == "X")`
+    # gate is exactly the construct the correction targets — but the MQTT
+    # broker/topic logic surrounding it is not, and no such operation exists.
+    apply_command = program.section("helper_applyCommand")
+    assert apply_command.supported is True
+    conditionals = [s for s in apply_command.statements if isinstance(s, ConditionalStatement)]
+    assert len(conditionals) == 1
+    assert isinstance(conditionals[0].condition, ComparisonValue)
+
+    assert "mqtt.publish" not in program.operations_used
+    assert "mqtt.subscribe" not in program.operations_used

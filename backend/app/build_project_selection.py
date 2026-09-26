@@ -43,20 +43,41 @@ already did at connect is reading the panel's own `.ino` text from the trusted
 package root. Nothing here compiles, flashes, provisions, validates, starts a
 scenario, or emits an event.
 
-FAILURE IS A SELECTION, NOT AN EXCEPTION. A student opening Build Mode must
-get a workspace. Every way the chain can fail to produce a panel project — the
-monitor has not looked yet, no board, an unread MAC, an unregistered board, a
-registered panel with no courseware, a broken package, a package that declares
-no firmware, a firmware reference B2 cannot materialize, or source the
-structural analyzer chokes on — falls back to the long-standing default LED
-Blink project, with the reason logged rather than shown to the student. The
-one thing that must never happen is silently loading some *other* panel's
-firmware, and that cannot happen here: the only panel firmware this module can
-choose is the one the attached panel's own package declared.
+FAILURE IS A SELECTION, NOT AN EXCEPTION — BUT IT IS NO LONGER LED BLINK.
+A student opening Build Mode must get a `BuildProjectSelection`; it does not
+follow that the selection names a real activity. Every way the chain can fail
+to produce a panel project — the monitor has not looked yet, no board, an
+unread MAC, an unregistered board, a registered panel with no courseware, a
+broken package, a package that declares no firmware, a firmware reference B2
+cannot materialize, or source the structural analyzer chokes on — falls back
+to `create_no_device_workspace()` (`app/build/no_device.py`), an inert
+placeholder that names no activity, and `source` records `NONE` so the
+connection lifecycle knows this session has nothing to offer
+(`BuildSession.has_active_project`, set False by `app/build_websocket.py`).
+The reason is logged rather than shown to the student, but the important
+correction is behavioural, not cosmetic: the LED Blink pipeline-proof project
+(`app/build/blink.py`) is no longer reachable from this selector at all — it
+remains a hand-constructible fixture for direct tests and nothing on the real
+`/ws/build` connection path can select it. The one thing that must never
+happen is silently loading some *other* panel's firmware, and that cannot
+happen here: the only panel firmware this module can choose is the one the
+attached panel's own package declared.
 
 NO PANEL BRANCH. There is no `if panel_id == ...` here and none is permitted.
 The package names its firmware; the loader validates it; the sketch reader
 materializes it. All of it is data.
+
+PHASE B8 ADDS ONE MORE THING READ OFF THE SAME PACKAGE, AND IT IS STILL DATA.
+A panel's remediation declaration now names which discovered sections a
+student may edit, which are for exploring, and which one is the remediation
+region (`app/panels/models.py::RemediationDeclaration`). Those ids are passed
+straight into `load_sketch_project`, which turns them into the project's
+`ProjectPolicy` (`app/build/policy.py`). The decision is the courseware's;
+this module only carries it, exactly as it carries the project id, the board
+and the firmware name. A package with no remediation declaration produces the
+same read-only project B2 produced, and an id naming a section this firmware
+does not have is a materialization failure that falls back to the default
+project with the reason logged — never a silently ignored permission.
 """
 
 from __future__ import annotations
@@ -65,7 +86,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from app.build import BuildWorkspace, create_default_workspace
+from app.build import BuildWorkspace, create_no_device_workspace
 from app.build.document_project import DocumentProjectError, board_info_from_fqbn
 from app.build.sketch_source import SketchSourceError, load_sketch_project
 from app.build_panel_resolution import resolve_build_panel_resources
@@ -83,11 +104,14 @@ class BuildProjectSource(str, Enum):
     #: materialized from the real sketch that package ships. The only way a
     #: panel-specific firmware is ever loaded.
     PANEL_PACKAGE = "panel_package"
-    #: The trainer's default LED Blink pipeline-proof project
-    #: (`app/build/blink.py`). Used whenever a panel's firmware could not be
-    #: materialized — including the ordinary no-hardware development flow,
-    #: which is why this is not an error state.
-    DEFAULT = "default"
+    #: No activity. Used whenever a panel's firmware could not be
+    #: materialized — including the ordinary no-hardware flow, an
+    #: unidentified/unregistered board, or a registered panel with no
+    #: courseware yet. Not an error state on its own (the reason is carried
+    #: separately in `detail`/`panel_status`), but it is never a real
+    #: activity: the workspace this produces is `create_no_device_workspace()`
+    #: (`app/build/no_device.py`), never LED Blink.
+    NONE = "none"
 
 
 @dataclass(frozen=True)
@@ -107,10 +131,29 @@ class BuildProjectSelection:
     #: Why the selection is not a panel package's, when there is something to
     #: say. Empty for a clean PANEL_PACKAGE selection.
     detail: str = ""
+    #: The resolved package itself, when the panel chain produced one. Added
+    #: in Phase B7 so the connection lifecycle can also choose the session's
+    #: VALIDATOR (`app/build_validation_selection.py`) off this one
+    #: resolution instead of walking the MAC -> panel -> package chain a
+    #: second time. Carrying it changes nothing about the selection: it is
+    #: present even when the firmware could not be materialized and the
+    #: workspace fell back to the default, because "which panel's courseware
+    #: is attached" and "whose firmware loaded" are different questions.
+    package: PanelPackage | None = None
 
     @property
     def from_panel(self) -> bool:
         return self.source is BuildProjectSource.PANEL_PACKAGE
+
+    @property
+    def has_active_project(self) -> bool:
+        """Whether this selection names a real activity a student may use.
+
+        False exactly when `source` is `NONE` — the placeholder workspace
+        loaded, not a panel's firmware. `app/build_websocket.py` reads this
+        once, at connect, onto `BuildSession.has_active_project`.
+        """
+        return self.source is not BuildProjectSource.NONE
 
     @property
     def project_id(self) -> str:
@@ -152,7 +195,8 @@ class BuildProjectSelector:
         panel = resources.panel
         panel_id = panel.panel_id if panel is not None else None
 
-        if resources.status is not PanelResourceStatus.READY or resources.package is None:
+        package = resources.package
+        if resources.status is not PanelResourceStatus.READY or package is None:
             # Every non-READY state lands here: NOT_CHECKED, NOT_CONNECTED,
             # UNIDENTIFIED, UNREGISTERED, NO_PACKAGE, PACKAGE_ERROR. They are
             # genuinely different situations (`panel_status` keeps them
@@ -162,7 +206,6 @@ class BuildProjectSelector:
             # phase must prevent.
             return self._fallback(resources.status, panel_id, resources.detail)
 
-        package = resources.package
         try:
             project = self._project_for(package)
         except (SketchSourceError, DocumentProjectError) as error:
@@ -176,13 +219,14 @@ class BuildProjectSelector:
                 panel_id,
                 error,
             )
-            return self._fallback(resources.status, panel_id, str(error))
+            return self._fallback(resources.status, panel_id, str(error), package)
 
         return BuildProjectSelection(
             workspace=BuildWorkspace(project),
             source=BuildProjectSource.PANEL_PACKAGE,
             panel_status=resources.status,
             panel_id=panel_id,
+            package=package,
         )
 
     def _project_for(self, package: PanelPackage):
@@ -220,32 +264,66 @@ class BuildProjectSelector:
             module_id=package.panel_id,
             firmware_name=package.title,
             board=board_info_from_fqbn(firmware.board.fqbn),
-            # B2 DECIDES NOTHING ABOUT EDITABILITY. No section is made
-            # editable and no remediation region is named, because only the
-            # panel's own remediation activity (a later phase) can say which
-            # span a student is meant to change. See
-            # `app/build/document_project.py`.
-            editable_section_ids=(),
-            security_region_id=None,
+            # THIS MODULE STILL DECIDES NOTHING ABOUT EDITABILITY. B2 passed
+            # nothing here because no phase had made that decision yet; B8
+            # makes it in the one place that can — the panel's own
+            # remediation declaration — and this reads it off the package
+            # exactly as it reads the project's identity and board. There is
+            # no default, no inference from a section's kind, and above all
+            # no table here mapping a panel to a set of editable functions.
+            # A package that declares no remediation, or one that declares it
+            # in prose only, yields the same read-only project B2 produced.
+            **self._policy_for(package),
         )
 
+    @staticmethod
+    def _policy_for(package: PanelPackage) -> dict[str, object]:
+        """The panel's declared section policy, as `load_sketch_project` args.
+
+        Every value comes from `package.remediation`; an absent declaration
+        gives the empty, conservative arguments B2 always passed. Whether the
+        named sections actually exist in this firmware is checked downstream
+        by `app/build/document_project.py`, which holds the document and can
+        therefore reject an unknown id rather than ignore it — and a rejection
+        there surfaces as an ordinary selection fallback, never a broken
+        session.
+        """
+        remediation = package.remediation
+        if remediation is None:
+            return {
+                "editable_section_ids": (),
+                "explore_section_ids": (),
+                "security_region_id": None,
+            }
+        return {
+            "editable_section_ids": remediation.editable_section_ids,
+            "explore_section_ids": remediation.explore_section_ids,
+            "security_region_id": remediation.security_section_id,
+        }
+
     def _fallback(
-        self, panel_status: PanelResourceStatus, panel_id: str | None, detail: str
+        self,
+        panel_status: PanelResourceStatus,
+        panel_id: str | None,
+        detail: str,
+        package: PanelPackage | None = None,
     ) -> BuildProjectSelection:
-        """The trainer's default project, with the reason attached.
+        """No activity, with the reason attached.
 
         Deliberately NOT "the last panel's firmware", "the only registered
-        panel's firmware", or "whatever a partial identification suggests".
-        It is the same LED Blink workspace `create_default_workspace()` has
-        always returned, so the existing no-hardware development flow is
-        byte-for-byte what it was before B2.
+        panel's firmware", "whatever a partial identification suggests", or —
+        since this correction — LED Blink. The physical ESP32 selects the
+        activity; when it does not resolve to one, there is no activity to
+        load, and `create_no_device_workspace()` is an honest placeholder
+        that says so rather than a real firmware project standing in for one.
         """
         return BuildProjectSelection(
-            workspace=create_default_workspace(),
-            source=BuildProjectSource.DEFAULT,
+            workspace=create_no_device_workspace(),
+            source=BuildProjectSource.NONE,
             panel_status=panel_status,
             panel_id=panel_id,
             detail=detail,
+            package=package,
         )
 
 

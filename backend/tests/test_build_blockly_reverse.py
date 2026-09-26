@@ -45,7 +45,6 @@ from app.build.blockly_bridge import (
     FieldKind,
     InvalidBlocklyFieldValueError,
     InvalidBlocklyWorkspaceError,
-    MissingBlockSourceError,
     MissingBlocklyFieldError,
     PreservedSource,
     UnknownBlocklyBlockError,
@@ -58,6 +57,7 @@ from app.build.blockly_bridge import (
 )
 from app.build.discovery import analyze_source
 from app.build.semantic import (
+    FUNCTIONS_IMPLEMENTATION,
     GPIO_DIGITAL_WRITE,
     GPIO_PIN_MODE,
     PROGRAM_LOOP,
@@ -556,12 +556,15 @@ def test_a_section_id_is_never_regenerated_or_inferred_from_a_name():
 
 
 def test_a_section_with_no_container_block_comes_back_unsupported():
-    program = round_trip("void helper() {\n  digitalWrite(1, HIGH);\n}\n\nvoid setup() {\n}\n")
-    section = program.section("helper_helper")
+    # CORRECTED FIXTURE: a HELPER_FUNCTION no longer demonstrates this — see
+    # `functions.implementation`. GLOBAL_DECLARATIONS is the one kind that
+    # still has no container form.
+    program = round_trip("int counter = 0;\n\nvoid setup() {\n}\n")
+    section = program.section("global")
     assert section.operation is None
     assert len(section.statements) == 1
     assert section.statements[0].reason is UnsupportedReason.UNSUPPORTED_SECTION
-    assert "digitalWrite(1, HIGH);" in section.statements[0].source_text
+    assert "int counter = 0;" in section.statements[0].source_text
 
 
 def test_b3s_own_reason_travels_back_unchanged():
@@ -628,8 +631,39 @@ def test_the_blink_program_survives_the_round_trip_exactly():
 
 
 def test_the_real_panel_one_firmware_survives_the_round_trip_exactly():
+    # ONE PRE-EXISTING, DOCUMENTED EXCEPTION, newly exercised by this
+    # correction: `chirpBuzzer()` is a representable container for the first
+    # time (`functions.implementation`), and its `delay(BUZZER_CHIRP_MS)` is
+    # exactly `adapter.py`'s own canonical example of "ordinary source
+    # variance" — a named constant where the real block draws a numeric
+    # field, so the statement round-trips as understood-but-undrawable
+    # (`BridgeReason.FIELD_VALUE_NOT_REPRESENTABLE`) and comes back as
+    # `UnsupportedReason.UNSUPPORTED_ARGUMENT`. This narrowing always existed;
+    # it was simply never exercised for a HELPER_FUNCTION body before, because
+    # such a body was not converted through the bridge at all. Every other
+    # section — including every OTHER statement of `chirpBuzzer()` itself —
+    # still survives exactly.
     source = panel_one_source()
-    assert round_trip(source) == semantic(source)
+    before = semantic(source)
+    after = round_trip(source)
+
+    changed_ids = [b.section_id for a, b in zip(before.sections, after.sections) if a != b]
+    assert changed_ids == ["helper_chirpBuzzer"]
+
+    before_chirp = before.section("helper_chirpBuzzer")
+    after_chirp = after.section("helper_chirpBuzzer")
+    assert before_chirp.operation_id == after_chirp.operation_id
+    assert before_chirp.signature == after_chirp.signature
+    assert len(before_chirp.statements) == len(after_chirp.statements)
+    for index, (before_stmt, after_stmt) in enumerate(
+        zip(before_chirp.statements, after_chirp.statements)
+    ):
+        if index == 1:
+            assert isinstance(after_stmt, UnsupportedStatement)
+            assert after_stmt.reason is UnsupportedReason.UNSUPPORTED_ARGUMENT
+            assert after_stmt.source_text == "delay(BUZZER_CHIRP_MS);"
+        else:
+            assert before_stmt == after_stmt
 
 
 def test_panel_ones_pin_modes_survive_with_their_named_pins_intact():
@@ -647,10 +681,17 @@ def test_panel_ones_pin_modes_survive_with_their_named_pins_intact():
 
 
 def test_panel_ones_mqtt_logic_is_still_never_claimed_as_understood():
+    # CORRECTED: both are representable containers now
+    # (`functions.implementation`, the no-device/Blockly-integration
+    # correction), but neither claims a plain `OperationStatement` for any of
+    # its MQTT-specific logic — `onMessage()`'s body is entirely preserved,
+    # and `applyCommand()`'s only understood statement is a `ConditionalStatement`,
+    # never an `OperationStatement`.
     program = round_trip(panel_one_source())
     for section_id in ("callback_onMessage", "helper_applyCommand"):
         section = program.section(section_id)
-        assert section.operation is None
+        assert section.operation is not None
+        assert section.operation.operation_id == FUNCTIONS_IMPLEMENTATION
         assert section.operation_statements == ()
 
 
@@ -814,10 +855,13 @@ def test_something_that_is_not_a_workspace_fails_clearly(malformed):
         blockly_to_semantic(malformed)
 
 
-def test_a_block_with_no_recorded_source_is_refused_rather_than_invented():
-    # A block authored in the editor has no source text anywhere, and writing
-    # one would be generating C++ — which is B6, not B5. The boundary is
-    # reported rather than crossed quietly.
+def test_a_block_with_no_recorded_source_becomes_a_statement_with_none():
+    # A block authored in the editor has no source text anywhere, and B5 still
+    # writes none: the statement it means simply has no provenance. Until B6
+    # this was refused, because a source-less statement could not have been
+    # turned back into firmware by anything; now its C++ is written from its
+    # operation and its values, so the statement is complete without it. B5
+    # itself is unchanged in what it will not do — it invents no text.
     definition = block_definition_for(TIME_DELAY, default_block_catalog)
     authored = BlocklyBlock(
         operation_id=TIME_DELAY,
@@ -825,8 +869,21 @@ def test_a_block_with_no_recorded_source_is_refused_rather_than_invented():
         block_type=definition.blockly_type,
         fields=(BlocklyField("MS", "5"),),
     )
-    with pytest.raises(MissingBlockSourceError):
-        blockly_to_semantic(one_section_program(container_block(PROGRAM_SETUP, authored)))
+    program = blockly_to_semantic(one_section_program(container_block(PROGRAM_SETUP, authored)))
+    statement = program.setup.operation_statements[0]
+    assert statement.operation_id == TIME_DELAY
+    assert statement.value("MS") == LiteralValue(5, SemanticType.NUMBER)
+    assert statement.source_text is None
+    assert statement.has_source is False
+
+
+def test_a_block_that_does_record_its_source_still_restores_it_exactly():
+    program = blockly_to_semantic(
+        one_section_program(
+            container_block(PROGRAM_SETUP, statement_block(TIME_DELAY, "delay( 5 ) ;", MS="5"))
+        )
+    )
+    assert program.setup.operation_statements[0].source_text == "delay( 5 ) ;"
 
 
 def test_every_reverse_failure_is_a_bridge_error():
@@ -836,7 +893,6 @@ def test_every_reverse_failure_is_a_bridge_error():
         MissingBlocklyFieldError,
         InvalidBlocklyFieldValueError,
         UnsupportedBlocklyStructureError,
-        MissingBlockSourceError,
     ):
         assert issubclass(error, BlocklyBridgeError)
         assert issubclass(error, ValueError)

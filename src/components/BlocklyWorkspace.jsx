@@ -61,28 +61,41 @@ function buildBlocklyTheme() {
 }
 
 /**
- * Blockly Phase 1 POC host (see CLAUDE.md). Owns the Blockly `WorkspaceSvg`
- * instance, its DOM lifecycle, and resize handling — mirrors
+ * Section-based Blockly host (Phase B8 correction). Owns the Blockly
+ * `WorkspaceSvg` instance, its DOM lifecycle, and resize handling — mirrors
  * `HackTerminal.jsx`'s own imperative-host-plus-ResizeObserver shape for
  * exactly the same reason: a library-owned canvas that must track its
  * container's size (including size changes caused by the left panel
  * collapsing/expanding — see `BuildMode.jsx`) rather than a size this
  * component picks itself.
  *
- * `onCodeChange(code)` fires with the freshly generated C++ every time the
- * block structure actually changes (created/deleted/moved/field edited) —
- * never on pure UI events (selection, scroll, a drag still in progress) —
- * mirroring the plain `<textarea onChange>` the existing full-editor code
- * view already uses, so the caller can feed it into the very same
- * `pendingEdit` state with zero special-casing.
+ * `initialWorkspaceState` is one section's `workspace` field exactly as
+ * `section_blockly`/`edit_section_blocks` responses carry it (backend/app/
+ * build/blockly_bridge/models.py::BlocklySection.to_workspace_state()) —
+ * loaded once, right after `Blockly.inject`, via
+ * `Blockly.serialization.workspaces.load`. The CALLER remounts this
+ * component (via a `key` on the opened section id — see `BuildMode.jsx`)
+ * whenever the student switches sections, rather than this component trying
+ * to imperatively swap a live workspace's content — simpler, and it is what
+ * keeps one section's edits from ever leaking into another's canvas.
+ *
+ * `onWorkspaceChange(stateJSON)` fires with the CURRENT full serialized
+ * workspace state — the authoritative payload `edit_section_blocks` sends —
+ * every time the block structure actually changes (created/deleted/moved/
+ * field edited), never on pure UI events (selection, scroll, a drag still in
+ * progress). `onCodeChange(code)`, kept for the legacy whole-file flow
+ * (`BuildMode.jsx`'s Blink/no-sections fallback), fires alongside it with the
+ * client-side generated preview; a section-based caller can ignore it.
  */
-export default function BlocklyWorkspace({ onCodeChange }) {
+export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceChange, onCodeChange }) {
   const hostRef = useRef(null)
   const workspaceRef = useRef(null)
   const onCodeChangeRef = useRef(onCodeChange)
+  const onWorkspaceChangeRef = useRef(onWorkspaceChange)
 
   useEffect(() => {
     onCodeChangeRef.current = onCodeChange
+    onWorkspaceChangeRef.current = onWorkspaceChange
   })
 
   useEffect(() => {
@@ -102,8 +115,15 @@ export default function BlocklyWorkspace({ onCodeChange }) {
     })
     workspaceRef.current = workspace
 
+    if (initialWorkspaceState) {
+      // Loaded BEFORE the change listener attaches, so the initial load
+      // itself never reports back as a student edit.
+      Blockly.serialization.workspaces.load(initialWorkspaceState, workspace)
+    }
+
     const handleChange = (event) => {
       if (event.isUiEvent || workspace.isDragging()) return
+      onWorkspaceChangeRef.current?.(Blockly.serialization.workspaces.save(workspace))
       onCodeChangeRef.current?.(generateArduinoCode(workspace))
     }
     workspace.addChangeListener(handleChange)
@@ -119,6 +139,11 @@ export default function BlocklyWorkspace({ onCodeChange }) {
       workspace.dispose()
       workspaceRef.current = null
     }
+    // `initialWorkspaceState` is intentionally read once, at mount: the
+    // caller remounts this whole component (via `key`) to load a different
+    // section, rather than this effect re-loading state into a live
+    // workspace mid-session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   return <div className="blockly-host" ref={hostRef} />

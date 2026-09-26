@@ -17,12 +17,27 @@ module, and a submitted edit can only ever replace one named EDITABLE
 region — see `app/build/workspace.py` for the enforcement.
 
 Phase 3A behaviour: accept the connection, create an isolated session with
-its workspace already loaded — as of Phase B2 the attached panel's own
-firmware when one resolves (`app/build_project_selection.py`), and otherwise
-the LED Blink pipeline-proof project (`app/build/blink.py`), announce the session id, emit
-the session's bootstrap events, send one `state` snapshot, then handle
-`edit_region` requests — validating the region via the Build Service,
-emitting the resulting event(s), and sending a refreshed `state` snapshot.
+its workspace already loaded — the attached panel's own firmware when one
+resolves (`app/build_project_selection.py`), and otherwise an inert
+no-activity placeholder (`app/build/no_device.py`; see the no-device
+correction below) — announce the session id, emit the session's bootstrap
+events, send one `state` snapshot, then handle `edit_region` requests —
+validating the region via the Build Service, emitting the resulting event(s),
+and sending a refreshed `state` snapshot.
+
+NO-DEVICE CORRECTION. A connection whose panel does not resolve to a real
+package — no board, an unidentified/unregistered board, a registered panel
+with no courseware, or firmware B2 could not materialize — no longer loads
+the LED Blink pipeline-proof project. `select_build_project()` returns a
+`BuildProjectSelection` whose `has_active_project` is False for every one of
+those cases, carried onto `BuildSession.has_active_project` here; the session
+still exists (hardware polling keeps working) but `BuildService` refuses every
+edit/compile/flash/validate request against it, and the `state` frame's
+`has_active_project: false` is what `BuildMode.jsx` reads to render its
+no-device empty state instead of an IDE. LED Blink remains reachable only by
+a caller that constructs a `BuildSession`/`BuildWorkspace` directly (tests,
+`create_default_workspace()`'s own dataclass default) — never through this
+connection path.
 
 Phase 3B behaviour: also handle `compile` requests. This module still has no
 scenario- or compiler-specific knowledge of its own — it hands the request
@@ -40,9 +55,29 @@ Phase 3C behaviour: also handle `flash` requests, the same way — one call to
 or upload commands. The `flash` frame carries no fields at all, so there is
 nothing on this wire that could name a device to write firmware to, a binary
 to write, or an argument to pass; the backend chooses every one of those
-(see `app/build/flasher.py`). Validate/security-test requests are still not
-part of this protocol; the frontend's controls for them remain disabled
-placeholders.
+(see `app/build/flasher.py`).
+
+Phase B7 behaviour: also handle `validate` requests, the same way again —
+one call to `BuildService.validate_workspace`, no knowledge here of what any
+panel's remediation is or how it would be checked. The `validate` frame is
+field-less too, which matters more here than anywhere else on this socket: a
+client cannot assert its own verdict, name what to validate, or supply
+evidence. The service refuses the request unless this session's own
+workspace was successfully compiled AND successfully flashed, and the
+verdict comes from a backend validator. No panel shipped today has an
+executable check, so an ordinary `validate` is refused with that reason —
+see `app/build/validation/`.
+
+Phase B8 behaviour (protocol version 6): also handle `section_blockly` and
+`edit_section_blocks` — the section -> Blockly contract Build Mode's actual
+interaction model runs on. `section_blockly` is a READ: it returns one
+discovered section's blocks in a `section` frame, emits no event, changes no
+status and sends no new `state`, because opening a section to look at it is not
+a remediation attempt. `edit_section_blocks` is the INTENDED editing path and
+is rendered exactly like an `edit_region`: the same events, the same refreshed
+snapshot. This module gains no knowledge of Blockly from either — it transports
+a workspace it never interprets, and `app/build/workspace.py` refuses the write
+outright if the named section is not one the project's policy opens.
 
 Protocol version 4 behaviour: also handle `hardware_status` requests — a
 read-only re-run of the same real device discovery `flash` already performs
@@ -66,19 +101,25 @@ from app import config
 from app.build.events import BuildEvent
 from app.build.service import BuildActionResult, default_service
 from app.build_project_selection import select_build_project
+from app.build_provisioning_selection import select_build_provisioning
 from app.build_sessions import BuildSession, build_session_manager
+from app.build_validation_selection import select_build_validation
 from app.models.build_messages import (
     BUILD_CLIENT_MESSAGE_ADAPTER,
     BuildClientMessage,
     BuildErrorMessage,
     BuildEventMessage,
+    BuildSectionMessage,
     BuildServerMessage,
     BuildSessionMessage,
     BuildStateMessage,
     CompileMessage,
     EditRegionMessage,
+    EditSectionBlocksMessage,
     FlashMessage,
     HardwareStatusMessage,
+    SectionBlocklyMessage,
+    ValidateMessage,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,6 +164,13 @@ async def _render_result(websocket: WebSocket, session: BuildSession, result: Bu
     """
     if not result.success:
         await send(websocket, BuildErrorMessage(message=result.error or "request rejected"))
+        return
+    if result.data is not None:
+        # A READ (B8's `section_blockly`). It changed nothing, so there is no
+        # event to render and nothing in the snapshot moved — resending one
+        # would tell a client to re-render its whole workspace because a
+        # student clicked a section to look at it.
+        await send(websocket, BuildSectionMessage(data=result.data))
         return
     for event in result.events:
         await send(websocket, BuildEventMessage(event=event.type.value, data=dict(event.data)))
@@ -171,9 +219,21 @@ async def build_websocket(websocket: WebSocket) -> None:
     # still simply leaves `panel_id` as the honest `None` it already
     # defaults to. The wire protocol is unchanged — this sends no frame of
     # its own, and the `state` snapshot keeps exactly its existing shape.
+    # B7 takes a third thing off that same single resolution: the session's
+    # validator. `select_build_validation` reads the already-loaded package
+    # and builds a `ValidationPlan` — no device call, no file read, no second
+    # walk of the MAC -> panel -> package chain, and choosing a validator
+    # never runs one. Option A takes a fourth: who provisions this session's
+    # compile-time firmware copy with real, non-committed credentials
+    # (`app/build_provisioning_selection.py`), off the same resolution and
+    # with the same "choosing never runs one" guarantee.
     selection = select_build_project()
     session = await build_session_manager.create(
-        panel_id=selection.panel_id, workspace=selection.workspace
+        panel_id=selection.panel_id,
+        workspace=selection.workspace,
+        validation=select_build_validation(selection),
+        provisioning=select_build_provisioning(selection),
+        has_active_project=selection.has_active_project,
     )
     logger.info("build session opened: %s [%s]", session.session_id, selection.describe())
 
@@ -200,7 +260,25 @@ async def build_websocket(websocket: WebSocket) -> None:
                 await send(websocket, BuildErrorMessage(message=str(exc)))
                 continue
 
-            if isinstance(message, EditRegionMessage):
+            if isinstance(message, SectionBlocklyMessage):
+                # B8's read leg. No knowledge here of Blockly, sections or
+                # C++ — one service call, exactly like every other action.
+                result = await default_service.read_section_blockly(
+                    session, message.path, message.section_id
+                )
+            elif isinstance(message, EditSectionBlocksMessage):
+                # B8's write leg, and Build Mode's INTENDED editing path. The
+                # frame carries blocks, not source: this module transports them
+                # and nothing more, and the backend regenerates the firmware
+                # from what they mean (see `app/build/workspace.py`).
+                result = await default_service.edit_section_blocks(
+                    session,
+                    message.path,
+                    message.section_id,
+                    message.workspace,
+                    message.preserved,
+                )
+            elif isinstance(message, EditRegionMessage):
                 result = await default_service.edit_region(
                     session, message.path, message.region_id, message.source
                 )
@@ -210,6 +288,16 @@ async def build_websocket(websocket: WebSocket) -> None:
                 )
             elif isinstance(message, FlashMessage):
                 result = await default_service.flash_workspace(session)
+            elif isinstance(message, ValidateMessage):
+                # Same shape as `compile`: one service call, a progress sink
+                # so a check with real duration announces itself when it
+                # starts, and no knowledge here of what validating means.
+                # The service refuses outright unless this session's own
+                # workspace was successfully flashed, so nothing on this
+                # socket can turn a compile or a flash into a verdict.
+                result = await default_service.validate_workspace(
+                    session, emit=_progress_sink(websocket, session)
+                )
             elif isinstance(message, HardwareStatusMessage):
                 result = await default_service.detect_hardware(session)
             else:

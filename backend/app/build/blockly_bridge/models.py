@@ -162,12 +162,29 @@ class BlocklyBlock:
     alike — and a block that forgot it could only be returned to the IR by
     generating C++ for it, which is B6's job. A block authored in the editor
     has no source and leaves it None.
+
+    `container_signature` is the SAME KIND OF THING, added for a generic named-
+    function container (`functions.implementation` — see
+    `app/build/semantic/models.py::SemanticSection.signature`): the preserved,
+    exact C++ declarator of the function this container's body belongs to
+    (`"static void applyCommand(const String &message)"`), carried so this
+    IN-MEMORY object can round-trip back to an equal `SemanticSection` without
+    losing it. It is PROVENANCE exactly like `source_text` — not part of the
+    Blockly workspace state (`to_state()` never writes it; a real editor never
+    sees or sends it) and not derived from a field. A REAL edit over the wire
+    still needs `app/build/section_blockly.py::program_with_section` to copy it
+    across explicitly, because `app/build/blockly_bridge/workspace_state.py`
+    parses a browser's JSON, which never carried this field to begin with; this
+    is what makes the plain in-process `program_to_blockly` -> `blockly_to_
+    semantic` round trip (no browser, no section_blockly.py) equal on its own.
+    None for `program.setup`/`program.loop` and for every statement block.
     """
 
     operation_id: str
     block_id: str
     block_type: str
     source_text: str | None = None
+    container_signature: str | None = None
     fields: tuple[BlocklyField, ...] = ()
     body_input: str | None = None
     body: tuple[BlocklyBlock | PreservedSource, ...] = ()
@@ -185,6 +202,12 @@ class BlocklyBlock:
         ):
             raise BlocklyModelError(
                 f"{self.block_type}: recorded source must be non-empty text or absent"
+            )
+        if self.container_signature is not None and (
+            not isinstance(self.container_signature, str) or not self.container_signature.strip()
+        ):
+            raise BlocklyModelError(
+                f"{self.block_type}: container signature must be non-empty text or absent"
             )
         names = [field.name for field in self.fields]
         for field in self.fields:
@@ -309,6 +332,65 @@ class BlocklySection:
             for index, item in enumerate(self.items)
             if isinstance(item, PreservedSource)
         )
+
+    @property
+    def representable(self) -> bool:
+        """Whether Blockly can draw this section at all.
+
+        False when the IR established no container form for the construct — a
+        helper function, a callback, a run of global declarations — so there is
+        no block and the whole section is preserved source.
+
+        THIS FLAG IS WHY AN EDITOR DOES NOT HAVE TO GUESS. An empty
+        `to_workspace_state()` is produced by two completely different
+        situations: a section whose body a student emptied, and a section
+        Blockly has no vocabulary for yet. Rendering the second as a blank
+        canvas would tell a student their firmware contains nothing, and
+        accepting an edit to it would mean accepting a deletion nobody asked
+        for. A consumer reads this flag, shows the preserved source read-only,
+        and says the toolbox cannot express this construct YET — see
+        `app/build/section_blockly.py`, which refuses an edit to such a section
+        for exactly that reason.
+        """
+        return self.block is not None
+
+    def to_workspace_state(self) -> dict[str, Any]:
+        """This ONE section as `Blockly.serialization.workspaces.load` input.
+
+        The section-scoped counterpart of `BlocklyProgram.to_workspace_state`,
+        and the read half of the section -> Blockly contract: an editor opening
+        one section loads exactly this, without being handed the rest of the
+        firmware and without slicing a whole-program state itself.
+
+        The section's container block is the single top-level block, at the
+        same deterministic origin a program's first block gets, so two
+        conversions of one section are byte-identical. A section with no
+        container form yields no blocks — see `representable`.
+        """
+        blocks: list[dict[str, Any]] = []
+        if self.block is not None:
+            state = self.block.to_state()
+            state["x"] = FIRST_BLOCK_X
+            state["y"] = FIRST_BLOCK_Y
+            blocks.append(state)
+        return {"blocks": {"languageVersion": BLOCKLY_LANGUAGE_VERSION, "blocks": blocks}}
+
+    def to_representation(self) -> dict[str, Any]:
+        """Both halves of ONE section, as JSON-safe data.
+
+        Exactly the shape `BlocklyProgram.to_representation()` uses, narrowed
+        to one section and carrying the two things a section-addressed editor
+        additionally needs: which section this is, and whether Blockly can draw
+        it. Nothing here says whether a student may EDIT it — that is the
+        `InteractionPolicy` a `BuildProject` carries (`app/build/policy.py`),
+        and this package is forbidden permission vocabulary.
+        """
+        return {
+            "sectionId": self.section_id,
+            "representable": self.representable,
+            "workspace": self.to_workspace_state(),
+            "preserved": [record.to_record() for record in self.records],
+        }
 
 
 @dataclass(frozen=True)

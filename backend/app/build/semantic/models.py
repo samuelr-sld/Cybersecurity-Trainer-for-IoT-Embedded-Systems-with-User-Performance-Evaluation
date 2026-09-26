@@ -3,11 +3,14 @@
     SemanticProgram
       -> SemanticSection      (one per CodeSection, by id)
            -> SemanticStatement
-                -> OperationStatement   (operation + named arguments)
-                -> UnsupportedStatement (exact source text + why)
+                -> OperationStatement    (operation + named arguments)
+                -> CallStatement         (call an existing, zero-arg function)
+                -> ConditionalStatement  (if (CONDITION) { body: SemanticStatement[] })
+                -> UnsupportedStatement  (exact source text + why)
                      -> SemanticValue
-                          -> LiteralValue (typed scalar)
-                          -> SymbolValue  (named constant reference)
+                          -> LiteralValue    (typed scalar)
+                          -> SymbolValue     (named constant/parameter reference)
+                          -> ComparisonValue (LEFT ==/!= RIGHT, always boolean)
 
 THE QUESTION THIS LAYER ANSWERS. `app/build/discovery/models.py` already
 states the split it keeps from `FileSegment`; this module adds the third:
@@ -31,9 +34,12 @@ fully-formed, already-validated one.
 SOURCE IS PRESERVED, NOT REPLACED. The IR is an ADDITIONAL representation.
 The `CodeSection` it was derived from still holds the exact original text and
 is never modified; B2's `FileSegment`s — the text a compiler actually sees —
-are untouched by this layer's existence. Every statement here additionally
-keeps its own `source_text`, so an unsupported construct is carried verbatim
-rather than dropped or approximated.
+are untouched by this layer's existence. An unsupported construct keeps its
+own exact `source_text`, so it is carried verbatim rather than dropped or
+approximated. An UNDERSTOOD statement keeps that text too, but only as
+provenance and only when it has any: a statement authored in an editor has no
+source anywhere, and since B6 its C++ is written from its meaning rather than
+from a remembered string (see `OperationStatement`).
 
 UNSUPPORTED IS A REPRESENTATION, NOT A FAILURE. Most real firmware is not
 expressible in five operations, and pretending otherwise is the failure mode
@@ -51,6 +57,7 @@ catalog's vocabulary is reused without importing `app.blockly`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -143,6 +150,53 @@ class LiteralValue(SemanticValue):
         return str(self.value)
 
 
+#: The comparison operators `ComparisonValue` may express. A closed pair
+#: rather than every C++ relational operator: it is exactly what an
+#: authorization-style check needs (`message == expected`, `role != "guest"`)
+#: and nothing this phase has a construct that would use `<`/`>`/`<=`/`>=` for.
+_COMPARISON_OPERATORS = ("==", "!=")
+
+
+@dataclass(frozen=True)
+class ComparisonValue(SemanticValue):
+    """`LEFT == RIGHT` or `LEFT != RIGHT` — the one expression form the IR has.
+
+    Added for `ConditionalStatement`'s condition (see below): an authorization
+    check is a comparison, and representing `message == "START"` needs an
+    expression node the two leaf forms above cannot be. It is still narrow on
+    purpose — no `&&`/`||`, no arithmetic, no nesting beyond one comparison —
+    because that is exactly the vocabulary the remediation this phase targets
+    needs, and a wider expression grammar is a later phase's addition, not a
+    silent side effect of this one.
+
+    `left`/`right` are themselves `SemanticValue`s (a `LiteralValue` or a
+    `SymbolValue` today — nothing stops a future `ComparisonValue` from
+    nesting, but nothing produces one), so this class adds no new leaf shape,
+    only a way to combine the existing ones into something that FITS a
+    boolean slot.
+    """
+
+    left: SemanticValue
+    operator: str
+    right: SemanticValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.left, SemanticValue):
+            raise SemanticModelError(f"comparison left operand is not a value: {self.left!r}")
+        if not isinstance(self.right, SemanticValue):
+            raise SemanticModelError(f"comparison right operand is not a value: {self.right!r}")
+        if self.operator not in _COMPARISON_OPERATORS:
+            raise SemanticModelError(f"invalid comparison operator: {self.operator!r}")
+
+    def fits(self, value_type: SemanticType) -> bool:
+        """A comparison is always boolean — it is the IR's only source of one."""
+        return value_type is SemanticType.BOOLEAN
+
+    @property
+    def source_text(self) -> str:
+        return f"{self.left.source_text} {self.operator} {self.right.source_text}"
+
+
 @dataclass(frozen=True)
 class SymbolValue(SemanticValue):
     """A reference to a named constant: `MOTOR_IN1`, `OUTPUT`, `HIGH`.
@@ -216,7 +270,7 @@ class SemanticStatement:
     __slots__ = ()
 
     @property
-    def source_text(self) -> str:  # pragma: no cover - abstract
+    def source_text(self) -> str | None:  # pragma: no cover - abstract
         raise NotImplementedError
 
     @property
@@ -251,11 +305,23 @@ class OperationStatement(SemanticStatement):
     once, in the operation's own declared order, and each value must fit its
     parameter's type. An `OperationStatement` that exists is therefore one a
     consumer can act on without re-checking anything.
+
+    `text` IS PROVENANCE, NOT MEANING, and it is optional for that reason. It
+    is the exact source this statement was READ from, when it was read from
+    source at all — the same field, with the same meaning, that B4's
+    `BlocklyBlock.source_text` already carries and leaves None for a block
+    authored in the editor. A statement's meaning is entirely its operation and
+    its arguments: nothing decides what it does by reading `text`, and B6's
+    generator writes its C++ from the operation and the values rather than from
+    this field, so a source-less statement generates exactly like a source-
+    backed one. Before B6 existed, a statement with no text could not have been
+    turned back into firmware by anything, which is why it was required then
+    and is not now.
     """
 
     operation: SemanticOperation
     arguments: tuple[SemanticArgument, ...]
-    text: str
+    text: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.operation, SemanticOperation):
@@ -265,9 +331,10 @@ class OperationStatement(SemanticStatement):
                 f"{self.operation.operation_id}: a {self.operation.form.value} operation "
                 "cannot be a statement in a body"
             )
-        if not isinstance(self.text, str) or not self.text.strip():
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
             raise SemanticModelError(
-                f"{self.operation.operation_id}: statement text must be non-empty"
+                f"{self.operation.operation_id}: statement text must be non-empty source "
+                "or absent"
             )
         for argument in self.arguments:
             if not isinstance(argument, SemanticArgument):
@@ -297,9 +364,14 @@ class OperationStatement(SemanticStatement):
         return self.operation.operation_id
 
     @property
-    def source_text(self) -> str:
-        """The exact source this statement was read from."""
+    def source_text(self) -> str | None:
+        """The exact source this statement was read from, or None if authored."""
         return self.text
+
+    @property
+    def has_source(self) -> bool:
+        """True when this statement was read from source rather than authored."""
+        return self.text is not None
 
     @property
     def supported(self) -> bool:
@@ -346,6 +418,120 @@ class UnsupportedStatement(SemanticStatement):
         return False
 
 
+@dataclass(frozen=True)
+class CallStatement(SemanticStatement):
+    """A call to an existing, arbitrarily-named function, for its effect.
+
+    NOT AN `OperationStatement`. An `OperationStatement` names one of the
+    closed, platform-defined `SemanticOperation`s (`gpio.pin_mode`, ...) whose
+    C++ spelling is a fixed row in `emissions.py`; this is the opposite case —
+    a call to whatever function the *firmware itself* already defines
+    (`motorStart()`, `chirpBuzzer()`), which cannot be a global operation
+    without teaching the panel-agnostic registry a panel's own function names.
+    `function_name` is therefore data on the statement, not an operation id.
+
+    DELIBERATELY ZERO-ARGUMENT ONLY, for now. Real firmware calls existing
+    helpers with no arguments constantly (`motorStart(); chirpBuzzer();
+    ensureConnected(); pollButtons();`), and every one of those becomes
+    representable with nothing more than a function name. A call WITH
+    arguments is not modelled here — it stays an `UnsupportedStatement`
+    exactly as it always has — because representing an arbitrary argument
+    list safely (typed, order-preserving, round-tripping through one Blockly
+    field) is a real extension this phase does not need to make. Widening this
+    is adding an `arguments` field here plus a matching Blockly value input,
+    not a change to what this class already means.
+    """
+
+    function_name: str
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        # The C++ identifier shape a bare function name must have. The same
+        # pattern `app/build/semantic/emissions.py` requires of a
+        # `CallEmission`, restated rather than imported for the same
+        # layering reason `operations.py` gives for not importing Blockly:
+        # this module must not depend on the C++-aware emissions table to
+        # validate its own shape. `re.match` inline, not `re.compile` —
+        # `compile` is one of the bare names the build layer's own static
+        # scan refuses everywhere in this package (see
+        # `tests/test_build_workspace.py`), because it is also Python's
+        # dynamic-code builtin; this module has no dynamic execution to
+        # justify tripping that check.
+        if not isinstance(self.function_name, str) or not re.match(
+            r"^[A-Za-z_]\w*$", self.function_name
+        ):
+            raise SemanticModelError(f"invalid call target name: {self.function_name!r}")
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError("call statement text must be non-empty source or absent")
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class ConditionalStatement(SemanticStatement):
+    """`if (CONDITION) { BODY }` — no `else`.
+
+    THE ONE CONTROL-FLOW FORM THE IR HAS, and deliberately the smallest one
+    that can express an authorization gate: a condition and a body to run when
+    it holds. There is no `else`/`else if` here on purpose. C++ does not
+    require one: `if (a) { x(); }` immediately followed by `if (b) { y(); }`
+    behaves identically to `if (a) { x(); } else if (b) { y(); }` whenever the
+    conditions are mutually exclusive — which a string-equality authorization
+    check always is — and two independent `if`s is also the more natural
+    Blockly shape (drag two blocks, not one block with a growing mutator).
+    Firmware read from source that DOES use `else`/`else if` is unaffected:
+    the `if` head B3 recognizes becomes one `ConditionalStatement` and the
+    `else ...` that follows becomes its own `UnsupportedStatement`, carried
+    verbatim immediately after it — C++ does not require anything but
+    whitespace between a `}` and the `else` that follows it, so the two
+    statements placed back to back by `generator.py` still compile and still
+    behave exactly as the original did. What changes is only that the `else`
+    branch is not independently editable as blocks unless it is rewritten as
+    its own `if`.
+
+    `condition` must `fits(SemanticType.BOOLEAN)` — a `ComparisonValue`
+    always does, a boolean `LiteralValue` does, and a bare `SymbolValue` does
+    too (symbols fit every type; the IR does not resolve names — see
+    `SymbolValue`). `body` is this construct's own nested statement list, may
+    be empty (an emptied Blockly body is a legitimate edit, exactly as an
+    emptied container body is), and may itself contain further supported or
+    unsupported statements, including a nested `ConditionalStatement`.
+    """
+
+    condition: SemanticValue
+    body: tuple[SemanticStatement, ...]
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.condition, SemanticValue):
+            raise SemanticModelError(f"condition is not a value: {self.condition!r}")
+        if not self.condition.fits(SemanticType.BOOLEAN):
+            raise SemanticModelError(
+                f"condition ({self.condition.source_text}) does not fit a boolean"
+            )
+        for statement in self.body:
+            if not isinstance(statement, SemanticStatement):
+                raise SemanticModelError(f"not a statement in an if-body: {statement!r}")
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError(
+                "conditional statement text must be non-empty source or absent"
+            )
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
 # --- sections and programs --------------------------------------------------
 
 
@@ -365,11 +551,29 @@ class SemanticSection:
     holds only `UnsupportedStatement`s — enforced below, because inspecting
     the body of a construct we do not understand would be claiming knowledge
     the analyzer never established.
+
+    `signature` is the PRESERVED, VERBATIM C++ declarator of a generic named
+    function container (`functions.implementation` — see `operations.py`),
+    e.g. `"static void applyCommand(const String &message)"`. It exists
+    because that operation is deliberately generic — one operation id shared
+    by every helper function and callback a firmware defines, since the
+    semantic layer must not learn a panel's own function names (see
+    `operations.py`'s module docstring) — so the one thing that makes a
+    container's C++ a *particular* function (its name, return type, qualifiers
+    and parameter list) cannot live on the shared operation and has to live
+    here, on the one section it belongs to. It is None for `program.setup`/
+    `program.loop`, whose signature is a fixed row in `emissions.py` instead,
+    and for any section with no container operation. Blockly never sees or
+    edits it: `app/build/section_blockly.py::program_with_section` copies the
+    current section's `signature` onto whatever `generator.py` writes for the
+    section, exactly as it already refuses to let the container operation
+    itself change — the signature is fixed scaffolding, not a block.
     """
 
     section_id: str
     operation: SemanticOperation | None
     statements: tuple[SemanticStatement, ...]
+    signature: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.section_id, str) or not self.section_id.strip():
@@ -381,6 +585,15 @@ class SemanticSection:
                 raise SemanticModelError(
                     f"{self.section_id}: a section operation must be a container, got "
                     f"{self.operation.form.value}"
+                )
+        if self.signature is not None:
+            if self.operation is None:
+                raise SemanticModelError(
+                    f"{self.section_id}: a signature needs a container operation"
+                )
+            if not isinstance(self.signature, str) or not self.signature.strip():
+                raise SemanticModelError(
+                    f"{self.section_id}: signature must be non-empty text or absent"
                 )
         for statement in self.statements:
             if not isinstance(statement, SemanticStatement):

@@ -68,7 +68,6 @@ from app.build.blockly_bridge.errors import (
     BlocklyModelError,
     InvalidBlocklyFieldValueError,
     InvalidBlocklyWorkspaceError,
-    MissingBlockSourceError,
     MissingBlocklyFieldError,
     UnknownBlocklyBlockError,
     UnrepresentableOperationError,
@@ -85,9 +84,15 @@ from app.build.blockly_bridge.models import (
     PreservedSource,
 )
 from app.build.blockly_bridge.reverse import block_definition_for_type, blockly_to_semantic
+from app.build.blockly_bridge.workspace_state import (
+    MAX_BLOCK_DEPTH,
+    blockly_program_from_state,
+    blockly_section_from_state,
+)
 
 __all__ = [
     "BLOCKLY_LANGUAGE_VERSION",
+    "MAX_BLOCK_DEPTH",
     "BlocklyBlock",
     "BlocklyBridgeError",
     "BlocklyField",
@@ -100,7 +105,6 @@ __all__ = [
     "FieldKind",
     "InvalidBlocklyFieldValueError",
     "InvalidBlocklyWorkspaceError",
-    "MissingBlockSourceError",
     "MissingBlocklyFieldError",
     "PreservedRecord",
     "PreservedSource",
@@ -109,6 +113,8 @@ __all__ = [
     "UnsupportedBlocklyStructureError",
     "block_definition_for",
     "block_definition_for_type",
+    "blockly_program_from_state",
+    "blockly_section_from_state",
     "blockly_to_semantic",
     "build_default_bindings",
     "default_field_bindings",

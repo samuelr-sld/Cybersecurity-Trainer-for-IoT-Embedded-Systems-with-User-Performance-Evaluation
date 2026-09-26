@@ -113,6 +113,7 @@ def load_sketch_project(
     firmware_name: str,
     board: BoardInfo,
     editable_section_ids: Iterable[str] = (),
+    explore_section_ids: Iterable[str] = (),
     security_region_id: str | None = None,
 ) -> BuildProject:
     """Read one sketch directory into a fresh, independent `BuildProject`.
@@ -150,6 +151,7 @@ def load_sketch_project(
             firmware_name=firmware_name,
             board=board,
             editable_section_ids=editable_section_ids,
+            explore_section_ids=explore_section_ids,
             security_region_id=security_region_id,
             supporting_files=supporting,
         )

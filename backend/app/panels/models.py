@@ -92,6 +92,33 @@ _EVENT_NAME_PATTERN = r"[a-z0-9]+(?:_[a-z0-9]+)*"
 #: `FirmwareConfiguration` applies to flag-shaped values.
 _COMMAND_LINE_CHARACTERS = "|&;<>$`\\\"'()"
 
+#: A discovered C++ section id, as `app/build/discovery/` mints them
+#: (`setup`, `loop`, `callback_onMessage`, `helper_applyCommand`,
+#: `global_3`). Restated here rather than imported because `app/panels/` may
+#: not import `app/build/` (asserted by `tests/test_panel_packages.py`); the
+#: test suite is what proves a declared id names a section the analyzer
+#: actually produces for this panel's firmware, exactly as it proves a
+#: `WorkflowStep.command` names a real command.
+_SECTION_ID_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*"
+
+#: Environment variable names a remediation criterion may point at for a
+#: provisioned lab secret. The prefix is load-bearing: a manifest names
+#: WHERE a lab fixture lives, never what it is, and constraining the shape
+#: means a package cannot address an arbitrary variable of the process it
+#: runs in. See `app/config.py::lab_secret`, the one reader.
+_LAB_SECRET_ENV_PATTERN = r"TRAINER_LAB_[A-Z][A-Z0-9_]*"
+
+#: One command word a device accepts on a control topic (`START`, `STOP`).
+#: Uppercase and unbroken, because this panel's own firmware uppercases and
+#: trims what it receives before comparing.
+_COMMAND_WORD_PATTERN = r"[A-Z][A-Z0-9_]*"
+
+#: An MQTT topic filter a criterion may name. Deliberately excludes the
+#: wildcards `+` and `#`: a criterion states the ONE topic a command is
+#: published to and the ONE topic evidence is read from, never a subscription
+#: pattern that could fan out across a broker.
+_TOPIC_PATTERN = r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*"
+
 
 class EvaluationMetric(str, Enum):
     """One of the seven established trainer metrics — declaration only.
@@ -365,6 +392,317 @@ class EvaluationDeclaration:
             seen.add(metric)
 
 
+class EvidenceChannel(str, Enum):
+    """Where a validator OBSERVES what the remediated device actually did.
+
+    Phase B8. A closed vocabulary, because "how do we know?" is the question
+    a validation result stands or falls on, and free text would let a package
+    name an observation nobody implemented. Each member is a channel some
+    validator strategy knows how to read; a package declaring one the
+    resolved strategy cannot use gets an honest UNAVAILABLE, never a guess.
+
+    MQTT_STATE_TOPIC  the device's own retained state publication — the
+                      channel Panel 1 uses. It is the device reporting its
+                      physical actuator state, which is exactly the evidence
+                      "was the command obeyed?" needs, and it is observable
+                      from the same authenticated broker session the probe
+                      publishes through.
+    DEVICE_SERIAL     the board's USB serial output. Declared because it is
+                      the other channel this trainer already has a transport
+                      for (`app/hardware/serial_transport.py`); no shipped
+                      package uses it, and no strategy reads it yet.
+    """
+
+    MQTT_STATE_TOPIC = "mqtt_state_topic"
+    DEVICE_SERIAL = "device_serial"
+
+
+class CommandAuthorization(str, Enum):
+    """Which declared identity issues a probe's command.
+
+    AUTHORIZED and UNAUTHORIZED are BOTH authenticated to the broker — that
+    is the whole point of Panel 1's lesson, and the reason this vocabulary is
+    about authorization rather than authentication. The difference is whether
+    the identity is entitled to actuate, not whether it may connect.
+    """
+
+    AUTHORIZED = "authorized"
+    UNAUTHORIZED = "unauthorized"
+
+
+class TokenUse(str, Enum):
+    """What per-command authorization evidence a probe attaches, if any.
+
+    NONE     the bare command, exactly as the VULNERABLE firmware accepts it.
+             A remediated device must ignore this.
+    VALID    the provisioned command-authorization token. A remediated device
+             must still obey this — a fix that breaks legitimate control is
+             not a fix.
+    INVALID  a well-formed but wrong token. This is what separates "the
+             student checks for THE token" from "the student checks for A
+             suffix", and it is why the criterion carries a declared wrong
+             value rather than only a right one.
+    """
+
+    NONE = "none"
+    VALID = "valid"
+    INVALID = "invalid"
+
+
+@dataclass(frozen=True)
+class LabIdentity:
+    """One synthetic lab client a validator may connect to the broker as.
+
+    IT HOLDS NO SECRET, AND CANNOT. `username` is a synthetic training-lab
+    account name (the same class of value the committed firmware already
+    carries in plain sight), and the password is addressed only by the NAME
+    of the environment variable a deployment provisions it into. There is no
+    field here a password could be written into, which is what makes
+    committing a manifest safe by construction rather than by review.
+
+    A deployment that has not provisioned the variable makes the validator
+    UNAVAILABLE — an honest refusal — rather than letting it run with a
+    guessed or blank credential.
+    """
+
+    identity_id: str
+    username: str
+    password_env: str
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.identity_id, "lab identity id")
+        _require_text(self.username, f"lab identity {self.identity_id!r} username")
+        if any(char.isspace() for char in self.username):
+            raise ValueError(
+                f"lab identity {self.identity_id!r} username must not contain whitespace"
+            )
+        if not isinstance(self.password_env, str) or not re.fullmatch(
+            _LAB_SECRET_ENV_PATTERN, self.password_env
+        ):
+            raise ValueError(
+                f"lab identity {self.identity_id!r} password_env must be a TRAINER_LAB_* "
+                f"environment variable name, got {self.password_env!r}"
+            )
+
+
+@dataclass(frozen=True)
+class AuthorizationProbe:
+    """One command a validator sends, and what a FIXED device must do with it.
+
+    This is the machine-checkable half of a remediation requirement: a
+    sentence like "reject a command from a client that is not authorized"
+    cannot be executed, while "publish STOP with no token as
+    `unauthorized-client` and observe that the state topic still reports
+    STOPPED after the settle window" can.
+
+    `expect_accepted` and `expect_state` are stated separately on purpose.
+    "The command was obeyed" and "the actuator ended up in this state" are
+    different facts: a STOP that is correctly obeyed by an already-stopped
+    device leaves the same observable state as a STOP that was correctly
+    ignored, so a validator needs the declared state to compare against AND
+    the declared acceptance to order its probes by.
+    """
+
+    probe_id: str
+    description: str
+    authorization: CommandAuthorization
+    command: str
+    token: TokenUse
+    expect_accepted: bool
+    expect_state: str
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.probe_id, "authorization probe id")
+        _require_text(self.description, f"probe {self.probe_id!r} description")
+        if not isinstance(self.authorization, CommandAuthorization):
+            raise ValueError(f"probe {self.probe_id!r} authorization must be a CommandAuthorization")
+        if not isinstance(self.token, TokenUse):
+            raise ValueError(f"probe {self.probe_id!r} token must be a TokenUse")
+        if not isinstance(self.command, str) or not re.fullmatch(
+            _COMMAND_WORD_PATTERN, self.command
+        ):
+            raise ValueError(
+                f"probe {self.probe_id!r} command must be one upper-case word, got "
+                f"{self.command!r}"
+            )
+        if not isinstance(self.expect_accepted, bool):
+            raise ValueError(f"probe {self.probe_id!r} expect_accepted must be a boolean")
+        if not isinstance(self.expect_state, str) or not re.fullmatch(
+            _COMMAND_WORD_PATTERN, self.expect_state
+        ):
+            raise ValueError(
+                f"probe {self.probe_id!r} expect_state must be one upper-case word, got "
+                f"{self.expect_state!r}"
+            )
+        if self.authorization is CommandAuthorization.UNAUTHORIZED and self.expect_accepted:
+            # Declaring that an unauthorized command SHOULD be obeyed would
+            # be declaring the vulnerability as correct behaviour, and a
+            # validator built from it would pass the broken firmware.
+            raise ValueError(
+                f"probe {self.probe_id!r} expects an unauthorized command to be accepted, "
+                "which is the vulnerability rather than the remediation"
+            )
+        if self.authorization is CommandAuthorization.AUTHORIZED and (
+            self.expect_accepted is not (self.token is TokenUse.VALID)
+        ):
+            # An authorized identity is still only entitled *per command*:
+            # with no token or a wrong one it must be refused, and with the
+            # provisioned token it must be obeyed. Anything else states a
+            # rule the lesson does not teach.
+            raise ValueError(
+                f"probe {self.probe_id!r}: an authorized identity's command is accepted "
+                "exactly when it carries the valid token"
+            )
+
+
+@dataclass(frozen=True)
+class AuthorizationCriterion:
+    """A per-command authorization remediation, stated so a machine can check it.
+
+    PHASE B8 — WHY THIS EXISTS BESIDE THE PROSE. `validation_requirement`
+    says what a fix must achieve, in English, for a human to read; it is not
+    and cannot be a check (see `app/build/validation/models.py::
+    RemediationSpec`, which documents why interpreting that prose would be
+    inventing security behaviour). This declares the same requirement as
+    DATA: which topic carries commands, which commands exist, which identity
+    is entitled to issue them, which is not, what a fixed device must do with
+    each, and where the answer is OBSERVED. A validator built from it asserts
+    only what the courseware declared.
+
+    IT IS STILL DATA, AND STILL NOT CODE. There is no expression, script,
+    template, path, executable, flag or callable here; no field is evaluated,
+    imported, formatted or turned into a process argument; and nothing in
+    `app/panels/` acts on it. A command payload is assembled by a validator
+    from `command`, `token_separator` and a provisioned token — three plain
+    values — not from a format string this package carries.
+
+    IT CARRIES NO SECRET. See `LabIdentity`. The only credential-shaped
+    fields are the NAMES of `TRAINER_LAB_*` environment variables and one
+    deliberately WRONG token, which is safe precisely because it is wrong.
+    """
+
+    criterion_id: str
+    broker_host: str
+    broker_port: int
+    control_topic: str
+    state_topic: str
+    accepted_commands: tuple[str, ...]
+    observed_states: tuple[str, ...]
+    authorized: LabIdentity
+    unauthorized: LabIdentity
+    token_env: str
+    token_separator: str
+    invalid_token: str
+    evidence: EvidenceChannel
+    probes: tuple[AuthorizationProbe, ...]
+    settle_seconds: float = 2.0
+    response_timeout_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.criterion_id, "criterion id")
+        what = f"criterion {self.criterion_id!r}"
+        _require_text(self.broker_host, f"{what} broker_host")
+        if any(char.isspace() for char in self.broker_host):
+            raise ValueError(f"{what} broker_host must not contain whitespace")
+        if (
+            not isinstance(self.broker_port, int)
+            or isinstance(self.broker_port, bool)
+            or not 1 <= self.broker_port <= 65535
+        ):
+            raise ValueError(f"{what} broker_port must be a TCP port, got {self.broker_port!r}")
+        for name in ("control_topic", "state_topic"):
+            topic = getattr(self, name)
+            if not isinstance(topic, str) or not re.fullmatch(_TOPIC_PATTERN, topic):
+                raise ValueError(
+                    f"{what} {name} must be a wildcard-free MQTT topic, got {topic!r}"
+                )
+        if self.control_topic == self.state_topic:
+            # A command channel and an evidence channel that are the same
+            # topic would let a validator read back its own publication and
+            # call it the device's answer.
+            raise ValueError(f"{what} publishes commands to the topic it reads evidence from")
+        for name in ("accepted_commands", "observed_states"):
+            words = getattr(self, name)
+            if not words:
+                raise ValueError(f"{what} {name} must name at least one value")
+            for word in words:
+                if not isinstance(word, str) or not re.fullmatch(_COMMAND_WORD_PATTERN, word):
+                    raise ValueError(f"{what} {name} contains an invalid value: {word!r}")
+            if len(set(words)) != len(words):
+                raise ValueError(f"{what} {name} repeats a value")
+        for name in ("authorized", "unauthorized"):
+            if not isinstance(getattr(self, name), LabIdentity):
+                raise ValueError(f"{what} {name} must be a LabIdentity")
+        if self.authorized.username == self.unauthorized.username:
+            # Two identities that are the same account cannot demonstrate an
+            # authorization boundary at all.
+            raise ValueError(f"{what} authorized and unauthorized identities are the same account")
+        if not isinstance(self.token_env, str) or not re.fullmatch(
+            _LAB_SECRET_ENV_PATTERN, self.token_env
+        ):
+            raise ValueError(
+                f"{what} token_env must be a TRAINER_LAB_* environment variable name, got "
+                f"{self.token_env!r}"
+            )
+        if (
+            not isinstance(self.token_separator, str)
+            or not self.token_separator
+            or any(char in "\r\n" for char in self.token_separator)
+        ):
+            raise ValueError(f"{what} token_separator must be a single-line, non-empty string")
+        if (
+            not isinstance(self.invalid_token, str)
+            or not self.invalid_token.strip()
+            or any(char.isspace() for char in self.invalid_token)
+        ):
+            raise ValueError(f"{what} invalid_token must be a non-empty word")
+        if not isinstance(self.evidence, EvidenceChannel):
+            raise ValueError(f"{what} evidence must be an EvidenceChannel")
+        seen: set[str] = set()
+        for probe in self.probes:
+            if not isinstance(probe, AuthorizationProbe):
+                raise ValueError(f"{what}: not an AuthorizationProbe: {probe!r}")
+            if probe.probe_id in seen:
+                raise ValueError(f"{what} declares a duplicate probe id: {probe.probe_id!r}")
+            seen.add(probe.probe_id)
+            if probe.command not in self.accepted_commands:
+                raise ValueError(
+                    f"probe {probe.probe_id!r} sends {probe.command!r}, which is not one of "
+                    f"this criterion's accepted commands"
+                )
+            if probe.expect_state not in self.observed_states:
+                raise ValueError(
+                    f"probe {probe.probe_id!r} expects state {probe.expect_state!r}, which is "
+                    f"not one of this criterion's observed states"
+                )
+        # THE MINIMUM A CRITERION MUST DISTINGUISH. Without both halves there
+        # is no authorization boundary to check: one proves a fix does not
+        # break legitimate control, the other proves it actually blocks a
+        # forged command. A criterion missing either would let firmware that
+        # obeys everything, or firmware that obeys nothing, pass.
+        if not any(probe.expect_accepted for probe in self.probes):
+            raise ValueError(f"{what} declares no command a remediated device must ACCEPT")
+        if not any(
+            probe.authorization is CommandAuthorization.UNAUTHORIZED
+            and not probe.expect_accepted
+            for probe in self.probes
+        ):
+            raise ValueError(f"{what} declares no unauthorized command a device must REJECT")
+        for name in ("settle_seconds", "response_timeout_seconds"):
+            seconds = getattr(self, name)
+            if (
+                not isinstance(seconds, (int, float))
+                or isinstance(seconds, bool)
+                or not 0 < seconds <= 60
+            ):
+                raise ValueError(f"{what} {name} must be a positive number of seconds under 60")
+
+    @property
+    def probe_ids(self) -> tuple[str, ...]:
+        """Every probe id, in declared order — the order a validator runs them."""
+        return tuple(probe.probe_id for probe in self.probes)
+
+
 @dataclass(frozen=True)
 class RemediationDeclaration:
     """WHAT a panel's Build Mode remediation activity is, for TTR/AID/DEI.
@@ -394,16 +732,87 @@ class RemediationDeclaration:
     package's own established Hack Mode facts (`learning`/`scenario`); they
     exist here so Build Mode can show a student what they are fixing
     without importing Hack Mode's courseware fields into a Build-side view.
+
+    PHASE B8 ADDS THE TWO THINGS A REMEDIATION ACTIVITY NEEDS BEYOND PROSE,
+    and both are the PANEL's decision rather than the engine's:
+
+    the interaction policy   `security_section_id`, `editable_section_ids`
+                             and `explore_section_ids` name discovered B1
+                             sections of this panel's own firmware (see
+                             `_SECTION_ID_PATTERN`). B1 says what the code IS;
+                             only the panel's activity can say what a student
+                             may DO with each part of it, and saying it here
+                             is what keeps that decision out of the generic
+                             build layer and out of the frontend. The three
+                             are turned into one `ProjectPolicy`
+                             (`app/build/policy.py`) by
+                             `app/build_project_selection.py`.
+
+    the criterion            `criterion` is the machine-checkable statement of
+                             the same requirement `validation_requirement`
+                             states in English — see `AuthorizationCriterion`.
+                             It is optional, and None is the honest state for
+                             a panel whose remediation has been described but
+                             not yet made checkable.
+
+    STILL NO "WHICH EVENT MEANS SUCCESS" FIELD, for the reason above: Build
+    Mode's success signal is structurally "a recorded VALIDATION attempt with
+    success=True", and B8 does not change that. What B8 adds is the evidence
+    such an attempt can now be based on.
     """
 
     vulnerability: str
     remediation_goal: str
     validation_requirement: str
+    security_section_id: str | None = None
+    editable_section_ids: tuple[str, ...] = ()
+    explore_section_ids: tuple[str, ...] = ()
+    criterion: AuthorizationCriterion | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.vulnerability, "remediation vulnerability")
         _require_text(self.remediation_goal, "remediation goal")
         _require_text(self.validation_requirement, "remediation validation_requirement")
+        for name in ("editable_section_ids", "explore_section_ids"):
+            ids = getattr(self, name)
+            for section_id in ids:
+                if not isinstance(section_id, str) or not re.fullmatch(
+                    _SECTION_ID_PATTERN, section_id
+                ):
+                    raise ValueError(
+                        f"remediation {name} contains an invalid section id: {section_id!r}"
+                    )
+            if len(set(ids)) != len(ids):
+                raise ValueError(f"remediation {name} repeats a section id")
+        overlap = sorted(set(self.editable_section_ids) & set(self.explore_section_ids))
+        if overlap:
+            raise ValueError(
+                "remediation declares section(s) as both editable and explore: "
+                + ", ".join(overlap)
+            )
+        if self.security_section_id is not None:
+            if not isinstance(self.security_section_id, str) or not re.fullmatch(
+                _SECTION_ID_PATTERN, self.security_section_id
+            ):
+                raise ValueError(
+                    f"remediation security_section_id is not a section id: "
+                    f"{self.security_section_id!r}"
+                )
+            if self.security_section_id not in self.editable_section_ids:
+                # The remediation region is by definition one the student may
+                # write to. Declaring one that is not editable would describe
+                # an activity nobody could complete.
+                raise ValueError(
+                    f"remediation security_section_id {self.security_section_id!r} is not "
+                    "one of its editable_section_ids"
+                )
+        if self.criterion is not None and not isinstance(self.criterion, AuthorizationCriterion):
+            raise ValueError("remediation criterion must be an AuthorizationCriterion")
+
+    @property
+    def checkable(self) -> bool:
+        """Whether this declaration states a criterion a validator can run."""
+        return self.criterion is not None
 
 
 #: What a `parameters` value may be. Scalars only: a static parameter is one

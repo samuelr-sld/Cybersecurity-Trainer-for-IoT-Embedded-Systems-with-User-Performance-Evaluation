@@ -24,15 +24,17 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from app.build import BLINK_REGION_ID
+from app.build import BLINK_REGION_ID, create_default_workspace
 from app.build import SerialDevice
 from app.build.compiler import CompileFailureCategory, CompileOutcome
 from app.build.flasher import DeviceDetectOutcome, FlashFailureCategory, FlashOutcome
 from app.build.service import default_service
+from app.build_project_selection import BuildProjectSelection, BuildProjectSource
 from app.build_sessions import build_session_manager
 from app.hardware import DeviceMonitor
 from app.main import app
 from app.models.build_messages import BUILD_PROTOCOL_VERSION
+from app.panels.service import PanelResourceStatus
 from app.sessions import session_manager as hack_session_manager
 
 
@@ -86,7 +88,27 @@ def fake_compile_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    # THE NO-DEVICE CORRECTION, HELD BACK FOR THIS FILE'S OWN PURPOSE.
+    # This suite verifies the `/ws/build` PROTOCOL — edit/compile/flash
+    # framing, session isolation, event/state shape — not panel resolution
+    # (see `test_build_project_materialization.py` for that, and
+    # `app/build/no_device.py` for why a real connection with no ESP32
+    # attached now gets an inert placeholder with no active project). None of
+    # these tests attach real hardware, so without this every session here
+    # would get `has_active_project=False` and every `edit_region`/`compile`/
+    # `flash` request this file sends would be refused before reaching the
+    # mechanics it actually tests. Forcing the long-standing Blink fixture —
+    # exactly the "isolated test/legacy fixture" role it is still allowed to
+    # play — keeps every existing assertion in this file meaningful.
+    monkeypatch.setattr(
+        "app.build_websocket.select_build_project",
+        lambda: BuildProjectSelection(
+            workspace=create_default_workspace(),
+            source=BuildProjectSource.PANEL_PACKAGE,
+            panel_status=PanelResourceStatus.READY,
+        ),
+    )
     with TestClient(app) as test_client:
         yield test_client
 

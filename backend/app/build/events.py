@@ -22,13 +22,23 @@ truthfully by the closing event's `port` and `category` (a `no_device`
 category on `FLASH_FAILED` says exactly what happened), so a fourth event
 would add a row to the Activity Log without adding a fact to it.
 
-Every other member below remains reserved vocabulary for
-validation/testing in later phases — declaring them now means the wire
-protocol and the frontend's event-label lookup do not need to change shape
-when those phases fill them in, but nothing in this codebase emits one yet,
-and none must until the operation it names is real. In particular, no flash
-event asserts anything about whether the uploaded firmware works or is
-secure; `FLASH_SUCCEEDED` means the upload process exited 0, nothing more.
+PHASE B7 fills in the three validation events — `VALIDATION_STARTED`,
+`VALIDATION_SUCCEEDED`, `VALIDATION_FAILED` — reserved since Phase 3B and
+emitted by `app/build/service.py::validate_workspace` around a real
+`ValidationStrategy` call (`app/build/validation/`). They are emitted only
+when a check actually ran: a request refused at a gate, or a validator that
+declines because the panel has no executable check, emits NOTHING, because
+neither is a verdict about the student's firmware. `VALIDATION_SUCCEEDED`
+therefore means a real check confirmed the remediation requirement — it is
+never derived from a compile or a flash.
+
+Every other member below remains reserved vocabulary for security/functional
+testing in later phases — declaring them now means the wire protocol and the
+frontend's event-label lookup do not need to change shape when those phases
+fill them in, but nothing in this codebase emits one yet, and none must until
+the operation it names is real. In particular, no flash event asserts
+anything about whether the uploaded firmware works or is secure;
+`FLASH_SUCCEEDED` means the upload process exited 0, nothing more.
 """
 
 from __future__ import annotations
@@ -59,10 +69,12 @@ class BuildEventType(str, Enum):
     FLASH_FAILED = "flash_failed"
     FLASH_SUCCEEDED = "flash_succeeded"
 
-    # -- reserved for later phases — do not emit until implemented ---------
+    # -- emitted since Phase B7 ----------------------------------------------
     VALIDATION_STARTED = "validation_started"
     VALIDATION_FAILED = "validation_failed"
     VALIDATION_SUCCEEDED = "validation_succeeded"
+
+    # -- reserved for later phases — do not emit until implemented ---------
     SECURITY_TEST_STARTED = "security_test_started"
     SECURITY_TEST_FAILED = "security_test_failed"
     SECURITY_TEST_SUCCEEDED = "security_test_succeeded"

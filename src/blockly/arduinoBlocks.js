@@ -43,16 +43,28 @@ const DIGITAL_VALUES = [
   ['LOW', 'LOW'],
 ]
 
+const COMPARISON_OPERATORS = [
+  ['=', '=='],
+  ['≠', '!='],
+]
+
 //: Block types this module defines. The toolbox is no longer built here: it
-//: comes from the master block catalog (`./catalog/`), which names these same
-//: five types as its IMPLEMENTED blocks — `catalog.test.js` fails if the two
-//: lists ever disagree.
+//: comes from the master block catalog (`./catalog/`), which names these
+//: eight types as its IMPLEMENTED blocks — `catalog.test.js` fails if the two
+//: lists ever disagree. The first five are the original Blockly POC set; the
+//: last three are the no-device/Blockly-integration correction's own
+//: dedicated additions — see `backend/app/blockly/definitions/programming.py`
+//: for why they exist beside (not instead of) the still-CATALOGED generic
+//: `functions.define`/`functions.call`/`logic.if_else`.
 export const ARDUINO_BLOCK_TYPES = [
   'arduino_setup',
   'arduino_loop',
   'pinmode',
   'digitalwrite',
   'delay',
+  'function_implementation',
+  'call_existing_function',
+  'if_equals',
 ]
 
 let registered = false
@@ -127,6 +139,69 @@ export function registerArduinoBlocks() {
       this.setNextStatement(true, null)
       this.setColour(65)
       this.setTooltip('delay(milliseconds);')
+    },
+  }
+
+  // --- no-device/Blockly-integration correction -----------------------------
+  // The one container a student never drags from the toolbox: it IS the
+  // section they clicked, pre-placed on the canvas by BlocklyWorkspace.jsx
+  // when it loads a section's `workspace` state (backend/app/build/
+  // section_blockly.py). Its C++ signature (name, return type, parameters)
+  // is fixed by the firmware and preserved server-side
+  // (`SemanticSection.signature`) — this block never shows or edits it, only
+  // the body. A "hat" block like arduino_setup/arduino_loop for the same
+  // reason: it anchors a stack, it does not chain into one.
+  Blockly.Blocks['function_implementation'] = {
+    init() {
+      this.appendDummyInput().appendField('function body')
+      this.appendStatementInput('BODY')
+      this.setPreviousStatement(false)
+      this.setNextStatement(false)
+      this.setColour(290)
+      this.setTooltip(
+        'The body of this firmware function. Its name, return type and parameters are fixed by the firmware.',
+      )
+    },
+  }
+
+  // Calls an existing function this firmware already defines elsewhere
+  // (`motorStart()`, `chirpBuzzer()`, ...) — never a new function, and never
+  // with arguments (see backend/app/build/semantic/models.py::CallStatement).
+  Blockly.Blocks['call_existing_function'] = {
+    init() {
+      this.appendDummyInput()
+        .appendField('call')
+        .appendField(new Blockly.FieldTextInput('functionName'), 'NAME')
+        .appendField('()')
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(290)
+      this.setTooltip('Calls an existing function this firmware defines, with no arguments.')
+    },
+  }
+
+  // An authorization-style gate: `if (LEFT OPERATOR "RIGHT") { DO }`, no
+  // `else` — see backend/app/build/semantic/models.py::ConditionalStatement
+  // for why two independent `if_equals` blocks express an `if`/`else if`
+  // chain exactly as well as one block with a growing mutator would. LEFT is
+  // always read as a named reference in scope (a parameter, e.g. `message`);
+  // RIGHT is always a fixed text value to compare it against.
+  Blockly.Blocks['if_equals'] = {
+    init() {
+      this.appendDummyInput()
+        .appendField('if')
+        .appendField(new Blockly.FieldTextInput('message'), 'LEFT')
+        .appendField(new Blockly.FieldDropdown(COMPARISON_OPERATORS), 'OPERATOR')
+        .appendField('"')
+        .appendField(new Blockly.FieldTextInput(''), 'RIGHT')
+        .appendField('"')
+      this.appendStatementInput('DO')
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(210)
+      this.setTooltip(
+        'Runs the body only when LEFT (a named value in scope) equals or differs from the fixed text on the right.',
+      )
     },
   }
 }

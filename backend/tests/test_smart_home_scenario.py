@@ -617,8 +617,10 @@ def test_firmware_source_authenticates_to_the_broker() -> None:
         "expected client.connect(client_id, username, password) — an "
         "authenticated connection, not an anonymous one"
     )
-    # No genuine secret may ever be committed here — only a lab placeholder.
-    assert "CHANGE_ME_LAB" in source
+    # Panel 1's firmware is self-contained: the real lab MQTT password is a
+    # literal here (see the .ino's file header), not a placeholder rewritten
+    # at compile time.
+    assert 'MQTT_PASSWORD = "cybertrainer"' in source
 
 
 def test_firmware_source_applies_a_command_with_no_per_sender_check() -> None:

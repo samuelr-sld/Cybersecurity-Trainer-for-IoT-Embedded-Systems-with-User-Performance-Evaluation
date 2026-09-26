@@ -56,6 +56,22 @@ LOGIC = (
         ANY,
         (("CONDITION", BOOLEAN), ("THEN", ANY), ("ELSE", ANY)),
     ),
+    # --- no-device/Blockly-integration correction ---------------------------
+    # A deliberately narrow, IMPLEMENTED addition, distinct from the generic
+    # CATALOGED `logic.if`/`logic.equal` above. Composing those properly needs
+    # a value-input (nested expression block) mechanism the Blockly bridge
+    # does not have yet (see `app/build/blockly_bridge/adapter.py`); this one
+    # compound block — an equality check plus a body, three plain fields and
+    # no nested value block — is exactly what an authorization gate
+    # (`if (message == "START") { ... }`) needs and nothing more. It reuses
+    # `app/build/semantic/models.py`'s `ConditionalStatement`/`ComparisonValue`.
+    _logic.statement(
+        "logic.if_equals",
+        "if equal to",
+        "Runs a body when a value equals (or differs from) another value.",
+        (("LEFT", TEXT), ("OPERATOR", TEXT), ("RIGHT", TEXT), ("DO", BODY)),
+        implemented_as="if_equals",
+    ),
 )
 
 LOOPS = (
@@ -181,6 +197,31 @@ FUNCTIONS = (
     ),
     _functions.value("functions.parameter", "parameter", "Reads a parameter inside a function.", ANY, inputs=(("NAME", TEXT),)),
     _functions.statement("functions.return", "return", "Returns a value from a function.", (("VALUE", ANY),)),
+    # --- no-device/Blockly-integration correction ---------------------------
+    # Two deliberately narrow, IMPLEMENTED additions, distinct from the two
+    # generic CATALOGED entries above. `functions.define`/`functions.call`
+    # model authoring a brand-new function and calling it with an arbitrary
+    # argument list — a materially different, still-unimplemented capability.
+    # These model the two things the semantic layer's `functions.implementation`
+    # and `CallStatement` actually need today: a container for the body of an
+    # EXISTING, already-named function (no NAME/PARAMETERS operands — the
+    # function's identity is fixed by which section is open, not authored
+    # here), and a call to an existing function with no arguments. See
+    # `app/build/semantic/operations.py` and `models.py`.
+    _functions.container(
+        "functions.implementation",
+        "function body",
+        "The body of an existing named function or callback, whose signature is fixed by the firmware.",
+        (("BODY", BODY),),
+        implemented_as="function_implementation",
+    ),
+    _functions.statement(
+        "functions.call_existing",
+        "call function",
+        "Calls an existing, already-defined function with no arguments, for its effect.",
+        (("NAME", TEXT),),
+        implemented_as="call_existing_function",
+    ),
 )
 
 LISTS = (

@@ -91,13 +91,12 @@ class UnsupportedBlocklyStructureError(BlocklyBridgeError):
     """
 
 
-class MissingBlockSourceError(BlocklyBridgeError):
-    """A drawable block carries no record of the source it was built from.
-
-    THIS IS A PHASE BOUNDARY, NOT A DEFECT. `OperationStatement` keeps the
-    exact source text its meaning was read from, and B5 restores that text
-    from `BlocklyBlock.source_text`, which the forward conversion records. A
-    block with none was authored in the editor rather than read from firmware,
-    so no source for it exists anywhere — and producing one would be
-    generating C++, which is B6's job and explicitly not B5's.
-    """
+# A BLOCK WITH NO RECORDED SOURCE IS NO LONGER AN ERROR, and the reason it once
+# was is worth keeping. Until B6, `OperationStatement` required the source text
+# its meaning had been read from, so a block authored in the editor — which has
+# none, and for which none exists anywhere — could not become a statement at
+# all: inventing the text would have meant generating C++, which B5 must not do.
+# B6 made the text provenance rather than a requirement (a statement's C++ is
+# written from its operation and its values), so such a block now converts like
+# any other and carries no source, and the `MissingBlockSourceError` that
+# reported the old boundary has no case left to describe.

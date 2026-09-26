@@ -76,15 +76,21 @@ from app.hardware.firmware import (
 )
 from app.hardware.panels import PanelDefinition
 from app.panels.models import (
+    AuthorizationCriterion,
+    AuthorizationProbe,
+    CommandAuthorization,
     EvaluationDeclaration,
     EvaluationMetric,
+    EvidenceChannel,
     ExpectedFinding,
+    LabIdentity,
     LearningContent,
     ObjectiveDeclaration,
     PanelPackage,
     RemediationDeclaration,
     ScenarioDefinition,
     SuccessCondition,
+    TokenUse,
     WorkflowPhase,
     WorkflowStep,
 )
@@ -334,19 +340,168 @@ def _firmware(block: Any) -> FirmwareConfiguration:
         raise PanelPackageInvalidError(f"invalid firmware configuration: {error}") from error
 
 
+def _enum(value: Any, enum_type: type, what: str):
+    """One closed-vocabulary value, or a named error listing the alternatives.
+
+    The same treatment `_workflow_phase` and `evaluation.metrics` already
+    give their enums, factored out because B8's criterion has three.
+    """
+    if not isinstance(value, str):
+        raise PanelPackageInvalidError(f"{what} must be a string")
+    try:
+        return enum_type(value)
+    except ValueError as error:
+        raise PanelPackageInvalidError(
+            f"{what} is {value!r}, which is not one of: "
+            + ", ".join(member.value for member in enum_type)
+        ) from error
+
+
+def _lab_identity(block: Any, what: str) -> LabIdentity:
+    data = _as_mapping(block, what)
+    _reject_unknown(data, ("identity_id", "username", "password_env"), what)
+    return LabIdentity(
+        identity_id=_require(data, "identity_id", what),
+        username=_require(data, "username", what),
+        password_env=_require(data, "password_env", what),
+    )
+
+
+def _authorization_probe(block: Any) -> AuthorizationProbe:
+    data = _as_mapping(block, "authorization probe")
+    _reject_unknown(
+        data,
+        (
+            "probe_id",
+            "description",
+            "authorization",
+            "command",
+            "token",
+            "expect_accepted",
+            "expect_state",
+        ),
+        "authorization probe",
+    )
+    accepted = _require(data, "expect_accepted", "authorization probe")
+    if not isinstance(accepted, bool):
+        raise PanelPackageInvalidError("authorization probe expect_accepted must be a boolean")
+    return AuthorizationProbe(
+        probe_id=_require(data, "probe_id", "authorization probe"),
+        description=_require(data, "description", "authorization probe"),
+        authorization=_enum(
+            _require(data, "authorization", "authorization probe"),
+            CommandAuthorization,
+            "authorization probe authorization",
+        ),
+        command=_require(data, "command", "authorization probe"),
+        token=_enum(
+            _require(data, "token", "authorization probe"), TokenUse, "authorization probe token"
+        ),
+        expect_accepted=accepted,
+        expect_state=_require(data, "expect_state", "authorization probe"),
+    )
+
+
+def _seconds(data: Mapping[str, Any], key: str, default: float, what: str) -> float:
+    raw = data.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise PanelPackageInvalidError(f"{what} {key} must be a number of seconds")
+    return float(raw)
+
+
+def _criterion(block: Any) -> AuthorizationCriterion | None:
+    """Parse the optional `remediation.criterion` — see `AuthorizationCriterion`.
+
+    Absent for a panel whose remediation is described in prose but not yet
+    made machine-checkable — the honest state, and the one every panel but
+    Panel 1 is in. Every field is read as plain JSON data and handed to the
+    frozen model, which does all the validating; nothing here interprets,
+    formats or evaluates a value.
+    """
+    if block is None:
+        return None
+    data = _as_mapping(block, "remediation.criterion")
+    _reject_unknown(
+        data,
+        (
+            "criterion_id",
+            "broker_host",
+            "broker_port",
+            "control_topic",
+            "state_topic",
+            "accepted_commands",
+            "observed_states",
+            "authorized",
+            "unauthorized",
+            "token_env",
+            "token_separator",
+            "invalid_token",
+            "evidence",
+            "probes",
+            "settle_seconds",
+            "response_timeout_seconds",
+        ),
+        "remediation.criterion",
+    )
+    what = "remediation.criterion"
+    port = _require(data, "broker_port", what)
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise PanelPackageInvalidError(f"{what} broker_port must be an integer")
+    return AuthorizationCriterion(
+        criterion_id=_require(data, "criterion_id", what),
+        broker_host=_require(data, "broker_host", what),
+        broker_port=port,
+        control_topic=_require(data, "control_topic", what),
+        state_topic=_require(data, "state_topic", what),
+        accepted_commands=_as_str_tuple(
+            _require(data, "accepted_commands", what), f"{what}.accepted_commands"
+        ),
+        observed_states=_as_str_tuple(
+            _require(data, "observed_states", what), f"{what}.observed_states"
+        ),
+        authorized=_lab_identity(_require(data, "authorized", what), f"{what}.authorized"),
+        unauthorized=_lab_identity(
+            _require(data, "unauthorized", what), f"{what}.unauthorized"
+        ),
+        token_env=_require(data, "token_env", what),
+        token_separator=_require(data, "token_separator", what),
+        invalid_token=_require(data, "invalid_token", what),
+        evidence=_enum(_require(data, "evidence", what), EvidenceChannel, f"{what}.evidence"),
+        probes=tuple(
+            _authorization_probe(entry)
+            for entry in _as_list(_require(data, "probes", what), f"{what}.probes")
+        ),
+        settle_seconds=_seconds(data, "settle_seconds", 2.0, what),
+        response_timeout_seconds=_seconds(data, "response_timeout_seconds", 5.0, what),
+    )
+
+
 def _remediation(block: Any) -> RemediationDeclaration | None:
     """Parse the optional `remediation` block — see `RemediationDeclaration`.
 
     Absent entirely for a panel whose Build Mode remediation activity has
     not been declared yet (the honest "not yet provisioned" state, same as
     a package with no `firmware` block).
+
+    PHASE B8 added four optional fields. They stay optional so the four
+    panels that declare only prose keep loading exactly as they did, and so
+    a package can describe a remediation before anyone has decided which
+    sections it touches or how to check it.
     """
     if block is None:
         return None
     data = _as_mapping(block, "remediation")
     _reject_unknown(
         data,
-        ("vulnerability", "remediation_goal", "validation_requirement"),
+        (
+            "vulnerability",
+            "remediation_goal",
+            "validation_requirement",
+            "security_section_id",
+            "editable_section_ids",
+            "explore_section_ids",
+            "criterion",
+        ),
         "remediation",
     )
     try:
@@ -356,6 +511,14 @@ def _remediation(block: Any) -> RemediationDeclaration | None:
             validation_requirement=_require(
                 data, "validation_requirement", "remediation"
             ),
+            security_section_id=data.get("security_section_id"),
+            editable_section_ids=_as_str_tuple(
+                data.get("editable_section_ids", []), "remediation.editable_section_ids"
+            ),
+            explore_section_ids=_as_str_tuple(
+                data.get("explore_section_ids", []), "remediation.explore_section_ids"
+            ),
+            criterion=_criterion(data.get("criterion")),
         )
     except ValueError as error:
         raise PanelPackageInvalidError(f"invalid remediation declaration: {error}") from error

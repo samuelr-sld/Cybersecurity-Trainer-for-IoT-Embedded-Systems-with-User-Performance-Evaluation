@@ -233,21 +233,32 @@ class SemanticOperationRegistry:
 #: refer to the same constants rather than repeating string literals.
 PROGRAM_SETUP = "program.setup"
 PROGRAM_LOOP = "program.loop"
+FUNCTIONS_IMPLEMENTATION = "functions.implementation"
 GPIO_PIN_MODE = "gpio.pin_mode"
 GPIO_DIGITAL_WRITE = "gpio.digital_write"
 TIME_DELAY = "time.delay"
 
 
 def build_default_operations() -> SemanticOperationRegistry:
-    """The supported subset: the five operations that exist end to end today.
+    """The supported subset: the operations that exist end to end today.
 
-    These are exactly the five the block catalog marks IMPLEMENTED
-    (`program.setup`, `program.loop`, `gpio.pin_mode`, `gpio.digital_write`,
-    `time.delay`) — the ones a student can already place in a real Blockly
-    workspace and that already reach real C++. Starting anywhere else would
-    mean an IR operation with no block and no generator behind it.
+    `program.setup`/`program.loop`/`gpio.pin_mode`/`gpio.digital_write`/
+    `time.delay` are the five the block catalog originally marked IMPLEMENTED
+    — the ones a student could already place in a real Blockly workspace and
+    that already reach real C++. `functions.implementation` is the no-device/
+    Blockly-integration correction's one addition to this table: it is what
+    turns an arbitrary discovered HELPER_FUNCTION or CALLBACK section (a
+    firmware's own named routine, not a platform-defined operation) into a
+    representable container, the same way `program.setup`/`program.loop`
+    already do for the two Arduino calls into a fixed name. It declares no
+    parameters — same rule every container follows — because the one thing
+    that makes it a *particular* function (its name, return type and C++
+    parameter list) is preserved verbatim on the section itself
+    (`SemanticSection.signature`), never modelled here: the operation is
+    deliberately the SAME for every named function a firmware defines, so the
+    panel-agnostic registry never has to learn a panel's own function names.
 
-    The other 200 catalog entries are intentionally absent. They are
+    The remaining ~200 catalog entries are intentionally absent. They are
     CATALOGED metadata with no block, no generator and no firmware behind
     them; declaring IR operations for them would assert a capability this
     codebase does not have. Adding one later is adding a table row here, not
@@ -264,6 +275,14 @@ def build_default_operations() -> SemanticOperationRegistry:
                 operation_id=PROGRAM_LOOP,
                 form=OperationForm.CONTAINER,
                 description="Runs repeatedly forever: void loop().",
+            ),
+            SemanticOperation(
+                operation_id=FUNCTIONS_IMPLEMENTATION,
+                form=OperationForm.CONTAINER,
+                description=(
+                    "The body of an existing named function or callback; its exact "
+                    "C++ signature is preserved on the section, not this operation."
+                ),
             ),
             SemanticOperation(
                 operation_id=GPIO_PIN_MODE,

@@ -64,6 +64,9 @@ import re
 from app.build.discovery import BuildDocument, CodeSection, SectionKind, code_mask
 from app.build.semantic.errors import SemanticAnalysisError
 from app.build.semantic.models import (
+    CallStatement,
+    ComparisonValue,
+    ConditionalStatement,
     LiteralValue,
     OperationStatement,
     SemanticArgument,
@@ -76,6 +79,7 @@ from app.build.semantic.models import (
     UnsupportedStatement,
 )
 from app.build.semantic.operations import (
+    FUNCTIONS_IMPLEMENTATION,
     GPIO_DIGITAL_WRITE,
     GPIO_PIN_MODE,
     PROGRAM_LOOP,
@@ -86,15 +90,26 @@ from app.build.semantic.operations import (
     default_semantic_operations,
 )
 
-#: Which discovered section kinds have a container operation. Every other
-#: kind — GLOBAL_DECLARATIONS, HELPER_FUNCTION, CALLBACK — is represented
-#: whole and uninterpreted. This is not a judgement about those constructs;
-#: it is the absence of one, exactly as B2's "every section is LOCKED until
-#: someone decides otherwise" was.
+#: Which discovered section kinds have a container operation. GLOBAL_DECLARATIONS
+#: is the one kind still represented whole and uninterpreted — a run of
+#: top-level declarations has no single body to recognize statements inside.
+#: HELPER_FUNCTION and CALLBACK map to the SAME generic `functions.implementation`
+#: operation (see `operations.py`): every named function becomes a representable
+#: container, whatever it is called, because the operation carries no identity
+#: of its own — see `_analyze_section`, which is what attaches the one thing
+#: that DOES vary per function (its preserved C++ signature).
 _SECTION_OPERATIONS = {
     SectionKind.SETUP: PROGRAM_SETUP,
     SectionKind.LOOP: PROGRAM_LOOP,
+    SectionKind.HELPER_FUNCTION: FUNCTIONS_IMPLEMENTATION,
+    SectionKind.CALLBACK: FUNCTIONS_IMPLEMENTATION,
 }
+
+#: Section kinds whose container is a generic named function rather than one
+#: of the two fixed Arduino entry points — the ones that need `signature`
+#: attached. `program.setup`/`program.loop` keep `signature=None`, unaffected,
+#: exactly as before this correction.
+_GENERIC_FUNCTION_KINDS = frozenset({SectionKind.HELPER_FUNCTION, SectionKind.CALLBACK})
 
 #: The C++ call name each supported operation is written as. The ONLY
 #: C++-aware table in this package, and the reason `operations.py` can stay
@@ -180,12 +195,17 @@ def _analyze_section(
             statements=_whole_section_statement(source, section),
         )
     body_start, body_end = _body_span(source, mask, section)
-    statements = tuple(
-        _statement(source, mask, start, end, operations)
-        for start, end in _statement_spans(mask, body_start, body_end)
-    )
+    statements = _body_statements(source, mask, body_start, body_end, operations)
+    # A generic named-function container's identity is its preserved C++
+    # declarator — see `SemanticSection.signature`. B1 already discovered it
+    # (`CodeSection.signature`, the exact text before the body's opening
+    # brace); this is a straight carry-through, never re-derived from source.
+    signature = section.signature if section.kind in _GENERIC_FUNCTION_KINDS else None
     return SemanticSection(
-        section_id=section.section_id, operation=operation, statements=statements
+        section_id=section.section_id,
+        operation=operation,
+        statements=statements,
+        signature=signature,
     )
 
 
@@ -213,6 +233,43 @@ def _body_span(source: str, mask: str, section: CodeSection) -> tuple[int, int]:
     if end is None:
         raise SemanticAnalysisError(f"{section.section_id}: body braces never close")
     return start + 1, end
+
+
+def _body_statements(
+    source: str,
+    mask: str,
+    start: int,
+    end: int,
+    operations: SemanticOperationRegistry,
+) -> tuple[SemanticStatement, ...]:
+    """Every statement of a body, INCLUDING comment-only gaps between them.
+
+    `_statement_spans` finds statement boundaries on the MASK, which blanks
+    every comment to whitespace (`code_mask`) — so a comment sitting between
+    two statements, or trailing after the last one, opens no span of its own
+    and `_statement_spans` walks straight past it. Without this wrapper, that
+    text would not be silently misread; it would be silently GONE — no
+    statement carries it, so `generate_cpp` would never write it back. This is
+    the one place that notices the gap and turns it into an ordinary
+    `UnsupportedStatement`, exactly as if a recognizer had looked at it and
+    declined; `NOT_A_CALL` is the closest existing reason, and gap text is
+    never a call.
+
+    Shared by a section's own body (`_analyze_section`) and an `if`'s nested
+    body (`_try_conditional`) so both round-trip a comment the same way.
+    """
+    statements: list[SemanticStatement] = []
+    cursor = start
+    for span_start, span_end in _statement_spans(mask, start, end):
+        gap = source[cursor:span_start].strip()
+        if gap:
+            statements.append(UnsupportedStatement(text=gap, reason=UnsupportedReason.NOT_A_CALL))
+        statements.append(_statement(source, mask, span_start, span_end, operations))
+        cursor = span_end
+    trailing = source[cursor:end].strip()
+    if trailing:
+        statements.append(UnsupportedStatement(text=trailing, reason=UnsupportedReason.NOT_A_CALL))
+    return tuple(statements)
 
 
 # --- splitting a body into statements ---------------------------------------
@@ -311,6 +368,10 @@ def _statement(
         # worse failure than an explicit one.
         raise SemanticAnalysisError(f"empty statement span at {start}..{end}")
 
+    conditional = _try_conditional(source, mask, start, end, operations)
+    if conditional is not None:
+        return conditional
+
     call = _match_call(mask, start, end)
     if call is None:
         return UnsupportedStatement(text=text, reason=UnsupportedReason.NOT_A_CALL)
@@ -323,6 +384,13 @@ def _statement(
     operation_id = _CALL_OPERATIONS.get(name)
     operation = None if operation_id is None else operations.operation(operation_id)
     if operation is None:
+        argument_texts = _argument_texts(source, mask, args_start, args_end)
+        if not argument_texts:
+            # A call to a function this table does not name, given no
+            # arguments — `motorStart();`, `chirpBuzzer();`, `pollButtons();`.
+            # See `CallStatement`: deliberately zero-arg only, so a call WITH
+            # arguments still falls through to UNKNOWN_CALL below, unchanged.
+            return CallStatement(function_name=name, text=text)
         return UnsupportedStatement(text=text, reason=UnsupportedReason.UNKNOWN_CALL)
 
     argument_texts = _argument_texts(source, mask, args_start, args_end)
@@ -341,6 +409,84 @@ def _statement(
     return OperationStatement(
         operation=operation, arguments=tuple(arguments), text=text
     )
+
+
+# --- `if (CONDITION) { BODY }`, no `else` ------------------------------------
+
+
+def _try_conditional(
+    source: str,
+    mask: str,
+    start: int,
+    end: int,
+    operations: SemanticOperationRegistry,
+) -> ConditionalStatement | None:
+    """This span as a plain `if (COND) { BODY }`, or None if it is not that shape.
+
+    See `ConditionalStatement`'s docstring for why there is no `else` here: a
+    span that IS an `if` followed by `else ...` never reaches this function in
+    the first place, because `_statement_spans` already splits the `else` (or
+    `else if`) off into its own following span — this function only ever sees
+    the `if (...) { ... }` head. A condition or body this function cannot
+    parse — anything beyond one top-level `==`/`!=` comparison of a literal or
+    a symbol — returns None, and the caller's ordinary NOT_A_CALL fallback
+    (`if` is a control keyword) carries the whole span verbatim instead.
+    """
+    if end - start < 2 or mask[start : start + 2] != "if":
+        return None
+    if start + 2 < end and (mask[start + 2].isalnum() or mask[start + 2] == "_"):
+        return None
+    open_paren = _next_code(mask, start + 2, end)
+    if open_paren is None or mask[open_paren] != "(":
+        return None
+    close_paren = _matching_paren(mask, open_paren, end)
+    if close_paren is None:
+        return None
+    condition = _try_condition(source, mask, open_paren + 1, close_paren)
+    if condition is None:
+        return None
+    brace_open = _next_code(mask, close_paren + 1, end)
+    if brace_open is None or mask[brace_open] != "{":
+        return None
+    brace_close = _matching_brace(mask, brace_open, end)
+    if brace_close is None:
+        return None
+    if _next_code(mask, brace_close + 1, end) is not None:
+        # Something follows the closing brace within THIS span. Given how
+        # `_statement_spans` builds spans (a `;` immediately after a `}` is
+        # folded into the same span, everything else is not), this is not a
+        # shape a plain `if` can produce — refuse rather than guess at it.
+        return None
+    body = _body_statements(source, mask, brace_open + 1, brace_close, operations)
+    return ConditionalStatement(
+        condition=condition, body=body, text=source[start:end].strip()
+    )
+
+
+def _try_condition(source: str, mask: str, start: int, end: int) -> SemanticValue | None:
+    """`LEFT == RIGHT` / `LEFT != RIGHT` within `[start, end)`, or None.
+
+    The split point is found on the MASK, at paren/bracket depth 0, for the
+    same reason every other boundary in this module is — an `==` inside a
+    string literal or a nested call's arguments must never be mistaken for
+    the comparison's own operator.
+    """
+    depth = 0
+    i = start
+    while i < end - 1:
+        char = mask[i]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif depth == 0 and mask[i : i + 2] in ("==", "!="):
+            left = _value(source[start:i])
+            right = _value(source[i + 2 : end])
+            if left is None or right is None:
+                return None
+            return ComparisonValue(left=left, operator=mask[i : i + 2], right=right)
+        i += 1
+    return None
 
 
 def _match_call(mask: str, start: int, end: int) -> tuple[int, int, int, int] | None:

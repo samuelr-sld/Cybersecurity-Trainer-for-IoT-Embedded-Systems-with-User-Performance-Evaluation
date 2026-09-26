@@ -116,6 +116,18 @@ LEGACY_IMPLEMENTED = {
     "time.delay": "delay",
 }
 
+#: The three blocks the no-device/Blockly-integration correction added,
+#: deliberately narrow and distinct from the still-CATALOGED generic
+#: `functions.define`/`functions.call`/`logic.if_else` — see
+#: `app/blockly/definitions/programming.py`.
+CORRECTION_IMPLEMENTED = {
+    "functions.implementation": "function_implementation",
+    "functions.call_existing": "call_existing_function",
+    "logic.if_equals": "if_equals",
+}
+
+ALL_IMPLEMENTED = {**LEGACY_IMPLEMENTED, **CORRECTION_IMPLEMENTED}
+
 
 def _block(**overrides) -> BlockDefinition:
     fields = dict(
@@ -249,16 +261,16 @@ def test_animated_eyes_is_the_only_optional_category() -> None:
 # --- implementation status --------------------------------------------------
 
 
-def test_only_the_legacy_blockly_poc_blocks_are_implemented() -> None:
+def test_only_the_legacy_and_corrected_blocks_are_implemented() -> None:
     implemented = {
         block.block_id: block.blockly_type
         for block in default_block_catalog.with_status(ImplementationStatus.IMPLEMENTED)
     }
-    assert implemented == LEGACY_IMPLEMENTED
+    assert implemented == ALL_IMPLEMENTED
     assert all(
         block.status is ImplementationStatus.CATALOGED
         for block in default_block_catalog.blocks
-        if block.block_id not in LEGACY_IMPLEMENTED
+        if block.block_id not in ALL_IMPLEMENTED
     )
 
 
@@ -286,13 +298,23 @@ def test_toolbox_only_offers_blocks_blockly_can_build() -> None:
             if item["kind"] == "category"
             for entry in item["contents"]
         ]
-        assert sorted(types) == sorted(LEGACY_IMPLEMENTED.values())
+        assert sorted(types) == sorted(ALL_IMPLEMENTED.values())
 
 
 def test_populated_toolbox_hides_empty_categories() -> None:
     toolbox = build_toolbox(default_block_catalog, hide_empty_categories=True)
     categories = [item for item in toolbox["contents"] if item["kind"] == "category"]
-    assert [item["name"] for item in categories] == ["Program", "Inputs", "Outputs", "Time"]
+    # Category declaration order (app/blockly/categories.py): Logic and
+    # Functions now have IMPLEMENTED blocks too, ahead of the four Arduino
+    # categories the legacy POC populated.
+    assert [item["name"] for item in categories] == [
+        "Logic",
+        "Functions",
+        "Program",
+        "Inputs",
+        "Outputs",
+        "Time",
+    ]
     assert all(item["contents"] for item in categories)
 
 

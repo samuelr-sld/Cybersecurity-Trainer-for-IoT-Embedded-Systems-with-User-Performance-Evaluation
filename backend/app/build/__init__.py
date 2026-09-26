@@ -40,6 +40,13 @@ Responsibility split:
                       serial-device discovery and real firmware upload.
     service.py        `BuildService` — session-level orchestration called by
                       the WebSocket layer; transport/UI independent.
+    provisioning.py   the generic compile-time credential-provisioning seam
+                      (Option A) — `ProvisioningStrategy`/`ProvisioningPlan`/
+                      `ProvisioningStrategyRegistry`. Panel-agnostic; not
+                      re-exported here (see its own docstring). No panel
+                      registers a strategy today — Panel 1's committed
+                      firmware carries its real lab credentials as literals
+                      instead (see `app/build_provisioning_selection.py`).
 
 PHASE 3A SCOPE. A student can load the Environmental Monitoring project,
 view its full firmware, and edit only its one editable security region.
@@ -101,6 +108,7 @@ from app.build.document_project import (
     board_info_from_fqbn,
     build_project_from_document,
     firmware_file_from_document,
+    policy_for_document,
 )
 from app.build.environmental import (
     SECURITY_REGION_ID,
@@ -129,6 +137,14 @@ from app.build.models import (
     RegionKind,
     ValidationStatus,
 )
+from app.build.no_device import NO_DEVICE_PROJECT_ID, create_no_device_project
+from app.build.policy import (
+    DEFAULT_POLICY,
+    InteractionPolicy,
+    ProjectPolicy,
+    ProjectPolicyError,
+    build_project_policy,
+)
 from app.build.sketch_source import SketchSourceError, load_sketch_project
 from app.build.workspace import (
     BuildWorkspace,
@@ -140,12 +156,15 @@ from app.build.workspace import (
 
 
 def create_default_workspace() -> BuildWorkspace:
-    """Build the workspace a fresh Build Mode session starts in.
+    """Build the workspace a bare `BuildSession()` starts in.
 
-    One call, one independent workspace wrapping its own `BuildProject` —
-    this is what `app/build_sessions.py` uses as its per-session default, so
-    no two Build Mode sessions can ever share workspace state. A future
-    project/scenario selector would branch here.
+    One call, one independent workspace wrapping its own `BuildProject` — the
+    dataclass default for a session nobody's connection lifecycle supplied a
+    workspace to (direct construction, most existing tests). It is NOT what a
+    real `/ws/build` connection loads any more: `app/build_project_selection.py`
+    always passes an explicit `workspace`, the attached panel's real firmware
+    when one resolves and `create_no_device_workspace()` otherwise — see that
+    module for why LED Blink stopped being the connection-path fallback.
 
     Currently the LED Blink pipeline-proof project (Phase 1) — see
     `blink.py`. `create_environmental_monitoring_project` remains available
@@ -155,8 +174,14 @@ def create_default_workspace() -> BuildWorkspace:
     return BuildWorkspace(create_blink_project())
 
 
+def create_no_device_workspace() -> BuildWorkspace:
+    """The workspace a session with no resolved panel gets. See `no_device.py`."""
+    return BuildWorkspace(create_no_device_project())
+
+
 __all__ = [
     "BLINK_REGION_ID",
+    "DEFAULT_POLICY",
     "SECURITY_REGION_ID",
     "ArduinoCliCompiler",
     "ArduinoCliFlasher",
@@ -183,7 +208,11 @@ __all__ = [
     "FlashStatus",
     "FlasherAdapter",
     "HardwareStatus",
+    "InteractionPolicy",
+    "NO_DEVICE_PROJECT_ID",
     "ProjectFileNotFoundError",
+    "ProjectPolicy",
+    "ProjectPolicyError",
     "RegionKind",
     "RegionNotEditableError",
     "RegionNotFoundError",
@@ -192,11 +221,15 @@ __all__ = [
     "ValidationStatus",
     "board_info_from_fqbn",
     "build_project_from_document",
+    "build_project_policy",
     "create_blink_project",
     "create_default_workspace",
     "create_environmental_monitoring_project",
+    "create_no_device_project",
+    "create_no_device_workspace",
     "default_compiler",
     "default_flasher",
     "firmware_file_from_document",
     "load_sketch_project",
+    "policy_for_document",
 ]

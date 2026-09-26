@@ -21,11 +21,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from app.build.policy import InteractionPolicy, ProjectPolicy
 from app.hardware.state import DeviceStatus
 
 
 class RegionKind(str, Enum):
-    """Whether a firmware segment may be modified by a student."""
+    """Whether a firmware segment may be modified by a student.
+
+    THE ENFORCEMENT VOCABULARY, AND STILL BINARY AFTER PHASE B8. A student
+    may write here, or may not; `BuildWorkspace.update_region` and
+    `app/build/program_source.py`'s locked-region integrity check are the two
+    places that read it, and both ask exactly that question. B8's richer
+    `InteractionPolicy` (LOCKED / EXPLORE / EDITABLE, see
+    `app/build/policy.py`) is a *classification* carried alongside on the
+    project, not a third permission: an EXPLORE section is a LOCKED segment,
+    protected by the same code with no new branch.
+    """
 
     LOCKED = "locked"
     EDITABLE = "editable"
@@ -104,6 +115,15 @@ class BuildProject:
     matches, so no `SECURITY_REGION_EDITED` event is claimed for a project
     that has not named one. The two hand-authored projects (`blink.py`,
     `environmental.py`) still declare theirs as a string and are unaffected.
+
+    PHASE B8 ADDS `policy`, AND IT DOES NOT MOVE THE SECURITY REGION. A
+    `ProjectPolicy` (`app/build/policy.py`) classifies each discovered section
+    as LOCKED / EXPLORE / EDITABLE for the UI; `security_region_id` remains
+    the one field that names the remediation region, so there are never two
+    fields a caller could set to different answers. The only rule joining them
+    is checked below: when both are present, the security region must be one
+    the policy calls EDITABLE. `None` stays the honest default for a project
+    whose panel has declared no remediation activity.
     """
 
     project_id: str
@@ -113,6 +133,24 @@ class BuildProject:
     board: BoardInfo
     files: tuple[FirmwareFile, ...]
     security_region_id: str | None
+    policy: ProjectPolicy | None = None
+
+    def __post_init__(self) -> None:
+        if self.policy is None:
+            return
+        if not isinstance(self.policy, ProjectPolicy):
+            raise ValueError(f"project policy must be a ProjectPolicy: {self.policy!r}")
+        if self.security_region_id is None:
+            return
+        declared = self.policy.policy_for(self.security_region_id)
+        if declared is not InteractionPolicy.EDITABLE:
+            # A remediation region a student cannot write to is a contract
+            # that could never be satisfied, so it is refused at construction
+            # rather than discovered when the first edit is rejected.
+            raise ValueError(
+                f"project {self.project_id!r} names {self.security_region_id!r} as its "
+                f"security region, but its policy calls that section {declared.value}"
+            )
 
     def file(self, path: str) -> FirmwareFile | None:
         """The file at this path, or None if this project has none."""
@@ -120,6 +158,17 @@ class BuildProject:
             if firmware_file.path == path:
                 return firmware_file
         return None
+
+    def section_policy(self, region_id: str) -> InteractionPolicy:
+        """This region's interaction policy — LOCKED when none was declared.
+
+        The one place a caller asks "what is this section FOR?", so nothing
+        downstream re-derives it from `RegionKind` (which cannot tell EXPLORE
+        from LOCKED) or, worse, from a C++ function name.
+        """
+        if self.policy is None:
+            return InteractionPolicy.LOCKED
+        return self.policy.policy_for(region_id)
 
 
 class CompileStatus(str, Enum):

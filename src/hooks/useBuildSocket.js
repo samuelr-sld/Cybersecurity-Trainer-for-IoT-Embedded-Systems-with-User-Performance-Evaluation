@@ -64,6 +64,15 @@ export default function useBuildSocket(handlers) {
         case 'state':
           h.onState?.(message.data)
           break
+        case 'section':
+          // Phase B8 correction: the read leg of the section -> Blockly
+          // contract (backend/app/models/build_messages.py: BuildSectionMessage).
+          // Answers a `section_blockly` request — {path, sectionId,
+          // representable, workspace, preserved} — and is never followed by
+          // a `state` frame, since opening a section to look at it changes
+          // nothing.
+          h.onSection?.(message.data)
+          break
         case 'event':
           h.onEvent?.(message)
           break
@@ -90,6 +99,38 @@ export default function useBuildSocket(handlers) {
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(
         JSON.stringify({ type: 'edit_region', path, region_id: regionId, source }),
+      )
+    }
+  }, [])
+
+  // THE INTENDED EDITING INTERFACE (Phase B8 correction). A student clicks a
+  // discovered section; this asks for its Blockly representation. Read-only
+  // — see backend/app/models/build_messages.py: it emits no event and no
+  // `state`, only a `section` frame (routed to `onSection` above).
+  const sendSectionBlockly = useCallback((path, sectionId) => {
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'section_blockly', path, section_id: sectionId }))
+    }
+  }, [])
+
+  // The write leg. `workspace` is the Blockly serialization state
+  // (`Blockly.serialization.workspaces.save(...)`) for exactly the one
+  // section named by `sectionId`; `preserved` is the fragment list that came
+  // back with it (or an edited copy of that list — e.g. cleared by the
+  // student). There is no `source` field: the backend regenerates C++ from
+  // what the blocks mean, never from text this frontend sends.
+  const sendEditSectionBlocks = useCallback((path, sectionId, workspace, preserved) => {
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(
+        JSON.stringify({
+          type: 'edit_section_blocks',
+          path,
+          section_id: sectionId,
+          workspace,
+          preserved,
+        }),
       )
     }
   }, [])
@@ -129,5 +170,29 @@ export default function useBuildSocket(handlers) {
     }
   }, [])
 
-  return { status, sendEditRegion, sendCompile, sendFlash, sendHardwareStatus }
+  // Field-less, same reasoning as `sendCompile`/`sendFlash` — see
+  // backend/app/models/build_messages.py: `ValidateMessage` carries no
+  // fields because the verdict must come from the backend's own validator
+  // judging the firmware it already flashed, never from anything a client
+  // asserts. The backend refuses this outright unless the session's own
+  // workspace was already flashed successfully (app/build/service.py:
+  // validate_workspace), so this call never bypasses that gate — it just
+  // asks.
+  const sendValidate = useCallback(() => {
+    const socket = socketRef.current
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'validate' }))
+    }
+  }, [])
+
+  return {
+    status,
+    sendEditRegion,
+    sendSectionBlockly,
+    sendEditSectionBlocks,
+    sendCompile,
+    sendFlash,
+    sendHardwareStatus,
+    sendValidate,
+  }
 }

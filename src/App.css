@@ -1071,38 +1071,197 @@ th {
   user-select: text;
 }
 
-.code-segment.editable {
-  border: 1px solid var(--warn);
-  background: var(--white);
+.code-segment.small {
+  font-size: 11px;
+  padding: 8px;
 }
 
-.region-banner {
-  padding: 6px 10px;
+/* Build Mode — the clickable section list (Phase B8 correction). A section
+   IS the interaction surface: clicking one opens it, whatever its policy —
+   there is no separate "open editor" control and no orange/yellow box, only
+   a plain highlighted list item (see the removed `.region-banner`, which
+   this replaces). */
+.section-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.section-list button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+.section-list button:hover {
+  border-color: var(--line);
+}
+
+.section-list button.active {
+  border-color: var(--ok);
+  background: var(--panel);
+  font-weight: 700;
+}
+
+.policy-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.policy-badge.locked {
+  background: var(--soft);
+  color: var(--muted);
+}
+
+.policy-badge.explore {
+  background: var(--line);
+  color: var(--ink);
+}
+
+.policy-badge.editable {
+  background: var(--ok);
+  color: var(--bg);
+}
+
+/* The section detail view — whatever `.code-view` shows once a section is
+   selected: a read-only segment, a Blockly canvas, or (only for an EDITABLE
+   section the toolbox cannot yet draw) the legacy text fallback. */
+.code-section-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.section-header em {
+  font-style: normal;
+  color: var(--warn);
+  font-size: 11px;
+}
+
+/* Build Mode — full-source code view. `.code-view` now stacks every
+   discovered section (see BuildMode.jsx) instead of showing only the one
+   currently open; `.section-header` is that section's clickable toggle, so
+   it needs the button reset a plain label div never did. */
+button.section-header {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 4px 2px;
+}
+
+button.section-header:hover {
+  background: var(--panel);
+}
+
+button.section-header.active {
+  font-weight: 700;
+}
+
+.code-section {
+  border: 1px solid transparent;
+}
+
+.code-section.selected {
+  border-color: var(--line);
+}
+
+/* `.blockly-panel` is normally the sole flex-filled child of `.code-view`
+   (see the Phase 1 POC comment above); embedded inline among sibling
+   sections here it needs its own fixed height instead of `flex: 1` against
+   an undefined remaining space. */
+.code-section .blockly-panel {
+  flex: none;
+  height: 420px;
+}
+
+.preserved-panel {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.preserved-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.preserved-header h4 {
+  margin: 0;
   font-size: 11px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--warn);
-  background: var(--soft);
-  border-bottom: 1px solid var(--warn);
+  color: var(--muted);
 }
 
-.code-segment.editable textarea {
-  width: 100%;
-  min-height: 120px;
-  border: 0;
-  resize: vertical;
-  background: var(--white);
-  color: var(--ink);
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 10px;
+.btn-outline.small {
+  padding: 2px 10px;
+  font-size: 11px;
 }
 
-/* TEMPORARY PHASE 1 POC — a file with no locked regions (see
-   BuildMode.jsx: isFullEditorFile) renders as one plain code editor instead
-   of the locked/editable region view above: no orange border, no banner,
-   just a normal editor filling the available code area. */
+/* Build Mode — no ESP32 attached (the no-device correction). No activity,
+   no firmware, no Blockly workspace — only a plain message under the same
+   shared hardware header every other Build Mode screen uses. */
+.no-device-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.no-device-message {
+  max-width: 480px;
+  text-align: center;
+  padding: 32px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.no-device-message h2 {
+  margin: 0 0 12px;
+  letter-spacing: 0.05em;
+}
+
+.no-device-message p {
+  color: var(--muted);
+  margin: 6px 0;
+}
+
 .code-editor-full {
   flex: 1;
   width: 100%;
@@ -1141,40 +1300,6 @@ th {
   padding: 2px 10px;
   font-size: 11px;
   margin-left: 6px;
-}
-
-.region-map-file {
-  margin-bottom: 10px;
-}
-
-.region-map-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-}
-
-.region-badge {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-right: 6px;
-}
-
-.region-badge.locked {
-  background: var(--soft);
-  color: var(--muted);
-}
-
-.region-badge.editable {
-  background: var(--warn);
-  color: var(--bg);
 }
 
 /* Build Mode — Flash Terminal (lower part of the code editor area). Real

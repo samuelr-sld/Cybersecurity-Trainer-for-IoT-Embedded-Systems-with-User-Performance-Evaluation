@@ -42,6 +42,16 @@ integration rather than editing capability, so the conservative existing
 the seam the later remediation phase passes a decision through — it changes no
 type here and adds no new vocabulary.
 
+PHASE B8 PASSES A DECISION THROUGH THAT SEAM, AND ADDS ONE BESIDE IT.
+`explore_section_ids` names the sections a student must READ to understand the
+vulnerability but may not write. Both lists are still the caller's — this
+module classifies nothing on its own and still has no opinion about C++ — and
+they are turned into one `ProjectPolicy` (`app/build/policy.py`) carried on
+the `BuildProject`. The SEGMENT model is untouched by that: an EXPLORE section
+becomes a `RegionKind.LOCKED` segment exactly like an unclassified one, so
+every existing protection applies to it unchanged and with no new branch. See
+`app/build/policy.py` for why the permission vocabulary stayed binary.
+
 RECONSTRUCTION SURVIVES THE CONVERSION. B1 guarantees
 `BuildDocument.render() == source`; `FirmwareFile.render()` concatenates
 segment text in order exactly as `BuildDocument.render()` concatenates section
@@ -62,6 +72,12 @@ from collections.abc import Iterable
 
 from app.build.discovery.models import BuildDocument
 from app.build.models import BoardInfo, BuildProject, FileSegment, FirmwareFile, RegionKind
+from app.build.policy import (
+    InteractionPolicy,
+    ProjectPolicy,
+    ProjectPolicyError,
+    build_project_policy,
+)
 
 
 class DocumentProjectError(ValueError):
@@ -87,39 +103,75 @@ def section_region_id(section_id: str) -> str:
     return section_id
 
 
+def policy_for_document(
+    document: BuildDocument,
+    *,
+    editable_section_ids: Iterable[str] = (),
+    explore_section_ids: Iterable[str] = (),
+) -> ProjectPolicy:
+    """This document's sections classified LOCKED / EXPLORE / EDITABLE (B8).
+
+    Both lists are the caller's decision (see the module docstring); this
+    only checks they name sections the document actually has and turns them
+    into the one policy object a `BuildProject` carries. `ProjectPolicyError`
+    surfaces as `DocumentProjectError` so a caller keeps catching one type
+    for everything that can go wrong converting a document.
+    """
+    try:
+        return build_project_policy(
+            (section.section_id for section in document.sections),
+            editable_section_ids=editable_section_ids,
+            explore_section_ids=explore_section_ids,
+        )
+    except ProjectPolicyError as error:
+        raise DocumentProjectError(str(error)) from error
+
+
 def firmware_file_from_document(
     document: BuildDocument,
     path: str,
     *,
     editable_section_ids: Iterable[str] = (),
+    explore_section_ids: Iterable[str] = (),
 ) -> FirmwareFile:
     """One discovered document as one ordered, region-addressed file.
 
     Section order is preserved exactly; every section becomes exactly one
     segment; nothing is merged, split, reordered or reformatted.
 
-    Raises `DocumentProjectError` if `editable_section_ids` names a section
-    this document does not have — a caller asking for a region that does not
-    exist is a mistake worth failing on, not a silently-ignored request, the
-    same discipline `BuildWorkspace.update_region` already applies to an
-    unknown region id.
+    Raises `DocumentProjectError` if `editable_section_ids` or
+    `explore_section_ids` names a section this document does not have — a
+    caller asking for a region that does not exist is a mistake worth failing
+    on, not a silently-ignored request, the same discipline
+    `BuildWorkspace.update_region` already applies to an unknown region id.
+
+    `explore_section_ids` changes no segment: an EXPLORE section is a LOCKED
+    segment (B8 — see `app/build/policy.py`). It is accepted here purely so
+    one call validates the whole classification against one document, and so
+    a caller cannot open a region for editing and classify it for exploring
+    at the same time.
     """
     if not isinstance(path, str) or not path.strip():
         raise DocumentProjectError(f"firmware file path must be a non-empty string, got {path!r}")
     if not document.sections:
         raise DocumentProjectError(f"{path}: document has no sections to materialize")
 
-    editable = set(editable_section_ids)
-    known = {section.section_id for section in document.sections}
-    unknown = sorted(editable - known)
-    if unknown:
-        raise DocumentProjectError(
-            f"{path}: no such section(s) to make editable: {', '.join(unknown)}"
+    try:
+        policy = policy_for_document(
+            document,
+            editable_section_ids=editable_section_ids,
+            explore_section_ids=explore_section_ids,
         )
+    except DocumentProjectError as error:
+        raise DocumentProjectError(f"{path}: {error}") from error
 
     segments = tuple(
         FileSegment(
-            kind=RegionKind.EDITABLE if section.section_id in editable else RegionKind.LOCKED,
+            kind=(
+                RegionKind.EDITABLE
+                if policy.policy_for(section.section_id) is InteractionPolicy.EDITABLE
+                else RegionKind.LOCKED
+            ),
             region_id=section_region_id(section.section_id),
             text=section.text,
         )
@@ -183,6 +235,7 @@ def build_project_from_document(
     firmware_name: str,
     board: BoardInfo,
     editable_section_ids: Iterable[str] = (),
+    explore_section_ids: Iterable[str] = (),
     security_region_id: str | None = None,
     supporting_files: Iterable[FirmwareFile] = (),
 ) -> BuildProject:
@@ -197,21 +250,42 @@ def build_project_from_document(
     they belong to whoever owns the source — see
     `app/build_project_selection.py`, which reads all of them off the resolved
     `PanelPackage` — and inventing them here would put a second source of
-    truth next to the manifest.
+    truth next to the manifest. The same is true of the B8 classification:
+    which sections are editable, which are for exploring, and which one is the
+    remediation region are the panel's declarations, carried through here.
     """
     primary = firmware_file_from_document(
-        document, path, editable_section_ids=editable_section_ids
+        document,
+        path,
+        editable_section_ids=editable_section_ids,
+        explore_section_ids=explore_section_ids,
     )
     files = (primary, *supporting_files)
     paths = [f.path for f in files]
     if len(set(paths)) != len(paths):
         raise DocumentProjectError(f"duplicate file path in project {project_id!r}: {paths}")
-    return BuildProject(
-        project_id=project_id,
-        scenario_id=scenario_id,
-        module_id=module_id,
-        firmware_name=firmware_name,
-        board=board,
-        files=files,
-        security_region_id=security_region_id,
+    policy = policy_for_document(
+        document,
+        editable_section_ids=editable_section_ids,
+        explore_section_ids=explore_section_ids,
     )
+    try:
+        return BuildProject(
+            project_id=project_id,
+            scenario_id=scenario_id,
+            module_id=module_id,
+            firmware_name=firmware_name,
+            board=board,
+            files=files,
+            security_region_id=security_region_id,
+            # Only attached when something was actually classified, so a B2
+            # project (which decides nothing) is byte-for-byte the object it
+            # was before B8 rather than carrying an all-LOCKED policy that
+            # says the same thing at greater length.
+            policy=policy if policy.declared else None,
+        )
+    except ValueError as error:
+        # `BuildProject.__post_init__` refuses a security region the policy
+        # does not open — reported as this module's own error type so one
+        # caller catch still covers every way a conversion can fail.
+        raise DocumentProjectError(str(error)) from error

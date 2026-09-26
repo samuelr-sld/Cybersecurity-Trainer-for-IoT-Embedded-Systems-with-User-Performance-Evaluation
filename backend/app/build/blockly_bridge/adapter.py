@@ -74,12 +74,29 @@ from app.build.blockly_bridge.models import (
     PreservedSource,
 )
 from app.build.semantic import (
+    CallStatement,
+    ComparisonValue,
+    ConditionalStatement,
+    LiteralValue,
     OperationStatement,
     SemanticProgram,
     SemanticSection,
     SemanticStatement,
+    SemanticType,
+    SymbolValue,
     UnsupportedStatement,
 )
+
+#: The two block ids added by the no-device/Blockly-integration correction.
+#: Neither routes through the operation registry / `FieldBindingTable` the
+#: rest of this module uses (see their catalog entries in
+#: `app/blockly/definitions/programming.py`): a call to an existing function
+#: is addressed by an arbitrary name, not a platform operation, and an
+#: equality-gated body is a structural construct with a nested statement
+#: body, not a flat operand list. Both are therefore handled by their own
+#: dedicated functions below rather than `_statement_block`.
+FUNCTIONS_CALL_EXISTING_BLOCK_ID = "functions.call_existing"
+LOGIC_IF_EQUALS_BLOCK_ID = "logic.if_equals"
 
 
 def program_to_blockly(
@@ -179,6 +196,12 @@ def _section(
         operation_id=section.operation.operation_id,
         block_id=definition.block_id,
         block_type=definition.blockly_type,
+        # Provenance-only, exactly like `source_text` below — a generic named-
+        # function container's preserved declarator, carried so an in-process
+        # round trip (`blockly_to_semantic(program_to_blockly(program))`, no
+        # wire in between) reconstructs an equal `SemanticSection`. See
+        # `BlocklyBlock.container_signature`.
+        container_signature=section.signature,
         fields=(),
         body_input=body_inputs[0].name,
         body=tuple(_item(statement, catalog, bindings) for statement in section.statements),
@@ -195,7 +218,106 @@ def _item(
     """One body statement as a block, or as source carried verbatim."""
     if isinstance(statement, OperationStatement):
         return _statement_block(statement, catalog, bindings)
+    if isinstance(statement, CallStatement):
+        return _call_existing_block(statement, catalog)
+    if isinstance(statement, ConditionalStatement):
+        return _if_equals_block(statement, catalog, bindings)
     return _preserved(statement)
+
+
+def _require_implemented(block_id: str, catalog: BlockCatalog) -> BlockDefinition:
+    """The one implemented catalog block with this id, or a loud disagreement.
+
+    The `functions.call_existing`/`logic.if_equals` counterpart of
+    `block_definition_for` — looked up by BLOCK id rather than by operation
+    id, since neither routes through the operation registry (see the module
+    header). A miss here is drift between this module and the catalog, never
+    something a workspace can cause.
+    """
+    definition = catalog.block(block_id)
+    if (
+        definition is None
+        or definition.status is not ImplementationStatus.IMPLEMENTED
+        or definition.blockly_type is None
+    ):
+        raise UnrepresentableOperationError(f"{block_id}: no implemented catalog block")
+    return definition
+
+
+def _single_statements_input(definition: BlockDefinition) -> str:
+    """The one STATEMENTS input this block declares — its body's input name."""
+    body_inputs = [item for item in definition.inputs if item.value_type is ValueType.STATEMENTS]
+    if len(body_inputs) != 1:
+        raise UnrepresentableOperationError(
+            f"{definition.block_id}: needs exactly one statement body input, "
+            f"it has {len(body_inputs)}"
+        )
+    return body_inputs[0].name
+
+
+def _call_existing_block(statement: CallStatement, catalog: BlockCatalog) -> BlocklyBlock:
+    """A `CallStatement` as the `functions.call_existing` block.
+
+    Always representable: `CallStatement.function_name` is validated at
+    construction to be a plain identifier, which a TEXT field can always
+    hold — there is no "understood but undrawable" case here, unlike the
+    catalog-bound statements `_statement_block` converts.
+    """
+    definition = _require_implemented(FUNCTIONS_CALL_EXISTING_BLOCK_ID, catalog)
+    return BlocklyBlock(
+        operation_id=FUNCTIONS_CALL_EXISTING_BLOCK_ID,
+        block_id=definition.block_id,
+        block_type=definition.blockly_type,
+        source_text=statement.text,
+        fields=(BlocklyField(name="NAME", value=statement.function_name),),
+    )
+
+
+def _if_equals_block(
+    statement: ConditionalStatement, catalog: BlockCatalog, bindings: FieldBindingTable
+) -> BlocklyBlock | PreservedSource:
+    """A `ConditionalStatement` as the `logic.if_equals` block, when it fits.
+
+    THE BLOCK'S SHAPE IS NARROW ON PURPOSE (see its catalog docstring): LEFT
+    is always read as a named reference and RIGHT as a fixed text value to
+    compare it against — the exact shape an authorization gate needs
+    (`message == "START"`), not a general expression. A condition this
+    function cannot draw in that shape — anything but a `ComparisonValue` of
+    a `SymbolValue` on the left and a text `LiteralValue` on the right — is
+    understood by the IR and undrawable by this one block, so it is preserved
+    exactly like `_statement_block` preserves an operand no field can hold.
+    """
+    definition = _require_implemented(LOGIC_IF_EQUALS_BLOCK_ID, catalog)
+    condition = statement.condition
+    representable = (
+        isinstance(condition, ComparisonValue)
+        and isinstance(condition.left, SymbolValue)
+        and isinstance(condition.right, LiteralValue)
+        and condition.right.value_type is SemanticType.TEXT
+    )
+    if not representable:
+        if statement.text is None:
+            raise UnrepresentableOperationError(
+                f"{LOGIC_IF_EQUALS_BLOCK_ID}: condition ({condition.source_text}) is not a "
+                "name-equals-text comparison, and this statement records no source to carry "
+                "verbatim instead"
+            )
+        return PreservedSource(
+            text=statement.text, reason=BridgeReason.FIELD_VALUE_NOT_REPRESENTABLE
+        )
+    return BlocklyBlock(
+        operation_id=LOGIC_IF_EQUALS_BLOCK_ID,
+        block_id=definition.block_id,
+        block_type=definition.blockly_type,
+        source_text=statement.text,
+        fields=(
+            BlocklyField(name="LEFT", value=condition.left.name),
+            BlocklyField(name="OPERATOR", value=condition.operator),
+            BlocklyField(name="RIGHT", value=str(condition.right.value)),
+        ),
+        body_input=_single_statements_input(definition),
+        body=tuple(_item(item, catalog, bindings) for item in statement.body),
+    )
 
 
 def _preserved(statement: SemanticStatement) -> PreservedSource:
@@ -233,6 +355,19 @@ def _statement_block(
             # Understood, undrawable. The whole statement is carried verbatim
             # rather than half-built or silently altered — see the module
             # docstring's "two kinds of cannot".
+            if statement.source_text is None:
+                # Undrawable AND source-less: an authored statement whose
+                # operand no real field can hold. There is no block to build
+                # and no text to fall back on, so there is nothing faithful to
+                # produce. It is reported rather than dropped or coerced into a
+                # field that would silently change what the statement says —
+                # its C++ still exists (B6 writes it from the operation), but
+                # this workspace cannot show it.
+                raise UnrepresentableOperationError(
+                    f"{statement.operation_id}: {binding.input_name} "
+                    f"({value.source_text}) cannot occupy its field, and this statement "
+                    "records no source to carry verbatim instead"
+                )
             return PreservedSource(
                 text=statement.source_text,
                 reason=BridgeReason.FIELD_VALUE_NOT_REPRESENTABLE,

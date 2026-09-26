@@ -1,10 +1,19 @@
-"""The semantic representation layer (Phase B3) — what supported code MEANS.
+"""The semantic representation layer (Phases B3/B6) — what code MEANS, both ways.
 
     C++ source
         -> B1 CodeSection            (app/build/discovery/)
-        -> B3 Semantic IR            (this package)
-        -> B4 Blockly adapter        (does not exist yet)
+        -> B3 Semantic IR            (this package: analyzer.py)
+        -> B4 Blockly adapter        (app/build/blockly_bridge/)
         -> Blockly
+        -> B5 back to the IR         (app/build/blockly_bridge/)
+        -> B6 Arduino C++ source     (this package: generator.py)
+
+BOTH ENDS LIVE HERE, AND NEITHER IS THE OTHER'S INVERSE BY CONSTRUCTION.
+`analyzer.py` reads a tiny subset of C++ and carries the rest verbatim;
+`generator.py` writes that subset back and carries the rest verbatim. They
+share the IR and nothing else — no shared parser state, no cached rendering,
+no round-trip cheat — which is what makes an authored statement with no source
+generate exactly like one read from firmware.
 
 BLOCKLY IS AN ADAPTER, NOT A DEPENDENCY. Nothing in this package imports
 Blockly, `app.blockly`, a workspace, a block id, XML, a serialization format
@@ -27,13 +36,30 @@ scenario, no MQTT, no permission model, no metric.
 from __future__ import annotations
 
 from app.build.semantic.analyzer import analyze_document
+from app.build.semantic.emissions import (
+    CallEmission,
+    CppEmission,
+    CppEmissionTable,
+    FunctionEmission,
+    build_default_emissions,
+    default_cpp_emissions,
+)
 from app.build.semantic.errors import (
+    CppGenerationError,
+    InvalidContainerError,
+    InvalidSemanticValueError,
+    MissingOperationArgumentError,
     SemanticAnalysisError,
     SemanticError,
     SemanticModelError,
     UnknownOperationError,
+    UnsupportedOperationError,
 )
+from app.build.semantic.generator import INDENT, generate_cpp
 from app.build.semantic.models import (
+    CallStatement,
+    ComparisonValue,
+    ConditionalStatement,
     LiteralValue,
     OperationStatement,
     SemanticArgument,
@@ -46,6 +72,7 @@ from app.build.semantic.models import (
     UnsupportedStatement,
 )
 from app.build.semantic.operations import (
+    FUNCTIONS_IMPLEMENTATION,
     GPIO_DIGITAL_WRITE,
     GPIO_PIN_MODE,
     PROGRAM_LOOP,
@@ -62,12 +89,25 @@ from app.build.semantic.operations import (
 )
 
 __all__ = [
+    "FUNCTIONS_IMPLEMENTATION",
     "GPIO_DIGITAL_WRITE",
     "GPIO_PIN_MODE",
+    "INDENT",
     "PROGRAM_LOOP",
     "PROGRAM_SETUP",
     "TIME_DELAY",
+    "CallEmission",
+    "CallStatement",
+    "ComparisonValue",
+    "ConditionalStatement",
+    "CppEmission",
+    "CppEmissionTable",
+    "CppGenerationError",
+    "FunctionEmission",
+    "InvalidContainerError",
+    "InvalidSemanticValueError",
     "LiteralValue",
+    "MissingOperationArgumentError",
     "OperationForm",
     "OperationStatement",
     "SemanticAnalysisError",
@@ -84,10 +124,14 @@ __all__ = [
     "SemanticValue",
     "SymbolValue",
     "UnknownOperationError",
+    "UnsupportedOperationError",
     "UnsupportedReason",
     "UnsupportedStatement",
     "analyze_document",
+    "build_default_emissions",
     "build_default_operations",
+    "default_cpp_emissions",
     "default_semantic_operations",
+    "generate_cpp",
     "is_operation_id",
 ]

@@ -21,12 +21,7 @@ import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE } from '../hardware/deviceS
 const EVENT_LABELS = {
   build_session_started: 'Build session started',
   workspace_loaded: 'Workspace loaded',
-  // Fires for edits to whichever region `BuildProject.security_region_id`
-  // names — a plain "primary" region on the current LED Blink project, a
-  // real security region on the eventual five-panel projects. Labeled
-  // neutrally here so the Activity Log doesn't imply a security framing
-  // that this project doesn't have.
-  security_region_edited: 'Target region edited',
+  security_region_edited: 'Security region edited',
   code_edited: 'Code edited',
   build_session_ended: 'Build session ended',
   compile_started: 'Compile started',
@@ -61,16 +56,22 @@ const BUILD_STATUS_LABEL = {
   failed: 'FAILED',
 }
 
-// Validation/security-test controls are wired to nothing yet — Phase 3C
-// implements real flashing, and deliberately stops there: uploading firmware
-// is not the same as showing that it works or that it is secure (see
-// CLAUDE.md). These stay visibly disabled placeholders rather than claiming
-// a result nothing measured. COMPILE and FLASH are both real controls now —
-// see the console actions below — so neither is in this list.
-const FUTURE_CONTROLS = [
-  { key: 'validate', label: 'RUN VALIDATION TEST' },
-  { key: 'security_test', label: 'SECURITY TEST' },
-]
+// Backend `InteractionPolicy` values (backend/app/build/policy.py) -> the
+// section list's badge copy. LOCKED and EXPLORE are both read-only
+// (`RegionKind.LOCKED` underneath); EDITABLE is the only one a student may
+// write to. A section this map doesn't know falls back to its raw value.
+const POLICY_LABEL = {
+  locked: 'LOCKED',
+  explore: 'EXPLORE',
+  editable: 'EDITABLE',
+}
+
+// The security-test control is wired to nothing yet — that phase is not
+// implemented (see CLAUDE.md). It stays a visibly disabled placeholder
+// rather than claiming a result nothing measured. COMPILE, FLASH and now
+// VALIDATE are all real controls — see the console actions below — so none
+// of them is in this list.
+const FUTURE_CONTROLS = [{ key: 'security_test', label: 'SECURITY TEST' }]
 
 // Backend `FlashStatus` -> banner copy. NO ESP32 DEVICE DETECTED is
 // deliberately worded as a device fact, not a build or toolchain problem.
@@ -97,6 +98,28 @@ const FLASH_FAILURE_NOTE = {
   timeout: 'The upload exceeded its time limit and was stopped.',
   toolchain_unavailable: 'The Arduino CLI toolchain is not available on the backend.',
   internal_error: 'The backend could not run the upload.',
+}
+
+// Backend `ValidationStatus` -> the Validation Terminal's banner copy,
+// reusing exactly the same `.flash-terminal` visual language (Phase B7).
+// `ValidationStatus` has no `detecting`/`no_device` members — a validation
+// never touches device discovery, it judges firmware already on the board —
+// so this map only ever needs the three states below.
+const VALIDATION_BANNER = {
+  running: 'VALIDATING…',
+  succeeded: '✓ VALIDATION SUCCESS',
+  failed: '✗ VALIDATION FAILED',
+}
+
+// Backend `ValidationOutcome` (`validation_output.outcome`) -> one plain
+// sentence. `validation_status` alone collapses FAILURE/ERROR/an unexpected
+// NOT_RUN into the same FAILED status (see app/build/service.py
+// `_finish_validation`), so this is what lets a student tell "the fix does
+// not work" apart from "the check itself could not run".
+const VALIDATION_OUTCOME_NOTE = {
+  failure: 'The check ran and the remediation requirement was not met.',
+  error: 'The validation check itself did not complete — this is not a verdict on your firmware.',
+  not_run: 'No check ran for this firmware.',
 }
 
 // Activity Log timestamps are SESSION ELAPSED TIME (HH:MM:SS since this
@@ -148,14 +171,34 @@ export default function BuildMode({ onBack, onMenu }) {
   const [activeFile, setActiveFile] = useState(null)
   const [protocolError, setProtocolError] = useState('')
 
-  // Blockly Phase 1 POC (see CLAUDE.md). BLOCKS is the default view — "user
-  // sees a large blank canvas" is the very first thing Build Mode should
-  // show — CODE shows the same source as plain text via the existing
-  // full-editor textarea. Both panels stay mounted once entered (toggled
-  // via the `hidden` attribute, not conditional rendering) so switching
-  // away from BLOCKS never disposes the live Blockly workspace and loses
-  // whatever the student built.
-  const [editorMode, setEditorMode] = useState('blocks')
+  // SECTION-BASED EDITING (Phase B8 correction). `selectedSectionId` is the
+  // one section currently open in the editor pane — a student clicks a row
+  // in FIRMWARE SECTIONS to open it, whatever its policy. `sectionData` is
+  // the backend's answer to `section_blockly` for an EDITABLE section only
+  // (`{path, sectionId, representable, workspace, preserved}` — see
+  // backend/app/build/section_blockly.py); LOCKED/EXPLORE sections need no
+  // round trip, since their current text is already in `state.files`.
+  const [selectedSectionId, setSelectedSectionId] = useState(null)
+  const [sectionData, setSectionData] = useState(null)
+  const [sectionLoading, setSectionLoading] = useState(false)
+  // The student's current in-progress edit for the open section, or null
+  // when the editor should show what the backend last sent. Exactly ONE of
+  // these is ever non-null at a time: `sectionPendingWorkspace` for a
+  // representable section's Blockly canvas, `legacyDraft` for the raw-text
+  // fallback a still-unrepresentable EDITABLE section falls back to. Both
+  // are cleared the moment the matching `code_edited` event confirms the
+  // save landed — see the `onEvent` handler below.
+  const [sectionPendingWorkspace, setSectionPendingWorkspace] = useState(null)
+  // The preserved-fragment list to resubmit alongside a Blockly edit — see
+  // `BlocklySection.records`/`app/build/blockly_bridge/workspace_state.py`.
+  // Starts as exactly what `section_blockly` answered; CLEAR empties it
+  // outright, which is the honest "the student deleted this" edit the
+  // no-restore-original requirement calls for — never something this
+  // frontend invents on its own.
+  const [sectionPreserved, setSectionPreserved] = useState([])
+  const [legacyTextOpen, setLegacyTextOpen] = useState(false)
+  const [legacyDraft, setLegacyDraft] = useState(null)
+
   // Collapsing this hands its grid column's width to the editor/Blockly
   // canvas (see `.ide-grid.left-collapsed` in App.css) — no new sidebar,
   // just the existing left column shrinking to a thin toggle strip. The
@@ -163,15 +206,6 @@ export default function BuildMode({ onBack, onMenu }) {
   // picks up the resulting size change on its own; nothing here has to
   // tell it to.
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
-
-  // The one editable region's unsent local edit, or null when the editor
-  // should show the backend's own saved text. A single value (rather than
-  // per-file/per-region state) is correct for this project — the LED Blink
-  // pipeline-proof project has exactly one editable region across all of its
-  // files (see backend/app/build/blink.py) — and would need to become a map
-  // keyed by region id only if a future project ever had more than one.
-  const [pendingEdit, setPendingEdit] = useState(null)
-  const draftDirty = pendingEdit !== null
 
   // True from the moment a flash is requested until the backend answers.
   // The backend sends one batch of frames when the whole action finishes,
@@ -181,12 +215,20 @@ export default function BuildMode({ onBack, onMenu }) {
   // a real upload takes, instead of pretending to know the sub-step.
   const [flashPending, setFlashPending] = useState(false)
 
-  // True from the moment COMPILE is clicked with an unsent draft still in
-  // the editor until the backend has confirmed that draft reached the
+  // Same pattern as `flashPending` (Phase B7): true from the moment
+  // validation is requested until the backend answers with a fresh `state`
+  // (or rejects the request with an `error` frame). The backend's own
+  // `validation_started`/succeeded/failed events already stream through
+  // `onEvent` into the Activity Log below; this local flag is only what
+  // keeps the button disabled and the terminal honest while the check runs.
+  const [validationPending, setValidationPending] = useState(false)
+
+  // True from the moment COMPILE is clicked with an unsaved section edit
+  // still open until the backend has confirmed that edit reached the
   // BuildWorkspace — see `compile()` below. Kept separate from `isCompiling`
   // (which only reflects `state.compile_status`) because this covers the
-  // brief edit_region round-trip that happens *before* a `compile` request
-  // is even sent.
+  // brief save round-trip that happens *before* a `compile` request is even
+  // sent.
   const [pendingCompileSync, setPendingCompileSync] = useState(false)
   // Set together with `pendingCompileSync`; cleared (and `sendCompile`
   // fired) the moment the matching `code_edited` event streams in — see the
@@ -216,11 +258,21 @@ export default function BuildMode({ onBack, onMenu }) {
   const [failureToastDismissed, setFailureToastDismissed] = useState(false)
   const successToastTimeoutRef = useRef(null)
 
-  const { status, sendEditRegion, sendCompile, sendFlash, sendHardwareStatus } = useBuildSocket({
+  const {
+    status,
+    sendEditRegion,
+    sendSectionBlockly,
+    sendEditSectionBlocks,
+    sendCompile,
+    sendFlash,
+    sendHardwareStatus,
+    sendValidate,
+  } = useBuildSocket({
     onSession: () => {
       setEvents([])
       setProtocolError('')
       setFlashPending(false)
+      setValidationPending(false)
       sessionStartRef.current = Date.now()
       setShowSuccessToast(false)
       setFailureToastDismissed(false)
@@ -230,27 +282,46 @@ export default function BuildMode({ onBack, onMenu }) {
       }
       compileAfterSyncRef.current = false
       setPendingCompileSync(false)
+      setSelectedSectionId(null)
+      setSectionData(null)
+      setSectionLoading(false)
+      setSectionPendingWorkspace(null)
+      setSectionPreserved([])
+      setLegacyTextOpen(false)
+      setLegacyDraft(null)
     },
     onState: (data) => {
       setState(data)
       setFlashPending(false)
+      setValidationPending(false)
+    },
+    onSection: (data) => {
+      setSectionLoading(false)
+      setSectionData(data)
+      setSectionPendingWorkspace(null)
+      setSectionPreserved(data?.preserved || [])
+      setLegacyTextOpen(false)
+      setLegacyDraft(null)
     },
     onEvent: (message) => {
       setEvents((evts) => [
         ...evts,
         { event: message.event, data: message.data, at: formatElapsedSince(sessionStartRef.current) },
       ])
-      // EDIT -> COMPILE without SAVE: `code_edited` is the one event only a
-      // successful `edit_region` produces (never `hardware_status`'s
-      // periodic poll, which emits no events at all — see
-      // backend/app/build/service.py::detect_hardware), so this is an
-      // unambiguous confirmation that the draft just sent by `compile()`
-      // below has landed in the backend's BuildWorkspace. Only then is it
-      // safe to actually issue `compile`.
-      if (compileAfterSyncRef.current && message.event === 'code_edited') {
-        compileAfterSyncRef.current = false
-        setPendingCompileSync(false)
-        sendCompileRef.current()
+      // EDIT -> COMPILE without SAVE: `code_edited` is the one event both
+      // `edit_region` and `edit_section_blocks` produce on success (never
+      // `hardware_status`'s periodic poll, which emits no events at all —
+      // see backend/app/build/service.py::detect_hardware), so this is an
+      // unambiguous confirmation that whichever save `compile()` below sent
+      // has landed in the backend's BuildWorkspace.
+      if (message.event === 'code_edited') {
+        setSectionPendingWorkspace(null)
+        setLegacyDraft(null)
+        if (compileAfterSyncRef.current) {
+          compileAfterSyncRef.current = false
+          setPendingCompileSync(false)
+          sendCompileRef.current()
+        }
       }
       // Drives the compile toast directly off the real backend events that
       // start/end a compile, rather than diffing `state.compile_status` in
@@ -282,6 +353,8 @@ export default function BuildMode({ onBack, onMenu }) {
     onError: (message) => {
       setProtocolError(message)
       setFlashPending(false)
+      setValidationPending(false)
+      setSectionLoading(false)
       // The sync edit itself was rejected (e.g. an unknown/locked region) —
       // abort rather than compiling stale source.
       if (compileAfterSyncRef.current) {
@@ -295,36 +368,20 @@ export default function BuildMode({ onBack, onMenu }) {
     sendCompileRef.current = sendCompile
   }, [sendCompile])
 
+  const hasActiveProject = Boolean(state?.has_active_project)
   const files = state?.files || {}
   const fileNames = Object.keys(files)
   const resolvedActiveFile = activeFile && files[activeFile] ? activeFile : fileNames[0] || null
   const activeSegments = files[resolvedActiveFile]?.segments || []
-  const editableSegment = activeSegments.find((s) => s.kind === 'editable') || null
-  const draft = pendingEdit !== null ? pendingEdit : editableSegment?.text || ''
-
-  // TEMPORARY PHASE 1 POC: a file represented as exactly one EDITABLE
-  // segment (no LOCKED segments at all — see backend/app/build/blink.py) is
-  // rendered as a plain, unrestricted code editor rather than the
-  // locked/editable region view below. Driven entirely by the shape of the
-  // data the backend sent, not by checking a project id, so a project that
-  // brings back a real locked/editable split (see
-  // backend/app/build/environmental.py) renders with the region view again
-  // automatically, with nothing here to change back.
-  const isFullEditorFile = activeSegments.length === 1 && activeSegments[0].kind === 'editable'
-  const isFullEditorProject =
-    fileNames.length > 0 &&
-    fileNames.every((name) => {
-      const segments = files[name]?.segments || []
-      return segments.length === 1 && segments[0]?.kind === 'editable'
-    })
+  const sectionDirty = sectionPendingWorkspace !== null || legacyDraft !== null
 
   const compileStatus = state?.compile_status || 'not_started'
   const isCompiling = compileStatus === 'running'
-  // Compile always targets the whole project, not just the active tab (see
+  // Compile always targets the whole project, not just the open section (see
   // backend/app/build/service.py::compile_workspace), so the toast names
   // the sketch's entry file — the same `.ino` file
-  // `BuildWorkspace.materialize` picks — rather than whatever tab happens
-  // to be open.
+  // `BuildWorkspace.materialize` picks — rather than whatever section
+  // happens to be open.
   const primaryFileName = fileNames.find((name) => name.endsWith('.ino')) || fileNames[0] || ''
 
   // Unmount-only cleanup: the transitions that actually drive
@@ -359,14 +416,38 @@ export default function BuildMode({ onBack, onMenu }) {
   // button follows that rather than second-guessing it here, so it can
   // never offer an action the backend would refuse.
   const flashReady = Boolean(state?.flash_ready)
-  // `!draftDirty` closes the one gap `flash_ready` alone can't: it reflects
-  // the *backend* workspace's fingerprint, which a local unsent edit never
-  // touches, so it can still read `true` from an earlier compile while the
-  // editor shows different code than what was built. Compiling always syncs
-  // first (see `compile()`), so this never blocks a legitimate flash for
-  // more than the moment it takes to hit COMPILE again.
-  const canFlash = flashReady && !flashPending && !isCompiling && !pendingCompileSync && !draftDirty
+  // `!sectionDirty` closes the one gap `flash_ready` alone can't: it
+  // reflects the *backend* workspace's fingerprint, which a local unsaved
+  // edit never touches, so it can still read `true` from an earlier compile
+  // while the editor shows different code than what was built. Compiling
+  // always syncs first (see `compile()`), so this never blocks a legitimate
+  // flash for more than the moment it takes to hit COMPILE again.
+  const canFlash = flashReady && !flashPending && !isCompiling && !pendingCompileSync && !sectionDirty
   const flashBannerStatus = flashPending ? 'running' : flashStatus
+
+  const validationStatus = state?.validation_status || 'not_started'
+  const validationOutput = state?.validation_output || null
+  // Phase 1.2. The connected panel's own `RemediationSpec` prose (backend/
+  // app/build/validation/models.py), verbatim from `state.remediation` —
+  // `null` for the four panels that declare no remediation activity yet.
+  // Never assembled or paraphrased here: what a fix must achieve is
+  // courseware content, not frontend copy.
+  const remediation = state?.remediation || null
+  // Mirrors exactly the two gates `BuildService.validate_workspace` itself
+  // enforces (app/build/service.py) — a successful flash must have happened,
+  // AND the workspace still has to be the one that was flashed (flash_ready,
+  // the same content-hash check flashing itself uses) — plus the local
+  // "nothing else is already in flight" guards `canFlash` already follows.
+  // This can never offer an action the backend would refuse; it only avoids
+  // a round trip to find that out.
+  const canValidate =
+    flashStatus === 'succeeded' &&
+    flashReady &&
+    !validationPending &&
+    !flashPending &&
+    !isCompiling &&
+    !pendingCompileSync
+  const validationBannerStatus = validationPending ? 'running' : validationStatus
 
   // Backend `hardware` block (backend/app/build_sessions.py: `snapshot`) —
   // real device-detection state, distinct from `flash_status` (which only
@@ -387,7 +468,9 @@ export default function BuildMode({ onBack, onMenu }) {
   // stays open, rather than only ever showing whatever was detected at
   // connect time — see CLAUDE.md requirement 7. Skips a poll while a compile
   // or flash is in flight so this never competes with either for the
-  // toolchain, and re-checks immediately once the socket (re)connects.
+  // toolchain, and re-checks immediately once the socket (re)connects. Kept
+  // running even with no active project — the header must stay truthful
+  // while a student waits for a panel to be identified.
   const pollGuardRef = useRef({ isCompiling, flashPending, pendingCompileSync })
   useEffect(() => {
     pollGuardRef.current = { isCompiling, flashPending, pendingCompileSync }
@@ -427,6 +510,29 @@ export default function BuildMode({ onBack, onMenu }) {
           .filter(Boolean)
           .join('\n')
 
+  // The Validation Terminal, built the same way as the Flash Terminal above
+  // — real backend validator output (`validationOutput.message`/`details`),
+  // never simulated. `details` is the strategy's own free-form evidence
+  // mapping (app/build/validation/models.py: `ValidationResult.details`),
+  // rendered as pretty JSON since its shape is validator-specific and not
+  // something this frontend should parse.
+  const validationTerminalText = validationPending
+    ? 'Running validation check…'
+    : validationStatus === 'not_started'
+      ? 'Validation output will appear here once you run the validation test.'
+      : [
+          VALIDATION_BANNER[validationStatus],
+          validationOutput?.message || null,
+          validationOutput && validationOutput.outcome !== 'success'
+            ? VALIDATION_OUTCOME_NOTE[validationOutput.outcome] || null
+            : null,
+          validationOutput?.details && Object.keys(validationOutput.details).length > 0
+            ? JSON.stringify(validationOutput.details, null, 2)
+            : null,
+        ]
+          .filter(Boolean)
+          .join('\n')
+
   // Smart auto-scroll for the Activity Log: a new entry scrolls into view
   // only if the reader was already at/near the bottom. `isNearBottomRef` is
   // kept current by the list's own onScroll handler (so it reflects where
@@ -448,41 +554,60 @@ export default function BuildMode({ onBack, onMenu }) {
     }
   }, [events])
 
-  // Blockly Phase 1 POC (see CLAUDE.md). The generated C++ is fed into the
-  // exact same `pendingEdit` draft state the plain-text CODE textarea's own
-  // `onChange` already writes to — not a second, parallel source of truth.
-  // That single reuse is the entire integration: SAVE/COMPILE/FLASH, the
-  // unsaved-edit sync-before-compile behaviour, and the compile-to-flash
-  // fingerprint check all already operate on `draft`/`pendingEdit`, so
-  // Blockly-authored firmware goes through every one of them completely
-  // unchanged, whether or not SAVE was ever clicked.
-  function handleBlocklyCodeChange(code) {
-    setPendingEdit(code)
+  // A section IS the interaction surface (Phase B8 correction) — clicking
+  // one opens it, whatever its policy. LOCKED/EXPLORE need no round trip
+  // (their current text is already in `state.files`); only EDITABLE asks
+  // the backend for a Blockly representation, since that answer also says
+  // whether the toolbox can draw this construct at all.
+  function openSection(regionId) {
+    if (regionId === selectedSectionId) return
+    const segment = activeSegments.find((s) => s.region_id === regionId)
+    if (!segment) return
+    setSelectedSectionId(regionId)
+    setSectionData(null)
+    setSectionPendingWorkspace(null)
+    setSectionPreserved([])
+    setLegacyTextOpen(false)
+    setLegacyDraft(null)
+    if (segment.policy === 'editable') {
+      setSectionLoading(true)
+      sendSectionBlockly(resolvedActiveFile, regionId)
+    }
   }
 
-  function saveRegion() {
-    if (!editableSegment || !resolvedActiveFile) return
-    sendEditRegion(resolvedActiveFile, editableSegment.region_id, draft)
-    setPendingEdit(null)
+  function switchFile(name) {
+    if (name === resolvedActiveFile) return
+    setActiveFile(name)
+    setSelectedSectionId(null)
+    setSectionData(null)
+    setSectionPendingWorkspace(null)
+    setSectionPreserved([])
+    setLegacyTextOpen(false)
+    setLegacyDraft(null)
+  }
+
+  function saveSection() {
+    if (!resolvedActiveFile || !selectedSectionId) return
+    if (sectionPendingWorkspace !== null) {
+      sendEditSectionBlocks(resolvedActiveFile, selectedSectionId, sectionPendingWorkspace, sectionPreserved)
+    } else if (legacyDraft !== null) {
+      sendEditRegion(resolvedActiveFile, selectedSectionId, legacyDraft)
+    }
   }
 
   function compile() {
     if (isCompiling || pendingCompileSync) return
-    if (draftDirty && editableSegment && resolvedActiveFile) {
-      // EDIT -> COMPILE without SAVE. Synchronize the current in-memory
-      // draft into the backend BuildWorkspace through the existing
-      // edit_region mechanism first — reused rather than bypassed, exactly
-      // as a manual SAVE would — and only send `compile` once the backend
-      // has confirmed that edit (see the `onEvent` handler above). This is
-      // not "auto-clicking SAVE": SAVE and COMPILE remain distinct actions
-      // a user can each trigger independently; COMPILE just also carries
-      // whatever draft the editor currently holds, because a compile
-      // against text the editor isn't showing would be wrong regardless of
-      // whether the user happened to click SAVE first.
+    if (sectionDirty && resolvedActiveFile && selectedSectionId) {
+      // EDIT -> COMPILE without SAVE. Synchronize the current in-progress
+      // edit into the backend BuildWorkspace first — reused rather than
+      // bypassed, exactly as a manual SAVE would — and only send `compile`
+      // once the backend has confirmed that edit (see the `onEvent` handler
+      // above). This is not "auto-clicking SAVE": SAVE and COMPILE remain
+      // distinct actions a user can each trigger independently; COMPILE just
+      // also carries whatever edit the editor currently holds.
       compileAfterSyncRef.current = true
       setPendingCompileSync(true)
-      sendEditRegion(resolvedActiveFile, editableSegment.region_id, draft)
-      setPendingEdit(null)
+      saveSection()
     } else {
       sendCompile()
     }
@@ -494,6 +619,12 @@ export default function BuildMode({ onBack, onMenu }) {
     sendFlash()
   }
 
+  function validate() {
+    if (!canValidate) return
+    setValidationPending(true)
+    sendValidate()
+  }
+
   function dismissCompileToast() {
     setShowSuccessToast(false)
     setFailureToastDismissed(true)
@@ -503,13 +634,53 @@ export default function BuildMode({ onBack, onMenu }) {
     if (canFlash) return 'Upload the compiled firmware to the connected ESP32'
     if (isCompiling || pendingCompileSync) return 'Wait for the current compilation to finish'
     if (flashPending) return 'A flash is already in progress'
-    if (draftDirty) return 'Compile your latest edits before flashing'
+    if (sectionDirty) return 'Compile your latest edits before flashing'
     if (compileStatus === 'succeeded') {
-      return isFullEditorFile
-        ? 'The source changed after the last build — compile again before flashing'
-        : 'The security region changed after the last build — compile again before flashing'
+      return 'The firmware changed since the last build — compile again before flashing'
     }
     return 'Compile the firmware successfully before flashing'
+  }
+
+  function validationHint() {
+    if (canValidate) return 'Run the validation check against the flashed firmware'
+    if (validationPending) return 'A validation check is already running'
+    if (isCompiling || pendingCompileSync) return 'Wait for the current compilation to finish'
+    if (flashPending) return 'Wait for the current flash to finish'
+    if (flashStatus !== 'succeeded') return 'Flash the compiled firmware to the device before validating'
+    if (!flashReady) {
+      return 'The firmware changed since the last flash — compile and flash again before validating'
+    }
+    return 'Flash the compiled firmware successfully before validating'
+  }
+
+  // NO-DEVICE CORRECTION. `has_active_project` is False for every connection
+  // whose panel did not resolve to a real activity — no board, an
+  // unidentified/unregistered board, a registered panel with no courseware,
+  // or firmware that could not be materialized (see
+  // backend/app/build/no_device.py and backend/app/build_project_selection.py).
+  // There is no default activity in this state: no panel selected, no
+  // firmware loaded, no Blockly workspace — only the shared hardware header,
+  // so the PANEL/USB/CONNECTED status keeps updating while a student waits.
+  if (state && !hasActiveProject) {
+    return (
+      <div className="page">
+        <AppHeader title="BUILD MODE" right={<HardwareHeaderStatus hardware={hardware} />} onMenu={onMenu} />
+        <main className="page-body no-device-body">
+          <div className="no-device-message">
+            <h2>NO ESP32 DETECTED</h2>
+            <p>Build Mode loads a panel's activity from the physically attached ESP32.</p>
+            <p>Connect a panel over USB and wait for it to be identified to load its firmware here.</p>
+          </div>
+        </main>
+        <footer className="link-footer">
+          <button type="button" onClick={onBack}>
+            ← BACK TO MENU
+          </button>
+          <span>BUILD MODE — WRITE, COMPILE, AND FLASH FIRMWARE.</span>
+          <span />
+        </footer>
+      </div>
+    )
   }
 
   return (
@@ -526,16 +697,16 @@ export default function BuildMode({ onBack, onMenu }) {
         <span>File</span>
         <span>Edit</span>
         <span>Sketch</span>
-        <span>Board: {state?.project.board.name || '—'}</span>
+        <span>Board: {state?.project?.board?.name || '—'}</span>
         <span>Help</span>
       </nav>
       <main className={`page-body ide-grid ${leftPanelCollapsed ? 'left-collapsed' : ''}`}>
         <aside className={`side-col ${leftPanelCollapsed ? 'collapsed' : ''}`}>
-          {/* Collapsible left column (see CLAUDE.md) — not a second
-              sidebar: collapsing this one hands its width to the Blockly/
-              code workspace via `.ide-grid.left-collapsed` in App.css. The
-              Blockly canvas's own ResizeObserver (BlocklyWorkspace.jsx)
-              reacts to the resulting size change on its own. */}
+          {/* Collapsible left column — not a second sidebar: collapsing this
+              one hands its width to the code/Blockly workspace via
+              `.ide-grid.left-collapsed` in App.css. The Blockly canvas's own
+              ResizeObserver (BlocklyWorkspace.jsx) reacts to the resulting
+              size change on its own. */}
           <button
             type="button"
             className="side-col-toggle"
@@ -549,24 +720,68 @@ export default function BuildMode({ onBack, onMenu }) {
             <>
               <section className="panel">
                 <h3>VULNERABILITY SCENARIO</h3>
-                <p className="file-active">{state?.project.scenario_id || 'connecting…'}</p>
-                <p className="muted-note">{state?.project.module_id}</p>
+                <p className="file-active">{state?.project?.scenario_id || 'connecting…'}</p>
+                <p className="muted-note">{state?.project?.module_id}</p>
+                {/* Phase 1.2 — what the remediation must achieve, so a
+                    student can read this before pressing RUN VALIDATION
+                    TEST rather than discovering the requirement only from a
+                    failed check. Absent (four of five panels) when the
+                    package declares no remediation activity yet. */}
+                {remediation && (
+                  <>
+                    <p className="muted-note">
+                      <strong>Vulnerability:</strong> {remediation.vulnerability}
+                    </p>
+                    <p className="muted-note">
+                      <strong>Remediation goal:</strong> {remediation.remediation_goal}
+                    </p>
+                    <p className="muted-note">
+                      <strong>Validation requirement:</strong> {remediation.validation_requirement}
+                    </p>
+                  </>
+                )}
               </section>
               <section className="panel">
-                <h3>PROJECT FILES</h3>
-                <ul className="file-list">
-                  {fileNames.map((name) => (
-                    <li key={name}>
-                      <button
-                        type="button"
-                        className={name === resolvedActiveFile ? 'active' : ''}
-                        onClick={() => setActiveFile(name)}
-                      >
-                        {name}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
+                <h3>FIRMWARE SECTIONS</h3>
+                {fileNames.length > 0 && (
+                  <ul className="file-list">
+                    {fileNames.map((name) => (
+                      <li key={name}>
+                        <button
+                          type="button"
+                          className={name === resolvedActiveFile ? 'active' : ''}
+                          onClick={() => switchFile(name)}
+                        >
+                          {name}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {/* THE SECTION IS THE INTERACTION SURFACE (Phase B8
+                    correction). Every discovered section of the active file,
+                    each individually clickable, with its own policy badge —
+                    no separate "open editor" control. */}
+                {activeSegments.length === 0 ? (
+                  <p className="muted-note">Loading firmware…</p>
+                ) : (
+                  <ul className="section-list">
+                    {activeSegments.map((segment) => (
+                      <li key={segment.region_id}>
+                        <button
+                          type="button"
+                          className={segment.region_id === selectedSectionId ? 'active' : ''}
+                          onClick={() => openSection(segment.region_id)}
+                        >
+                          <span className={`policy-badge ${segment.policy}`}>
+                            {POLICY_LABEL[segment.policy] || segment.policy}
+                          </span>
+                          {segment.region_id}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </section>
               <section className="panel">
                 <h3>BUILD STATUS</h3>
@@ -595,10 +810,10 @@ export default function BuildMode({ onBack, onMenu }) {
                   <button
                     type="button"
                     className="btn-solid"
-                    disabled={!editableSegment || !draftDirty}
-                    onClick={saveRegion}
+                    disabled={!sectionDirty}
+                    onClick={saveSection}
                   >
-                    {isFullEditorFile ? 'SAVE' : 'SAVE SECURITY REGION'}
+                    SAVE SECTION
                   </button>
                   <button
                     type="button"
@@ -617,6 +832,15 @@ export default function BuildMode({ onBack, onMenu }) {
                   >
                     {flashPending ? '… FLASHING' : '▲ FLASH'}
                   </button>
+                  <button
+                    type="button"
+                    className="btn-outline"
+                    disabled={!canValidate}
+                    onClick={validate}
+                    title={validationHint()}
+                  >
+                    {validationPending ? '… VALIDATING' : 'RUN VALIDATION TEST'}
+                  </button>
                   {FUTURE_CONTROLS.map(({ key, label }) => (
                     <span className="future-control" key={key}>
                       <button type="button" className="btn-outline" disabled>
@@ -631,80 +855,124 @@ export default function BuildMode({ onBack, onMenu }) {
           )}
         </aside>
         <section className="editor">
-          <div className="tabs">
-            {fileNames.map((name) => (
-              <button
-                type="button"
-                key={name}
-                className={name === resolvedActiveFile ? 'active' : ''}
-                onClick={() => setActiveFile(name)}
-              >
-                {name}
-              </button>
-            ))}
-          </div>
           <div className="code-view">
+            {/* THE COMPLETE .ino IS THE PRIMARY WORKSPACE. Every discovered
+                section renders here, in document order, all the time — a
+                student reads the whole firmware for context and clicks a
+                section directly in place to open it. LOCKED/EXPLORE text
+                (and any EDITABLE section that isn't the one currently open)
+                is always the plain, current text from `state.files`; only
+                the OPEN EDITABLE section swaps its own body for the editing
+                surface below, so the rest of the file never disappears
+                around it. FIRMWARE SECTIONS in the left column still calls
+                the same `openSection`, so it stays a valid quick-jump list. */}
+            <p className="file-active">{resolvedActiveFile || 'connecting…'}</p>
             {activeSegments.length === 0 ? (
               <p className="muted-note">Loading firmware…</p>
-            ) : isFullEditorFile ? (
-              // TEMPORARY PHASE 1 POC — see the isFullEditorFile comment
-              // above: the whole file is one editable region. Blockly is
-              // one more way to author that region's text, alongside the
-              // plain CODE textarea — see `handleBlocklyCodeChange` above:
-              // both write into the same `pendingEdit` draft, so nothing
-              // downstream (Save/Compile/Flash) needs to know which one the
-              // student used. Both panels stay mounted (toggled via
-              // `hidden`) so switching tabs never loses the Blockly
-              // workspace's blocks.
-              <div className="code-workspace">
-                <div className="editor-mode-tabs" role="tablist" aria-label="Programming view">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={editorMode === 'blocks'}
-                    className={editorMode === 'blocks' ? 'active' : ''}
-                    onClick={() => setEditorMode('blocks')}
-                  >
-                    BLOCKS
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={editorMode === 'code'}
-                    className={editorMode === 'code' ? 'active' : ''}
-                    onClick={() => setEditorMode('code')}
-                  >
-                    CODE
-                  </button>
-                </div>
-                <div className="blockly-panel" hidden={editorMode !== 'blocks'}>
-                  <BlocklyWorkspace onCodeChange={handleBlocklyCodeChange} />
-                </div>
-                <textarea
-                  className="code-editor-full"
-                  hidden={editorMode !== 'code'}
-                  spellCheck={false}
-                  value={draft}
-                  onChange={(e) => setPendingEdit(e.target.value)}
-                />
-              </div>
             ) : (
-              activeSegments.map((segment) =>
-                segment.kind === 'locked' ? (
-                  <pre key={segment.region_id} className="code-segment locked" spellCheck={false}>
-                    {segment.text}
-                  </pre>
-                ) : (
-                  <div key={segment.region_id} className="code-segment editable">
-                    <div className="region-banner">STUDENT SECURITY REGION — {segment.region_id}</div>
-                    <textarea
-                      spellCheck={false}
-                      value={draft}
-                      onChange={(e) => setPendingEdit(e.target.value)}
-                    />
+              activeSegments.map((segment) => {
+                const isSelected = segment.region_id === selectedSectionId
+                const isOpenEditable = isSelected && segment.policy === 'editable'
+                const noBlocksYet = isOpenEditable && sectionData && !sectionLoading && !sectionData.representable
+                return (
+                  <div
+                    key={segment.region_id}
+                    className={`code-section ${isSelected ? 'selected' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className={`section-header ${isSelected ? 'active' : ''}`}
+                      onClick={() => openSection(segment.region_id)}
+                    >
+                      <span className={`policy-badge ${segment.policy}`}>
+                        {POLICY_LABEL[segment.policy] || segment.policy}
+                      </span>
+                      {segment.region_id}
+                      {noBlocksYet && <em>the toolbox has no blocks for this construct yet</em>}
+                    </button>
+                    {!isOpenEditable ? (
+                      // LOCKED, EXPLORE, or an EDITABLE section that is not
+                      // the one currently open — no round trip needed, this
+                      // text is already current.
+                      <pre className="code-segment locked">{segment.text}</pre>
+                    ) : sectionLoading || !sectionData ? (
+                      <p className="muted-note">Loading section…</p>
+                    ) : sectionData.representable ? (
+                      // THE INTENDED EDITING PATH. Blockly is the source of
+                      // truth for this section — the generated C++ is an
+                      // output of it, never something typed here.
+                      // `key={selectedSectionId}` remounts the canvas (and
+                      // reloads `sectionData.workspace`) whenever the
+                      // student opens a different section; see
+                      // BlocklyWorkspace.jsx.
+                      <>
+                        <div className="blockly-panel">
+                          <BlocklyWorkspace
+                            key={selectedSectionId}
+                            initialWorkspaceState={sectionData.workspace}
+                            onWorkspaceChange={setSectionPendingWorkspace}
+                          />
+                        </div>
+                        {sectionPreserved.length > 0 && (
+                          <div className="preserved-panel">
+                            <div className="preserved-header">
+                              <h4>NOT YET BLOCK-EDITABLE</h4>
+                              <button
+                                type="button"
+                                className="btn-outline small"
+                                onClick={() => setSectionPreserved([])}
+                              >
+                                CLEAR
+                              </button>
+                            </div>
+                            <p className="muted-note">
+                              The toolbox cannot draw this code as blocks yet. It stays part of
+                              this section — untouched by anything you build above — unless you
+                              clear it.
+                            </p>
+                            {sectionPreserved.map((fragment, i) => (
+                              <pre key={i} className="code-segment locked small">
+                                {fragment.text}
+                              </pre>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      // Understood by the backend as EDITABLE, but the
+                      // toolbox has no vocabulary for this construct yet —
+                      // refused as a block edit, never faked. The legacy
+                      // raw-text path stays available so the section is
+                      // still completable meanwhile; it is not offered for
+                      // any section the toolbox CAN draw.
+                      <>
+                        {!legacyTextOpen ? (
+                          <>
+                            <pre className="code-segment locked">{segment.text}</pre>
+                            <button
+                              type="button"
+                              className="btn-outline"
+                              onClick={() => {
+                                setLegacyTextOpen(true)
+                                setLegacyDraft(segment.text || '')
+                              }}
+                            >
+                              EDIT AS TEXT (LEGACY)
+                            </button>
+                          </>
+                        ) : (
+                          <textarea
+                            className="code-editor-full"
+                            spellCheck={false}
+                            value={legacyDraft ?? ''}
+                            onChange={(e) => setLegacyDraft(e.target.value)}
+                          />
+                        )}
+                      </>
+                    )}
                   </div>
-                ),
-              )
+                )
+              })
             )}
           </div>
           {/* Every action button (SAVE/COMPILE/FLASH/validation/security
@@ -714,15 +982,11 @@ export default function BuildMode({ onBack, onMenu }) {
             <div className={`console-out ${protocolError ? 'warn' : ''}`}>
               {protocolError
                 ? `✗ ${protocolError}`
-                : draftDirty
+                : sectionDirty
                   ? '● unsaved edits — not yet sent to the backend'
                   : state?.dirty
-                    ? isFullEditorFile
-                      ? '● source saved — differs from the original firmware'
-                      : '● security region saved — differs from the original firmware'
-                    : isFullEditorFile
-                      ? 'Source matches the original firmware.'
-                      : 'Security region matches the original firmware.'}
+                    ? '● firmware saved — differs from the original firmware'
+                    : 'Firmware matches the original firmware.'}
             </div>
           </div>
           {/* Flash output stays inline (real Arduino CLI/esptool upload
@@ -742,35 +1006,23 @@ export default function BuildMode({ onBack, onMenu }) {
             </div>
             <pre className="flash-terminal-body">{flashTerminalText}</pre>
           </div>
+          {/* Validation Terminal — same block as the Flash Terminal above,
+              reusing its `.flash-terminal` styling verbatim (Phase B7): real
+              backend validator output, never simulated, in the same compact
+              bounded scrollable shape. `ValidationStatus` only ever carries
+              running/succeeded/failed, which is exactly the subset of
+              `.flash-terminal`'s status modifiers this needs. */}
+          <div className={`flash-terminal ${validationBannerStatus}`}>
+            <div className="flash-terminal-header">
+              <span>VALIDATION TERMINAL</span>
+              <span className="status-pill">
+                {validationPending ? 'VALIDATING…' : BUILD_STATUS_LABEL[validationStatus] || validationStatus}
+              </span>
+            </div>
+            <pre className="flash-terminal-body">{validationTerminalText}</pre>
+          </div>
         </section>
         <aside className="side-col">
-          {/* TEMPORARY PHASE 1 POC: nothing here is locked (see
-              isFullEditorProject above), so there is no editing restriction
-              left for a region map to usefully show — it is omitted rather
-              than displayed as an all-editable no-op. Reappears on its own
-              once a project brings back a real locked/editable split. */}
-          {!isFullEditorProject && (
-            <section className="panel dashed">
-              <h3>REGION MAP</h3>
-              {fileNames.length === 0 ? (
-                <p className="muted-note">No workspace loaded yet.</p>
-              ) : (
-                fileNames.map((name) => (
-                  <div key={name} className="region-map-file">
-                    <p className="file-active">{name}</p>
-                    <ul className="region-map-list">
-                      {files[name].segments.map((segment) => (
-                        <li key={segment.region_id}>
-                          <span className={`region-badge ${segment.kind}`}>{segment.kind}</span>
-                          {segment.region_id}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))
-              )}
-            </section>
-          )}
           <section className="panel">
             <h3>ACTIVITY LOG</h3>
             {/* Bounded + independently scrollable (see .activity-log-scroll

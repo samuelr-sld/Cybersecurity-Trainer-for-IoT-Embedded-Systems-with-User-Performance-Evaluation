@@ -14,7 +14,11 @@ the LED Blink pipeline-proof project as of Phase 1 (`app/build/blink.py`);
 see `app/build/__init__.py::create_default_workspace`. Phase 3B starts actually setting
 `compile_status` and `compile_output`; Phase 3C adds `flash_status`,
 `flash_output`, and the retained `compiled_artifact` a flash uploads.
-`validation_status` remains `NOT_STARTED` — nothing validates anything yet.
+Phase B7 finally drives `validation_status` for real, and adds the
+`validation` plan (who checks this session's remediation) and
+`validation_result` (what they found) beside it — though every panel shipped
+today resolves to a validator that declines to run, so an ordinary session
+still ends at `NOT_STARTED`. See `app/build/validation/`.
 This module also adds `hardware_status`/`hardware_board_name`/
 `hardware_port` — a live ESP32-presence check that is independent of any
 flash attempt, set by `BuildService.detect_hardware` (and, incidentally, by
@@ -52,7 +56,13 @@ from app.build import (
 )
 from app.build.compiler import CompiledArtifact, CompileOutcome
 from app.build.flasher import FlashOutcome
+from app.build.provisioning import ProvisioningPlan, default_provisioning_plan
 from app.build.recorder import BuildEventRecorder
+from app.build.validation import (
+    ValidationPlan,
+    ValidationResult,
+    default_validation_plan,
+)
 from app.hardware import DeviceState
 
 
@@ -120,6 +130,39 @@ class BuildSession:
     #: The Phase 2E.3 panel-resolution seam — see the module docstring.
     #: Captured once at session creation, never re-resolved mid-session.
     panel_id: str | None = None
+    #: Whether `workspace` names a real activity a student may edit, compile,
+    #: flash or validate. Set once at session creation from
+    #: `BuildProjectSelection.has_active_project` (see
+    #: `app/build_project_selection.py`) — False exactly when no panel
+    #: resolved to a real firmware and the session's workspace is the inert
+    #: `create_no_device_workspace()` placeholder. Defaults True so every
+    #: existing direct construction (most tests, which never go through the
+    #: connection lifecycle) is unaffected. `app/build/service.py` checks this
+    #: before honouring an edit/compile/flash/validate request; hardware
+    #: detection is deliberately NOT gated by it, so the header keeps polling
+    #: truthfully with no activity loaded.
+    has_active_project: bool = True
+    #: Who validates this session's remediation, and against what declared
+    #: requirement (Phase B7). THE SAME INJECTION `workspace` uses: the
+    #: connection lifecycle chooses it from the attached panel's package via
+    #: `app/build_validation_selection.py`, so this module stays as ignorant
+    #: of panels and packages as it already was. The default is the honest
+    #: one — a validator that runs nothing and says why (see
+    #: `app/build/validation/strategy.py`).
+    validation: ValidationPlan = field(default_factory=default_validation_plan)
+    #: Who provisions this session's compile-time firmware copy with real,
+    #: non-committed credentials, if anyone needs to (Option A). THE SAME KIND
+    #: OF INJECTION `validation` is: chosen from the attached panel's package
+    #: via `app/build_provisioning_selection.py`, so this module stays as
+    #: ignorant of panels and secrets as it already was. The default is a
+    #: no-op — the materialized sketch compiles exactly as it is, which is
+    #: right for every panel that declares no provisioning strategy.
+    compile_provisioning: ProvisioningPlan = field(default_factory=default_provisioning_plan)
+    #: The verdict of this session's most recent completed validation, or
+    #: None before one has run. Set only by `BuildService`; distinct from
+    #: `validation_status`, which collapses four outcomes into the wire's
+    #: four-member vocabulary and so cannot say NOT_RUN from ERROR.
+    validation_result: ValidationResult | None = None
     #: This session's own attempt recorder (Phase 2E.3) — see the module
     #: docstring. Built in `__post_init__`, not a `default_factory`: unlike
     #: `workspace`, it needs this session's own id/created_at/panel_id.
@@ -157,6 +200,11 @@ class BuildSession:
         """A JSON-serialisable view of the whole session for the `state` frame."""
         data = self.workspace.snapshot()
         data["dirty"] = self.dirty
+        # No-device correction. False means `data["project"]` is the inert
+        # placeholder (`create_no_device_workspace()`), never a real activity
+        # — the frontend reads this, not the project id, to decide whether to
+        # render the IDE at all.
+        data["has_active_project"] = self.has_active_project
         data["compile_status"] = self.compile_status.value
         data["flash_status"] = self.flash_status.value
         data["validation_status"] = self.validation_status.value
@@ -202,6 +250,34 @@ class BuildSession:
                 "port": self.flash_output.port,
             }
         )
+        # Phase B7. Additive, and None until a validation has actually run —
+        # `validation_status` alone cannot distinguish "the check ran and the
+        # fix does not work" from "the check itself broke", and a client
+        # showing a verdict must be able to tell those apart.
+        data["validation_output"] = (
+            None if self.validation_result is None else self.validation_result.snapshot()
+        )
+        # Phase 1.2. The plan's `RemediationSpec` (chosen at connect by
+        # `app/build_validation_selection.py`, same as `self.validation`
+        # itself) already existed for `validate_workspace` to read — this is
+        # the first time its plain-text guidance is also sent to the client,
+        # so a student can see what a fix must achieve before running
+        # validation. `None` for the four panels that declare no remediation
+        # activity yet (`RemediationSpec.declared` is False), the same honest
+        # "not yet provisioned" state the plan itself carries. Only the prose
+        # fields are sent — never `criterion` (broker/topic/probe detail the
+        # scenario intends the student to recover through Hack Mode, not be
+        # handed here).
+        remediation = self.validation.remediation
+        data["remediation"] = (
+            None
+            if remediation is None or not remediation.declared
+            else {
+                "vulnerability": remediation.vulnerability,
+                "remediation_goal": remediation.remediation_goal,
+                "validation_requirement": remediation.validation_requirement,
+            }
+        )
         return data
 
 
@@ -218,7 +294,12 @@ class BuildSessionManager:
         self._lock = asyncio.Lock()
 
     async def create(
-        self, panel_id: str | None = None, workspace: BuildWorkspace | None = None
+        self,
+        panel_id: str | None = None,
+        workspace: BuildWorkspace | None = None,
+        validation: ValidationPlan | None = None,
+        provisioning: ProvisioningPlan | None = None,
+        has_active_project: bool = True,
     ) -> BuildSession:
         """Create and register a session with a fresh unique id.
 
@@ -241,6 +322,19 @@ class BuildSessionManager:
         (every existing caller and test) falls back to
         `create_default_workspace()`, the long-standing default.
 
+        `validation` is the THIRD injection of the same kind, added in Phase
+        B7 for who validates this session's remediation. It is chosen off the
+        very same panel resolution (`app/build_validation_selection.py`), and
+        omitting it falls back to `default_validation_plan()` — a validator
+        that runs nothing and says why.
+
+        `provisioning` is the FOURTH injection of the same kind (Option A):
+        who injects real, non-committed credentials into this session's
+        compile-time firmware copy, chosen off the same panel resolution
+        (`app/build_provisioning_selection.py`). Omitting it falls back to
+        `default_provisioning_plan()` — a no-op, which is what every panel
+        without a registered provisioning strategy gets.
+
         The recorder is started here, at connect, for the same reason
         `HackEventRecorder.start()` is: `started_at` is TTR's anchor, so it
         must mean "opened Build Mode", not "ran the first compile".
@@ -248,7 +342,10 @@ class BuildSessionManager:
         session = BuildSession(
             session_id=str(uuid.uuid4()),
             panel_id=panel_id,
+            has_active_project=has_active_project,
             **({} if workspace is None else {"workspace": workspace}),
+            **({} if validation is None else {"validation": validation}),
+            **({} if provisioning is None else {"compile_provisioning": provisioning}),
         )
         session.recorder.start()
         async with self._lock:

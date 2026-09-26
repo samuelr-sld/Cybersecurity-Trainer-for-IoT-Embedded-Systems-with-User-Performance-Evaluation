@@ -5,3 +5,10 @@ uvicorn[standard]==0.52.4
 # (app/hardware/serial_transport.py). Imported lazily, so a backend
 # without it still starts — serial commands report it as unavailable.
 pyserial==3.5
+# Phase B8: the evidence channel Panel 1's remediation check observes the
+# board through (app/build/validation/mqtt_evidence.py) — an authenticated
+# session against the training Raspberry Pi's local Mosquitto broker.
+# Imported lazily for exactly the reason pyserial is: a backend without it
+# still starts, and the validator reports itself UNAVAILABLE rather than
+# crashing a Build Mode session. The whole test suite runs without it.
+paho-mqtt==2.1.0

@@ -141,8 +141,107 @@
   },
   "remediation": {
     "vulnerability": "An authenticated MQTT client can issue motor-control commands without per-command authorization.",
-    "remediation_goal": "Enforce per-command authorization for motor-control commands.",
-    "validation_requirement": "The remediated firmware must reject a motor-control command from a client that is not authorized to issue that specific command, while continuing to accept a properly authorized command."
+    "remediation_goal": "Enforce per-command authorization in applyCommand(): obey a START or STOP only when the message carries the panel's provisioned command-authorization token, and ignore it otherwise. Broker authentication, the broker address, the topics, the GPIO assignments and the local push-buttons all stay exactly as they are — the missing control is authorization, not authentication.",
+    "validation_requirement": "The remediated firmware must reject a motor-control command from a client that is not authorized to issue that specific command, while continuing to accept a properly authorized command. A command is authorized when its payload is the command word, one space, and the provisioned token (for example 'START PANEL1-CMD-AUTH-K7'); a bare 'START' or a command carrying a wrong token must be ignored and must leave the motor state unchanged. Two facts about the surrounding code matter: onMessage() trims and upper-cases the payload before applyCommand() sees it, so the token is compared in upper case; and the global declarations are read-only, so the expected token is declared inside applyCommand() itself rather than added to the configuration block at the top of the file.",
+    "security_section_id": "helper_applyCommand",
+    "editable_section_ids": [
+      "helper_setMotorOutputs",
+      "helper_chirpBuzzer",
+      "helper_applyMotorState",
+      "helper_motorStart",
+      "helper_motorStop",
+      "helper_applyCommand",
+      "callback_onMessage",
+      "helper_pollButtons",
+      "helper_ensureConnected",
+      "setup",
+      "loop"
+    ],
+    "explore_section_ids": [
+      "global",
+      "global_3"
+    ],
+    "criterion": {
+      "criterion_id": "per-command-authorization",
+      "broker_host": "192.168.50.1",
+      "broker_port": 1883,
+      "control_topic": "cybertrainer/smart-home/motor/control",
+      "state_topic": "cybertrainer/smart-home/motor/state",
+      "accepted_commands": ["START", "STOP"],
+      "observed_states": ["RUNNING", "STOPPED"],
+      "authorized": {
+        "identity_id": "authorized-controller",
+        "username": "panel1-validator",
+        "password_env": "TRAINER_LAB_PANEL1_VALIDATOR_PASSWORD"
+      },
+      "unauthorized": {
+        "identity_id": "unauthorized-client",
+        "username": "panel1-guest",
+        "password_env": "TRAINER_LAB_PANEL1_GUEST_PASSWORD"
+      },
+      "token_env": "TRAINER_LAB_PANEL1_COMMAND_TOKEN",
+      "token_separator": " ",
+      "invalid_token": "WRONG-TOKEN-0000",
+      "evidence": "mqtt_state_topic",
+      "settle_seconds": 2.0,
+      "response_timeout_seconds": 5.0,
+      "probes": [
+        {
+          "probe_id": "baseline-stop",
+          "description": "An authorized STOP carrying the provisioned token puts the actuator in a known state, and must still be obeyed.",
+          "authorization": "authorized",
+          "command": "STOP",
+          "token": "valid",
+          "expect_accepted": true,
+          "expect_state": "STOPPED"
+        },
+        {
+          "probe_id": "forged-start-no-token",
+          "description": "A broker-authenticated client with no command authorization publishes a bare START; a remediated device must ignore it and stay stopped.",
+          "authorization": "unauthorized",
+          "command": "START",
+          "token": "none",
+          "expect_accepted": false,
+          "expect_state": "STOPPED"
+        },
+        {
+          "probe_id": "forged-start-wrong-token",
+          "description": "The same client publishes START with a well-formed but wrong token; a remediated device must ignore it, proving the check is against the token and not merely against a suffix.",
+          "authorization": "unauthorized",
+          "command": "START",
+          "token": "invalid",
+          "expect_accepted": false,
+          "expect_state": "STOPPED"
+        },
+        {
+          "probe_id": "authorized-start",
+          "description": "An authorized START carrying the provisioned token must still be obeyed, so the fix does not break legitimate control.",
+          "authorization": "authorized",
+          "command": "START",
+          "token": "valid",
+          "expect_accepted": true,
+          "expect_state": "RUNNING"
+        },
+        {
+          "probe_id": "forged-stop-running",
+          "description": "With the motor running, the unauthorized client publishes a bare STOP; a remediated device must ignore it and keep running, proving rejection in both directions.",
+          "authorization": "unauthorized",
+          "command": "STOP",
+          "token": "none",
+          "expect_accepted": false,
+          "expect_state": "RUNNING"
+        },
+        {
+          "probe_id": "restore-stop",
+          "description": "An authorized STOP returns the panel to its resting state after the check.",
+          "authorization": "authorized",
+          "command": "STOP",
+          "token": "valid",
+          "expect_accepted": true,
+          "expect_state": "STOPPED"
+        }
+      ]
+    }
   },
   "parameters": {
     "device_role": "smart-home-actuator",

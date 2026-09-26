@@ -93,6 +93,13 @@ MAX_BUILD_REGION_SOURCE_CHARS: int = 16384
 # identify a file/region by name, never by arbitrary length content.
 MAX_BUILD_IDENTIFIER_CHARS: int = 128
 
+# Largest accepted `preserved` fragment list on an `edit_section_blocks`
+# frame (Phase B8). One entry per body position the toolbox cannot draw, so a
+# real section has a handful; the whole frame is still bounded by
+# `MAX_BUILD_MESSAGE_CHARS` above, and this caps the list's LENGTH so a
+# payload of many tiny entries is rejected by count before it is walked.
+MAX_BUILD_PRESERVED_FRAGMENTS: int = 256
+
 # --- Build Mode compilation (Phase 3B) -------------------------------------
 #
 # Real `arduino-cli compile` invocation — see app/build/compiler.py.
@@ -301,6 +308,41 @@ PANEL_PACKAGE_ROOT: str = os.getenv(
     "TRAINER_PANEL_PACKAGE_ROOT",
     str(pathlib.Path(__file__).resolve().parent.parent / "panels"),
 )
+
+# --- provisioned lab fixtures (Phase B8) -----------------------------------
+#
+# Remediation validation needs real credentials to talk to the real training
+# broker, and a repository must never hold one. A panel package therefore
+# declares only the NAME of the environment variable a deployment provisions
+# each value into (see app/panels/models.py::LabIdentity), and this is the one
+# function that reads it.
+#
+# WHY IT LIVES HERE. `app/build/validation/` is statically forbidden from
+# importing `os` (tests/test_build_pipeline_b7.py), which is what keeps a
+# validator from reaching into the process environment or the filesystem on
+# its own. Routing the one legitimate read through this module preserves that:
+# a validator asks for a named fixture and gets a string, and it cannot ask
+# for anything else.
+#
+# THE PREFIX IS THE ALLOWLIST. Only TRAINER_LAB_* names resolve, so even a
+# mis-authored package cannot name an arbitrary variable of the process it
+# runs in (AWS_SECRET_ACCESS_KEY, PATH, ...). An unset or ineligible name
+# returns "", and every caller must treat that as "not provisioned" and
+# report the check UNAVAILABLE rather than proceeding with a blank secret.
+LAB_SECRET_PREFIX = "TRAINER_LAB_"
+
+
+def lab_secret(name: str) -> str:
+    """The provisioned value of one TRAINER_LAB_* fixture, or "" if there is none.
+
+    Never raises and never guesses: an unknown, ineligible or unset name is
+    an empty string, which is the caller's signal that this deployment cannot
+    run the check.
+    """
+    if not isinstance(name, str) or not name.startswith(LAB_SECRET_PREFIX):
+        return ""
+    return os.getenv(name, "")
+
 
 # Bounded upload timeout, in seconds. An ESP32 upload over a 921600-baud
 # USB-UART link commonly takes 15-40s for a sketch this size; this leaves

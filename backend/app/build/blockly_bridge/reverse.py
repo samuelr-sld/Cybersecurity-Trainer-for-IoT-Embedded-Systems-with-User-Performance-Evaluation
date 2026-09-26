@@ -66,7 +66,6 @@ from app.build.blockly_bridge.bindings import (
 from app.build.blockly_bridge.errors import (
     InvalidBlocklyFieldValueError,
     InvalidBlocklyWorkspaceError,
-    MissingBlockSourceError,
     MissingBlocklyFieldError,
     UnknownBlocklyBlockError,
     UnrepresentableOperationError,
@@ -80,6 +79,10 @@ from app.build.blockly_bridge.models import (
     PreservedSource,
 )
 from app.build.semantic import (
+    CallStatement,
+    ComparisonValue,
+    ConditionalStatement,
+    LiteralValue,
     OperationForm,
     OperationStatement,
     SemanticArgument,
@@ -88,10 +91,17 @@ from app.build.semantic import (
     SemanticProgram,
     SemanticSection,
     SemanticStatement,
+    SemanticType,
+    SymbolValue,
     UnsupportedReason,
     UnsupportedStatement,
     default_semantic_operations,
 )
+
+#: The same two block ids `adapter.py` names — see that module's header for
+#: why neither routes through the operation registry.
+FUNCTIONS_CALL_EXISTING_BLOCK_ID = "functions.call_existing"
+LOGIC_IF_EQUALS_BLOCK_ID = "logic.if_equals"
 
 #: What a fragment B4 preserved for its own reason means to the IR.
 #:
@@ -211,6 +221,12 @@ def _section(
             _statement(item, section.section_id, catalog, bindings, operations)
             for item in block.body
         ),
+        # The exact inverse of `adapter.py`'s `container_signature=` — present
+        # only for an in-process `BlocklyBlock` (never for one parsed off the
+        # wire by `workspace_state.py`, which carries no such field). A REAL
+        # section edit still needs `section_blockly.py::program_with_section`
+        # to copy the CURRENT section's signature across for that reason.
+        signature=block.container_signature,
     )
 
 
@@ -231,12 +247,18 @@ def _statement(
         raise InvalidBlocklyWorkspaceError(f"{section_id}: not a body item: {item!r}")
 
     definition = block_definition_for_type(item.block_type, catalog)
+    if definition.block_id == FUNCTIONS_CALL_EXISTING_BLOCK_ID:
+        return _call_existing_statement(item, definition, section_id)
+    if definition.block_id == LOGIC_IF_EQUALS_BLOCK_ID:
+        return _if_equals_statement(item, definition, section_id, catalog, bindings, operations)
+
     operation = _operation_of(definition, operations)
     _require_form(definition, operation, BlockKind.STATEMENT, OperationForm.STATEMENT)
     if item.body or item.body_input is not None:
-        # No implemented block nests a body inside a statement today. Reading
-        # one as if it did would invent a structure the catalog does not
-        # declare; the first block that nests one declares it there first.
+        # No OTHER implemented block nests a body inside a statement — the
+        # two above are handled first, above. Reading one as if it did would
+        # invent a structure the catalog does not declare for it; the first
+        # block that nests one declares it there first.
         raise UnsupportedBlocklyStructureError(
             f"{item.block_type}: {definition.block_id} declares no statement body, "
             "but this block carries one"
@@ -252,8 +274,102 @@ def _statement(
     return OperationStatement(
         operation=operation,
         arguments=_arguments(item, operation, fields),
-        text=_source_of(item),
+        # Provenance, passed straight through in whichever state it is in. A
+        # block read from firmware carries the source B4 recorded; a block
+        # authored in the editor carries none, and the statement it means has
+        # none either. Writing one HERE would be generating C++ from a
+        # workspace, which is still not this module's job — the difference
+        # since B6 is that a source-less statement is now a complete, usable
+        # statement rather than a dead end, because the generator writes its
+        # C++ from its meaning. See `app/build/semantic/generator.py`.
+        text=item.source_text,
     )
+
+
+def _call_existing_statement(
+    item: BlocklyBlock, definition: BlockDefinition, section_id: str
+) -> CallStatement:
+    """A `functions.call_existing` block, read back as a `CallStatement`.
+
+    Bypasses `FieldBindingTable`/`_arguments`, which are shaped around a
+    fixed-arity platform operation; this block has exactly one field, NAME,
+    holding an arbitrary function name, not an operand of a registered
+    operation.
+    """
+    if item.body or item.body_input is not None:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: {definition.block_id} declares no statement body, "
+            "but this block carries one"
+        )
+    fields = {field.name: field.value for field in item.fields}
+    name = fields.pop("NAME", None)
+    if name is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: no NAME field, which {definition.block_id} needs"
+        )
+    if fields:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: field(s) {sorted(fields)} belong to no operand of "
+            f"{definition.block_id}"
+        )
+    try:
+        return CallStatement(function_name=name, text=item.source_text)
+    except ValueError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}.NAME: {error}") from error
+
+
+def _if_equals_statement(
+    item: BlocklyBlock,
+    definition: BlockDefinition,
+    section_id: str,
+    catalog: BlockCatalog,
+    bindings: FieldBindingTable,
+    operations: SemanticOperationRegistry,
+) -> ConditionalStatement:
+    """A `logic.if_equals` block, read back as a `ConditionalStatement`.
+
+    LEFT is always read as a named reference and RIGHT as a fixed text value
+    — the exact inverse of `adapter.py::_if_equals_block`'s narrow shape, not
+    a general expression reader. The body is read through the SAME
+    `_statement` this function is itself a case of, so a nested `if_equals`
+    or `call_existing` block inside this one's DO works without either
+    function knowing the other exists.
+    """
+    fields = {field.name: field.value for field in item.fields}
+    left = fields.pop("LEFT", None)
+    operator = fields.pop("OPERATOR", None)
+    right = fields.pop("RIGHT", None)
+    if left is None or operator is None or right is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: needs LEFT, OPERATOR and RIGHT fields, which "
+            f"{definition.block_id} declares"
+        )
+    if fields:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: field(s) {sorted(fields)} belong to no operand of "
+            f"{definition.block_id}"
+        )
+    if operator not in ("==", "!="):
+        raise InvalidBlocklyFieldValueError(
+            f"{item.block_type}.OPERATOR: {operator!r} is not '==' or '!='"
+        )
+    try:
+        condition = ComparisonValue(
+            left=SymbolValue(name=left),
+            operator=operator,
+            right=LiteralValue(value=right, value_type=SemanticType.TEXT),
+        )
+    except ValueError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
+
+    _require_body_input(item, definition)
+    body = tuple(
+        _statement(child, section_id, catalog, bindings, operations) for child in item.body
+    )
+    try:
+        return ConditionalStatement(condition=condition, body=body, text=item.source_text)
+    except ValueError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
 
 
 def _arguments(
@@ -296,17 +412,6 @@ def _arguments(
             f"{operation.operation_id}"
         )
     return tuple(arguments)
-
-
-def _source_of(block: BlocklyBlock) -> str:
-    """The source this block was built from — see `MissingBlockSourceError`."""
-    if block.source_text is None:
-        raise MissingBlockSourceError(
-            f"{block.block_type}: this block records no source text, so the statement it "
-            "means has none — writing one would be generating C++ (B6), not reading a "
-            "workspace"
-        )
-    return block.source_text
 
 
 def _unsupported(item: PreservedSource, section_id: str) -> UnsupportedStatement:
