@@ -231,6 +231,10 @@ def test_the_default_registry_declares_exactly_the_supported_subset():
         GPIO_PIN_MODE,
         GPIO_DIGITAL_WRITE,
         TIME_DELAY,
+        # The three VALUE operations Panel 1's token parser needs.
+        "text.index_of",
+        "text.substring",
+        "text.length",
     }
 
 
@@ -496,7 +500,10 @@ def test_delay_with_the_wrong_argument_count_is_carried_verbatim():
     [
         ("Serial.begin(115200);", UnsupportedReason.NOT_A_CALL),
         ("client.setCallback(onMessage);", UnsupportedReason.NOT_A_CALL),
-        ("int counter = 0;", UnsupportedReason.NOT_A_CALL),
+        # An initialized `int counter = 0;` is a `VariableDeclaration` now;
+        # an uninitialized or qualified one is still carried verbatim.
+        ("int counter;", UnsupportedReason.NOT_A_CALL),
+        ("static int counter = 0;", UnsupportedReason.NOT_A_CALL),
         ("motorRunning = true;", UnsupportedReason.NOT_A_CALL),
         ("if (ready) return;", UnsupportedReason.NOT_A_CALL),
         ("pinMode(2, OUTPUT)", UnsupportedReason.NOT_A_CALL),

@@ -56,6 +56,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterable
 
+from app.build.blockly_bridge import BlocklySection
 from app.build.models import BuildProject, FileSegment, FirmwareFile, RegionKind
 from app.build.program_source import (
     ProgramSourceError,
@@ -97,6 +98,75 @@ class ProgramApplyError(BuildWorkspaceError):
     rejected Blockly edit reaches the student the same way a rejected region
     edit does.
     """
+
+
+class SecurityRegionOwnershipError(BuildWorkspaceError):
+    """A Blockly edit to the security region still carries opaque C++.
+
+    `BuildProject.security_region_id` names the one region a scenario's whole
+    remediation lives in. A construct B3 never understood at all (an
+    `UnsupportedStatement`, carried as a `PreservedSource` whose
+    `understood_by_the_ir` is False — see `app/build/blockly_bridge/models.py`)
+    can hide ANYTHING, including the very vulnerability the section exists to
+    fix: the analyzer represents only the first `if` of an `if`/`else if`
+    chain as a block (see `app/build/semantic/analyzer.py`'s
+    `ConditionalStatement` docstring), so a firmware's original unauthenticated
+    branch can sit right beside a student's newly authored, fully-authorized
+    one and never appear on the canvas at all.
+
+    So `apply_section_blockly` refuses ANY such fragment the moment the
+    security region is edited as blocks — see
+    `_opaque_preserved_records` — rather than silently splicing it back in
+    beside whatever the student drew. A fragment the IR DID understand and
+    only Blockly could not draw (`understood_by_the_ir` is True — a named
+    constant in a numeric field, for instance) is unaffected: the IR knows
+    exactly what it means, so keeping it is not the same risk.
+
+    This is full ownership, not a ban on preserved material in general: every
+    OTHER editable section keeps carrying arbitrary unsupported C++ through a
+    Blockly edit exactly as before (see `test_build_pipeline_b8.py`'s "every
+    other section is carried through untouched" guarantee) — only a project's
+    designated `security_region_id` takes on this stricter rule, and it does
+    so for whichever scenario names one, not only Panel 1's.
+
+    `update_region`'s text path is untouched: it always replaces a region's
+    WHOLE text, so there is no partial submission for anything to reattach to.
+    """
+
+
+def _opaque_preserved_texts(section: BlocklySection) -> tuple[str, ...]:
+    """The section's preserved fragments the semantic layer never understood.
+
+    `BlocklySection.records` already locates every preserved item wherever it
+    sits — inside a container's body or, for an unrepresentable section,
+    beside it — so this needs no knowledge of which shape `section` is in.
+    `understood_by_the_ir` is the one distinction that matters here (see
+    `SecurityRegionOwnershipError`): False means B3 itself never parsed the
+    fragment, so nothing downstream knows what it does.
+    """
+    return tuple(
+        record.source.text
+        for record in section.records
+        if not record.source.understood_by_the_ir
+    )
+
+
+def _require_full_ownership(path: str, submitted: BlocklySection) -> None:
+    """Refuse a security-region submission that still hides opaque C++.
+
+    Raises `SecurityRegionOwnershipError` naming every offending fragment, so
+    a rejection tells a student exactly what still needs to become blocks —
+    rather than a bare "no" or, worse, silently keeping the fragment in place.
+    """
+    opaque = _opaque_preserved_texts(submitted)
+    if not opaque:
+        return
+    listed = "; ".join(opaque)
+    raise SecurityRegionOwnershipError(
+        f"{path}#{submitted.section_id}: this is the security region, so editing it as "
+        "blocks must take ownership of the whole function — it still carries source "
+        f"Blockly cannot represent and cannot silently keep: {listed}"
+    )
 
 
 class BuildWorkspace:
@@ -222,11 +292,14 @@ class BuildWorkspace:
         for a section nobody may write never gets parsed at all.
 
         Raises `RegionNotEditableError` for a section the student may not write,
-        `RegionNotFoundError` for one this file does not have, and
-        `ProgramApplyError` for a malformed workspace, a construct Blockly
-        cannot draw yet, or a result that would move a locked region or change
-        which sections exist — the last two re-proved independently by
-        `apply_program_to_file`, exactly as for `apply_program`.
+        `RegionNotFoundError` for one this file does not have,
+        `SecurityRegionOwnershipError` for a submission to
+        `BuildProject.security_region_id` that still carries opaque C++ (see
+        that error's docstring), and `ProgramApplyError` for a malformed
+        workspace, a construct Blockly cannot draw yet, or a result that would
+        move a locked region or change which sections exist — the last two
+        re-proved independently by `apply_program_to_file`, exactly as for
+        `apply_program`.
         """
         segment = self._segment(path, section_id)
         if segment.kind is not RegionKind.EDITABLE:
@@ -235,6 +308,13 @@ class BuildWorkspace:
             )
         try:
             submitted = section_from_state(section_id, workspace, preserved)
+        except SectionBlocklyError as error:
+            raise ProgramApplyError(f"{path}#{section_id}: {error}") from error
+
+        if section_id == self._project.security_region_id:
+            _require_full_ownership(path, submitted)
+
+        try:
             program = program_with_section(self.program(path), submitted)
         except SectionBlocklyError as error:
             raise ProgramApplyError(f"{path}#{section_id}: {error}") from error

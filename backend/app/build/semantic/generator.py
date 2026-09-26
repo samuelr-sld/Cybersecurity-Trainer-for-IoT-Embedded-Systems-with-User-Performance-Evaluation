@@ -61,9 +61,11 @@ from __future__ import annotations
 import math
 
 from app.build.semantic.emissions import (
+    CPP_DECLARATION_TYPES,
     CallEmission,
     CppEmissionTable,
     FunctionEmission,
+    MethodEmission,
     default_cpp_emissions,
 )
 from app.build.semantic.errors import (
@@ -73,17 +75,21 @@ from app.build.semantic.errors import (
     UnsupportedOperationError,
 )
 from app.build.semantic.models import (
+    ArithmeticValue,
     CallStatement,
     ComparisonValue,
     ConditionalStatement,
     LiteralValue,
     OperationStatement,
+    OperationValue,
+    ReturnStatement,
     SemanticProgram,
     SemanticSection,
     SemanticStatement,
     SemanticValue,
     SymbolValue,
     UnsupportedStatement,
+    VariableDeclaration,
 )
 from app.build.semantic.operations import (
     OperationForm,
@@ -239,10 +245,21 @@ def _statement(
         return _call(statement, operations, emissions)
     if isinstance(statement, CallStatement):
         return f"{statement.function_name}();"
+    if isinstance(statement, VariableDeclaration):
+        cpp_type = CPP_DECLARATION_TYPES.get(statement.value_type)
+        if cpp_type is None:
+            raise InvalidSemanticValueError(
+                f"{statement.name}: no C++ type is declared for a "
+                f"{statement.value_type.value} local"
+            )
+        initializer = _value(statement.initializer, statement.name, operations, emissions)
+        return f"{cpp_type} {statement.name} = {initializer};"
+    if isinstance(statement, ReturnStatement):
+        return "return;"
     raise InvalidContainerError(
         f"no generation rule for a {type(statement).__name__}; the IR states a statement "
-        "as an understood operation, a call, a conditional, or as source carried verbatim, "
-        "and nothing else"
+        "as an understood operation, a call, a conditional, a local declaration, a "
+        "return, or as source carried verbatim, and nothing else"
     )
 
 
@@ -260,20 +277,11 @@ def _if_lines(
     indents correctly without this function knowing anything about nesting.
     """
     inner = indent + INDENT
-    lines = [f"{indent}if ({_condition_text(statement.condition)}) {{"]
+    condition = _value(statement.condition, "condition", operations, emissions)
+    lines = [f"{indent}if ({condition}) {{"]
     lines.extend(_placed(item, inner, operations, emissions) for item in statement.body)
     lines.append(f"{indent}}}")
     return lines
-
-
-def _condition_text(value: SemanticValue) -> str:
-    """A condition as a C++ boolean expression: a comparison, or a bare value."""
-    if isinstance(value, ComparisonValue):
-        return (
-            f"{_value(value.left, 'condition')} {value.operator} "
-            f"{_value(value.right, 'condition')}"
-        )
-    return _value(value, "condition")
 
 
 def _call(
@@ -310,7 +318,9 @@ def _call(
                 f"{declared.operation_id}: no {parameter.name} operand to write, which the "
                 "registry declares for this operation"
             )
-        written.append(_value(value, f"{declared.operation_id}.{parameter.name}"))
+        written.append(
+            _value(value, f"{declared.operation_id}.{parameter.name}", operations, emissions)
+        )
     extra = sorted(
         argument.name
         for argument in statement.arguments
@@ -349,19 +359,105 @@ def _declared(
 # --- values -----------------------------------------------------------------
 
 
-def _value(value: SemanticValue, where: str) -> str:
-    """One operand as a C++ expression.
+def _value(
+    value: SemanticValue,
+    where: str,
+    operations: SemanticOperationRegistry,
+    emissions: CppEmissionTable,
+) -> str:
+    """One value as a C++ expression.
 
-    The two leaf forms the IR has, and nothing else. A symbol is written as
-    the NAME it is — `START_BUTTON` stays `START_BUTTON`, never 32, because
-    the IR does not resolve names and generating a resolved value would put a
-    number in firmware the student never wrote.
+    A symbol is written as the NAME it is — `START_BUTTON` stays
+    `START_BUTTON`, never 32, because the IR does not resolve names and
+    generating a resolved value would put a number in firmware the student
+    never wrote.
+
+    PARENTHESES FOLLOW THE TREE, NOT A PRECEDENCE TABLE. A compound value
+    nested where C++ could regroup it — a comparison inside anything, a sum on
+    the right of a sum, anything compound as a method's receiver — is wrapped,
+    so the text always parses back to the tree it was written from. A left-
+    nested sum (`a + b + c`) is the one case written bare, because C++'s left
+    associativity already groups it that way.
     """
     if isinstance(value, SymbolValue):
         return value.name
     if isinstance(value, LiteralValue):
         return _literal(value, where)
+    if isinstance(value, ComparisonValue):
+        left = _operand(value.left, where, operations, emissions, ComparisonValue)
+        right = _operand(value.right, where, operations, emissions, ComparisonValue)
+        return f"{left} {value.operator} {right}"
+    if isinstance(value, ArithmeticValue):
+        left = (
+            _value(value.left, where, operations, emissions)
+            if isinstance(value.left, ArithmeticValue)
+            else _operand(value.left, where, operations, emissions, ComparisonValue)
+        )
+        right = _operand(
+            value.right, where, operations, emissions, (ArithmeticValue, ComparisonValue)
+        )
+        return f"{left} {value.operator} {right}"
+    if isinstance(value, OperationValue):
+        return _method_call(value, where, operations, emissions)
     raise InvalidSemanticValueError(f"{where}: no C++ form for a {type(value).__name__}")
+
+
+def _operand(
+    value: SemanticValue,
+    where: str,
+    operations: SemanticOperationRegistry,
+    emissions: CppEmissionTable,
+    wrapped: type | tuple[type, ...],
+) -> str:
+    """`value`, parenthesized when it is one of the `wrapped` compound forms."""
+    text = _value(value, where, operations, emissions)
+    return f"({text})" if isinstance(value, wrapped) else text
+
+
+def _method_call(
+    value: OperationValue,
+    where: str,
+    operations: SemanticOperationRegistry,
+    emissions: CppEmissionTable,
+) -> str:
+    """A VALUE operation as `RECEIVER.method(ARGS)` — see `MethodEmission`.
+
+    Resolved through the registry exactly like a statement's call, never
+    trusted from the value that names it. A text LITERAL receiver is written
+    as `String("...")`: a bare C++ string literal is a `const char *`, which
+    has no `indexOf`, so writing it bare would be a compile error the student
+    never caused.
+    """
+    declared = _declared(value.operation, operations)
+    if declared.form is not OperationForm.VALUE:
+        raise InvalidContainerError(
+            f"{declared.operation_id}: the registry calls this a {declared.form.value}, "
+            "but it stands here as a value"
+        )
+    emission = emissions.require(declared.operation_id)
+    if not isinstance(emission, MethodEmission):
+        raise InvalidContainerError(
+            f"{declared.operation_id}: a value operation is written as a method, but its "
+            f"emission is a {type(emission).__name__}"
+        )
+    written: list[str] = []
+    for parameter in declared.parameters:
+        operand = value.value(parameter.name)
+        if operand is None:
+            raise MissingOperationArgumentError(
+                f"{declared.operation_id}: no {parameter.name} operand to write, which the "
+                "registry declares for this operation"
+            )
+        written.append(
+            _value(operand, f"{declared.operation_id}.{parameter.name}", operations, emissions)
+        )
+    receiver_value = value.value(declared.parameters[0].name)
+    receiver = written[0]
+    if isinstance(receiver_value, LiteralValue):
+        receiver = f"String({receiver})"
+    elif isinstance(receiver_value, (ArithmeticValue, ComparisonValue)):
+        receiver = f"({receiver})"
+    return f"{receiver}.{emission.method_name}({', '.join(written[1:])})"
 
 
 def _literal(value: LiteralValue, where: str) -> str:

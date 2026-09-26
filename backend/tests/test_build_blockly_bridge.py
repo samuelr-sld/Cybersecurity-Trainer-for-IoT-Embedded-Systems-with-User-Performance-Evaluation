@@ -745,9 +745,14 @@ def test_every_ir_operation_has_exactly_one_implemented_block():
 
 
 def test_the_bridge_binds_exactly_the_ir_operations_that_take_operands():
+    # Field bindings are for STATEMENT operations, whose operands are typed
+    # into fields. A VALUE operation's operands are value blocks in its
+    # catalog sockets, so it has no field binding at all.
+    from app.build.semantic import OperationForm
+
     expected = {
         operation.operation_id
-        for operation in default_semantic_operations.operations
+        for operation in default_semantic_operations.with_form(OperationForm.STATEMENT)
         if operation.parameters
     }
     assert set(default_field_bindings.operation_ids) == expected
@@ -806,8 +811,38 @@ def test_the_frontend_block_definitions_were_read_at_all():
         "function_implementation",
         "call_existing_function",
         "if_equals",
+        # The token-parsing hardening's generic value/statement blocks.
+        "variables_declare",
+        "variables_get",
+        "text_literal",
+        "text_index_of",
+        "text_substring",
+        "text_length",
+        "math_number",
+        "math_add",
+        "logic_equal",
+        "logic_not_equal",
+        "logic_less_equal",
+        "logic_if",
+        "return_void",
     }
     assert frontend["pinmode"]["MODE"][1] == ("OUTPUT", "INPUT", "INPUT_PULLUP")
+    # The fields the bridge reads by name, drawn as the kind it expects.
+    assert frontend["variables_declare"]["TYPE"][0] == "Dropdown"
+    assert frontend["variables_declare"]["NAME"][0] == "TextInput"
+    assert frontend["variables_get"]["NAME"][0] == "TextInput"
+    assert frontend["text_literal"]["VALUE"][0] == "TextInput"
+    assert frontend["math_number"]["VALUE"][0] == "Number"
+
+
+def test_the_declaration_type_dropdown_offers_exactly_the_bridge_tokens():
+    from app.build.blockly_bridge.structural import DECLARATION_TYPE_TOKENS
+
+    source = ARDUINO_BLOCKS_JS.read_text(encoding="utf-8")
+    body = re.search(r"const DECLARATION_TYPES = \[(.*?)\]\n", source, re.S).group(1)
+    assert tuple(re.findall(r"\['\w+', '(\w+)'\]", body)) == tuple(
+        DECLARATION_TYPE_TOKENS.values()
+    )
 
 
 def test_every_binding_matches_the_real_blockly_field_it_targets():
@@ -1069,6 +1104,8 @@ def test_the_bridge_modules_were_found():
         "bindings.py",
         "errors.py",
         "models.py",
+        # The structural block ids adapter.py and reverse.py share.
+        "structural.py",
         # B5's direction. Every static check in this section covers it too.
         "reverse.py",
         # B8's correction: Blockly's own serialization JSON read back into

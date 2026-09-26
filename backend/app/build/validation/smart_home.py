@@ -71,6 +71,7 @@ broker and the real panel are not reachable, this says so.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from typing import Any, Callable, Mapping
 
@@ -111,6 +112,18 @@ class SmartHomeAuthorizationValidator:
     plain values, with no broker, no credentials and no board. Production
     passes neither, and gets the real MQTT channel and the real
     `TRAINER_LAB_*` lookup.
+
+    RESTORATION IS UNCONDITIONAL, NOT PROBE-6-SHAPED. The six declared probes
+    end with an authorized STOP by courseware convention (`restore-stop`),
+    but a probe earlier in the run can fail — or the evidence channel can
+    break — before that probe ever sends. Either way the physical motor may
+    still be running, so `_probe_all` always attempts one authorized STOP,
+    using that same final probe's identity and valid token, whenever the run
+    did not itself already reach and pass it. A run that passes all six never
+    sends a second one (see `_run_probes`'s `reached_restore`). The cleanup
+    attempt can itself fail; when it does, it is only ever added to a result
+    as extra detail (`cleanup_stop_attempted`/`cleanup_stop_error`) — never as
+    a replacement for the verdict the probes already reached.
     """
 
     def __init__(
@@ -232,7 +245,8 @@ class SmartHomeAuthorizationValidator:
             # The device never reported a state at all. It may not be running
             # the flashed firmware, may not have joined the training network,
             # or may not be powered — none of which is a judgement about the
-            # student's authorization logic.
+            # student's authorization logic. No probe was sent, so there is
+            # nothing for a cleanup command to restore.
             return ValidationResult.error(
                 "the panel never reported a state on its evidence topic, so the check "
                 "could not observe whether any command was obeyed",
@@ -241,6 +255,41 @@ class SmartHomeAuthorizationValidator:
                 stage="baseline",
             )
 
+        try:
+            result, reached_restore = self._run_probes(criterion, evidence, context, fixtures)
+        except Exception:
+            # A probe broke instead of producing a verdict — most often the
+            # `EvidenceChannelError` `_run` turns into ERROR, but restoration
+            # must not depend on which exception this is. The panel may be
+            # mid-command, so it is cleaned up here exactly as a probe
+            # FAILURE is below, then the original exception still propagates
+            # unchanged: a broken check must never be reported as a verdict.
+            self._restore(criterion, evidence, fixtures)
+            raise
+
+        if reached_restore:
+            # The run itself reached and passed the final (restore) probe, so
+            # the panel is already at rest — sending a second STOP would be
+            # pure noise on the wire.
+            return result
+        cleanup_error = self._restore(criterion, evidence, fixtures)
+        return self._with_cleanup_outcome(result, cleanup_error)
+
+    def _run_probes(
+        self,
+        criterion: AuthorizationCriterion,
+        evidence: AuthorizationEvidence,
+        context: ValidationContext,
+        fixtures: Mapping[str, str],
+    ) -> tuple[ValidationResult, bool]:
+        """Send every declared probe in order and return the verdict.
+
+        The bool is whether the loop ran to completion — which, since the
+        declared `restore-stop` probe is always `criterion.probes[-1]`, is
+        true only when that final authorized STOP was itself sent and
+        obeyed. `_probe_all` uses it to decide whether a cleanup restoration
+        is still needed.
+        """
         records: list[dict[str, Any]] = []
         observed_acceptances = 0
         token = fixtures.get(criterion.token_env, "")
@@ -275,13 +324,16 @@ class SmartHomeAuthorizationValidator:
                 self._record(probe, before, after, passed, witnessed)
             )
             if not passed:
-                return ValidationResult.failure(
-                    self._failure_message(probe, before, after),
-                    criterion=criterion.criterion_id,
-                    failed_probe=probe.probe_id,
-                    probes=records,
-                    firmware_fingerprint=context.firmware_fingerprint,
-                    evidence=criterion.evidence.value,
+                return (
+                    ValidationResult.failure(
+                        self._failure_message(probe, before, after),
+                        criterion=criterion.criterion_id,
+                        failed_probe=probe.probe_id,
+                        probes=records,
+                        firmware_fingerprint=context.firmware_fingerprint,
+                        evidence=criterion.evidence.value,
+                    ),
+                    False,
                 )
 
         if observed_acceptances == 0:
@@ -291,25 +343,84 @@ class SmartHomeAuthorizationValidator:
             # probe for the wrong reason. Reported as a failure of the
             # remediation, because a device that obeys nothing has not
             # implemented per-command authorization.
-            return ValidationResult.failure(
-                "no authorized command was observed to change the panel's state, so the "
-                "firmware never demonstrated that it still obeys a properly authorized "
-                "command",
-                criterion=criterion.criterion_id,
-                probes=records,
-                firmware_fingerprint=context.firmware_fingerprint,
-                evidence=criterion.evidence.value,
+            return (
+                ValidationResult.failure(
+                    "no authorized command was observed to change the panel's state, so "
+                    "the firmware never demonstrated that it still obeys a properly "
+                    "authorized command",
+                    criterion=criterion.criterion_id,
+                    probes=records,
+                    firmware_fingerprint=context.firmware_fingerprint,
+                    evidence=criterion.evidence.value,
+                ),
+                True,
             )
 
-        return ValidationResult.success(
-            "the panel obeyed every properly authorized command and ignored every "
-            "unauthorized one",
-            criterion=criterion.criterion_id,
-            probes=records,
-            observed_acceptances=observed_acceptances,
-            firmware_fingerprint=context.firmware_fingerprint,
-            evidence=criterion.evidence.value,
+        return (
+            ValidationResult.success(
+                "the panel obeyed every properly authorized command and ignored every "
+                "unauthorized one",
+                criterion=criterion.criterion_id,
+                probes=records,
+                observed_acceptances=observed_acceptances,
+                firmware_fingerprint=context.firmware_fingerprint,
+                evidence=criterion.evidence.value,
+            ),
+            True,
         )
+
+    def _restore(
+        self,
+        criterion: AuthorizationCriterion,
+        evidence: AuthorizationEvidence,
+        fixtures: Mapping[str, str],
+    ) -> str | None:
+        """Best-effort authorized STOP, sent regardless of how the run ended.
+
+        Reuses the declared `restore-stop` probe's OWN identity and valid
+        token (`criterion.probes[-1]`) — this is not a second command the
+        validator invents, it is that probe's payload, sent independently of
+        whether the run ever reached it. Returns None on success or a
+        description of the failure; it never raises, because a cleanup
+        failure must never replace the verdict the probes already reached.
+        """
+        restore_probe = criterion.probes[-1]
+        token = fixtures.get(criterion.token_env, "")
+        payload = restore_probe.payload(
+            valid_token=token,
+            invalid_token=criterion.invalid_token,
+            separator=criterion.token_separator,
+        )
+        try:
+            evidence.publish(
+                criterion.identity_for(restore_probe).identity_id,
+                criterion.control_topic,
+                payload,
+            )
+        except Exception as error:  # noqa: BLE001 - cleanup must never raise
+            logger.warning(
+                "cleanup restoration STOP failed for criterion %s: %s",
+                criterion.criterion_id,
+                error,
+            )
+            return str(error)
+        return None
+
+    @staticmethod
+    def _with_cleanup_outcome(
+        result: ValidationResult, cleanup_error: str | None
+    ) -> ValidationResult:
+        """Attach what the cleanup restoration did, without touching the verdict.
+
+        Only ever adds detail keys — `outcome` and `message` are exactly what
+        `_run_probes` already decided, so a cleanup failure can be seen by an
+        evaluator but can never masquerade as, or override, the original
+        security result.
+        """
+        details = dict(result.details)
+        details["cleanup_stop_attempted"] = True
+        details["cleanup_stop_error"] = cleanup_error
+        return dataclasses.replace(result, details=details)
 
     @staticmethod
     def _record(

@@ -63,6 +63,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from app.blockly.catalog import BlockCatalog, default_block_catalog
+from app.blockly.models import ValueType
 from app.build.blockly_bridge.errors import (
     InvalidBlocklyWorkspaceError,
     UnsupportedBlocklyStructureError,
@@ -73,6 +74,7 @@ from app.build.blockly_bridge.models import (
     BlocklyField,
     BlocklyProgram,
     BlocklySection,
+    BlocklyValueInput,
     BridgeReason,
     PreservedSource,
 )
@@ -279,7 +281,7 @@ def _block(
     definition = block_definition_for_type(block_type, catalog)
 
     fields = _fields(state, block_type, section_id)
-    body_input, children = _body(state, catalog, section_id, depth)
+    body_input, children, values = _inputs(state, definition, catalog, section_id, depth)
     body = _splice(children, body_fragments, block_type, section_id)
     if body and body_input is None:
         # Fragments with no block beside them still form a body, and a body
@@ -302,6 +304,7 @@ def _block(
             fields=fields,
             body_input=body_input,
             body=body,
+            values=values,
         )
     except ValueError as error:
         raise UnsupportedBlocklyStructureError(f"{section_id}: {error}") from error
@@ -339,35 +342,64 @@ def _fields(
     return tuple(fields)
 
 
-def _body(
-    state: Mapping[str, Any], catalog: BlockCatalog, section_id: str, depth: int
-) -> tuple[str | None, tuple[BlocklyBlock, ...]]:
-    """The statement stack hanging from this block's one body input.
+def _inputs(
+    state: Mapping[str, Any],
+    definition,
+    catalog: BlockCatalog,
+    section_id: str,
+    depth: int,
+) -> tuple[str | None, tuple[BlocklyBlock, ...], tuple[BlocklyValueInput, ...]]:
+    """The block's `inputs`: its one statement body, and its value sockets.
 
-    Returns the input's name and the chain flattened in order. At most one
-    input may be present: every block this platform draws has at most one
-    statement body, and a second would be a shape the catalog does not declare.
+    Blockly serializes both under the same `inputs` object, so which is which
+    is read off the CATALOG: an input the block declares as STATEMENTS is a
+    `next`-linked body (at most one — no implemented block has two), any other
+    declared input is a socket holding exactly ONE value block, and an input
+    the catalog does not declare for this block at all is refused rather than
+    guessed at. Returns `(body input name, body chain, value inputs)`.
     """
     raw = state.get("inputs")
     if raw is None:
-        return None, ()
+        return None, (), ()
     if not isinstance(raw, Mapping):
         raise InvalidBlocklyWorkspaceError(
             f"{section_id}: 'inputs' must be an object"
         )
-    if not raw:
-        return None, ()
-    if len(raw) > 1:
-        raise UnsupportedBlocklyStructureError(
-            f"{section_id}: a block draws at most one statement body, this one has "
-            f"{len(raw)} inputs ({', '.join(sorted(str(name) for name in raw))})"
+    declared = {item.name: item.value_type for item in definition.inputs}
+    body_input: str | None = None
+    children: tuple[BlocklyBlock, ...] = ()
+    values: list[BlocklyValueInput] = []
+    for name, connection in raw.items():
+        name = str(name)
+        if name not in declared:
+            raise UnsupportedBlocklyStructureError(
+                f"{section_id}: {definition.block_id} declares no input {name!r}"
+            )
+        if not isinstance(connection, Mapping) or "block" not in connection:
+            raise UnsupportedBlocklyStructureError(
+                f"{section_id}: input {name!r} does not hold a block"
+            )
+        node = connection["block"]
+        if declared[name] is ValueType.STATEMENTS:
+            if body_input is not None:
+                raise UnsupportedBlocklyStructureError(
+                    f"{section_id}: a block draws at most one statement body, this one "
+                    f"fills {body_input!r} and {name!r}"
+                )
+            body_input, children = name, _chain(node, catalog, section_id, depth)
+            continue
+        if not isinstance(node, Mapping):
+            raise InvalidBlocklyWorkspaceError(
+                f"{section_id}: input {name!r} must hold a block object"
+            )
+        if node.get("next") is not None:
+            raise UnsupportedBlocklyStructureError(
+                f"{section_id}: the value in {name!r} cannot chain to a next block"
+            )
+        values.append(
+            BlocklyValueInput(name=name, block=_block(node, catalog, section_id, depth=depth + 1))
         )
-    (name, connection), = raw.items()
-    if not isinstance(connection, Mapping) or "block" not in connection:
-        raise UnsupportedBlocklyStructureError(
-            f"{section_id}: input {name!r} does not hold a block"
-        )
-    return str(name), _chain(connection["block"], catalog, section_id, depth)
+    return body_input, children, tuple(values)
 
 
 def _chain(
@@ -433,8 +465,6 @@ def _splice(
 
 def _declared_body_input(definition, block_type: str, section_id: str) -> str:
     """The one statement-body input the catalog declares for this block."""
-    from app.blockly.models import ValueType
-
     bodies = [item for item in definition.inputs if item.value_type is ValueType.STATEMENTS]
     if len(bodies) != 1:
         raise UnsupportedBlocklyStructureError(

@@ -53,7 +53,11 @@ from app.build.semantic.operations import (
     GPIO_PIN_MODE,
     PROGRAM_LOOP,
     PROGRAM_SETUP,
+    TEXT_INDEX_OF,
+    TEXT_LENGTH,
+    TEXT_SUBSTRING,
     TIME_DELAY,
+    SemanticType,
     is_operation_id,
 )
 
@@ -72,10 +76,10 @@ _CPP_RETURN_TYPE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_:*&\s]*$"
 class CppEmission:
     """Base for the C++ surface form of one semantic operation.
 
-    Two forms exist because the IR has two: a CONTAINER is written as a
-    function definition and a STATEMENT as a call. They share no fields, so
-    they share no dataclass — only the base type the table indexes and the
-    generator matches on.
+    One form per IR operation form: a CONTAINER is written as a function
+    definition, a STATEMENT as a call, and a VALUE as a method on its first
+    operand. They share no fields, so they share no dataclass — only the base
+    type the table indexes and the generator matches on.
     """
 
     __slots__ = ()
@@ -97,6 +101,26 @@ class CallEmission(CppEmission):
             _CPP_IDENTIFIER_PATTERN, self.call_name
         ):
             raise SemanticModelError(f"invalid C++ call name: {self.call_name!r}")
+
+
+@dataclass(frozen=True)
+class MethodEmission(CppEmission):
+    """A VALUE operation, written as a method called on its FIRST operand.
+
+    `text.index_of` -> `MethodEmission("indexOf")` -> `TEXT.indexOf(SEARCH)`:
+    the operation's first declared parameter is the receiver and the rest are
+    the call's arguments, in declared order. This is the Arduino `String`
+    API's shape (`indexOf`, `substring`, `length`) — the class the ESP32 core
+    already provides, so the generated firmware needs no new include.
+    """
+
+    method_name: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.method_name, str) or not re.match(
+            _CPP_IDENTIFIER_PATTERN, self.method_name
+        ):
+            raise SemanticModelError(f"invalid C++ method name: {self.method_name!r}")
 
 
 @dataclass(frozen=True)
@@ -170,12 +194,13 @@ class CppEmissionTable:
 
 
 def build_default_emissions() -> CppEmissionTable:
-    """The C++ spelling of the five operations that exist end to end today.
+    """The C++ spelling of every operation that has a fixed spelling.
 
-    Exactly `build_default_operations()`'s five, and no more: an emission for
-    an operation the IR does not declare would be a spelling nothing can reach,
-    and an operation with no emission cannot be generated at all. The generator
-    checks both directions on every run.
+    Every statement and value operation `build_default_operations()` declares,
+    plus the two fixed-name containers. `functions.implementation` is absent
+    by design: its declarator is preserved per section, never looked up here
+    (see `generator.py`). An emission for an operation the IR does not declare
+    would be a spelling nothing can reach; the generator checks on every run.
     """
     return CppEmissionTable(
         {
@@ -184,8 +209,23 @@ def build_default_emissions() -> CppEmissionTable:
             GPIO_PIN_MODE: CallEmission(call_name="pinMode"),
             GPIO_DIGITAL_WRITE: CallEmission(call_name="digitalWrite"),
             TIME_DELAY: CallEmission(call_name="delay"),
+            TEXT_INDEX_OF: MethodEmission(method_name="indexOf"),
+            TEXT_SUBSTRING: MethodEmission(method_name="substring"),
+            TEXT_LENGTH: MethodEmission(method_name="length"),
         }
     )
+
+
+#: How a local of each declarable type is written. The Arduino `String` class
+#: (not `const char *`) for text, because the value layer's text operations
+#: are `String` methods; `int` because every numeric local this IR can compute
+#: is a position or a length. `analyzer.py` holds the inverse table and a test
+#: pins the two against each other.
+CPP_DECLARATION_TYPES = {
+    SemanticType.TEXT: "String",
+    SemanticType.NUMBER: "int",
+    SemanticType.BOOLEAN: "bool",
+}
 
 
 #: Process-wide default table. Immutable, so sharing it is safe.

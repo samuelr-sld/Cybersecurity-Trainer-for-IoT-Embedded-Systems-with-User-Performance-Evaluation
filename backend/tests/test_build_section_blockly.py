@@ -45,6 +45,8 @@ from app.build.blockly_bridge import (
     blockly_section_from_state,
     program_to_blockly,
 )
+from app.build.discovery import analyze_source
+from app.build.document_project import build_project_from_document
 from app.build.models import BuildProject, RegionKind
 from app.build.policy import InteractionPolicy
 from app.build.program_source import program_for_source
@@ -56,10 +58,21 @@ from app.build.section_blockly import (
     section_blockly_for,
     section_representation,
 )
+from app.build.semantic import (
+    CallStatement,
+    ComparisonValue,
+    ConditionalStatement,
+    LiteralValue,
+    SemanticProgram,
+    SemanticSection,
+    SemanticType,
+    SymbolValue,
+)
 from app.build.workspace import (
     ProgramApplyError,
     RegionNotEditableError,
     RegionNotFoundError,
+    SecurityRegionOwnershipError,
 )
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -780,8 +793,14 @@ def test_panel_one_remediation_is_now_representable_through_dedicated_blocks() -
 
     (two independent `if`s, not `if`/`else if` — see `ConditionalStatement`'s
     docstring for why that is semantically identical here and needs no nested
-    ELSE body at all.) The three GENERIC blocks stay exactly as unimplemented
-    as they were; a future, more general phase can still build them.
+    ELSE body at all.)
+
+    UPDATED by the token-parsing hardening: the bridge now models nested VALUE
+    inputs, so the GENERIC `text.literal`/`logic.equal` (and the rest of the
+    token-parser vocabulary — see
+    `test_the_documented_token_parser_vocabulary_is_generic_and_implemented`)
+    are implemented. Authoring a brand-new function (`functions.define`/
+    `functions.parameter`/`functions.call`) and `if`/`else` stay unimplemented.
     """
     from app.blockly.catalog import default_block_catalog
     from app.blockly.models import ImplementationStatus
@@ -789,8 +808,6 @@ def test_panel_one_remediation_is_now_representable_through_dedicated_blocks() -
     still_generic_and_unimplemented = {
         "functions.define",
         "functions.parameter",
-        "text.literal",
-        "logic.equal",
         "logic.if_else",
         "functions.call",
     }
@@ -834,10 +851,14 @@ def test_the_ir_now_has_a_comparison_expression_and_a_conditional_statement() ->
     )
     from app.build.semantic.operations import FUNCTIONS_IMPLEMENTATION, SemanticType
 
+    # The token-parsing hardening added exactly two value forms: `+` over
+    # numbers, and a VALUE operation (the `String` queries) applied to operands.
     assert {cls.__name__ for cls in SemanticValue.__subclasses__()} == {
         "LiteralValue",
         "SymbolValue",
         "ComparisonValue",
+        "ArithmeticValue",
+        "OperationValue",
     }
     assert ComparisonValue(
         left=SymbolValue("message"), operator="==", right=LiteralValue("START", SemanticType.TEXT)
@@ -868,3 +889,230 @@ def test_panel_one_security_region_is_still_reachable_through_the_text_path() ->
         '  if (message == "START TOKEN") {\n    motorStart();\n  }\n}',
     )
     assert "START TOKEN" in live.full_source(SKETCH_NAME)
+
+
+# =============================================================================
+# 10. Full ownership of the security region
+# =============================================================================
+#
+# `helper_applyCommand`'s committed body is `if (message == "START") { ... }
+# else if (message == "STOP") { ... }`. The FIRST `if` is representable — see
+# section 9 above — but the analyzer only ever recognizes the first `if` of an
+# `if`/`else if` chain (`ConditionalStatement`'s own docstring says why), so
+# the `else if` branch — the ORIGINAL, unauthenticated STOP — can never become
+# a block. It stays a `PreservedSource` the IR never understood.
+#
+# The danger: a student drags in a NEW `logic.if_equals` block for an
+# authenticated STOP, and a submission that (as an unmodified frontend
+# round-trip naturally would) still carries that old fragment back puts BOTH
+# branches in the regenerated firmware — a "fix" that compiles and still has
+# the vulnerability sitting right underneath it. These tests pin the fix:
+# once a security region is edited as blocks, no such opaque fragment may
+# survive the submission.
+
+SECURITY_SECTION = "helper_applyCommand"
+
+
+def security_project(*, editable: tuple[str, ...] = (SECURITY_SECTION,)) -> BuildProject:
+    """Panel 1's real firmware, with its own declared `security_region_id` set.
+
+    `project()` above deliberately leaves it `None` so the generic Blockly
+    contract can be shown not to care; this is the one place in this file that
+    turns it on, to prove the STRICTER rule that only applies when it is set.
+    """
+    return load_sketch_project(
+        PANEL_SKETCH,
+        project_id="smart-home-mqtt-control-firmware",
+        scenario_id=PANEL_ONE,
+        module_id=PANEL_ONE,
+        firmware_name="Smart Home MQTT Control System",
+        board=board_info_from_fqbn("esp32:esp32:esp32"),
+        editable_section_ids=editable,
+        security_region_id=SECURITY_SECTION,
+    )
+
+
+def security_workspace(**kwargs) -> BuildWorkspace:
+    return BuildWorkspace(security_project(**kwargs))
+
+
+def _current_security_section(live: BuildWorkspace) -> SemanticSection:
+    program = program_for_source(live.full_source(SKETCH_NAME))
+    section = program.section(SECURITY_SECTION)
+    assert section is not None
+    return section
+
+
+def _authenticated_stop_statement() -> ConditionalStatement:
+    """A student-authored, fully block-representable authenticated STOP gate.
+
+    No `text` — authored in the editor, not read from source — exactly like
+    any other block a student places rather than one converted from firmware.
+    """
+    return ConditionalStatement(
+        condition=ComparisonValue(
+            left=SymbolValue(name="message"),
+            operator="==",
+            right=LiteralValue(value="STOP PANEL1-CMD-AUTH-K7", value_type=SemanticType.TEXT),
+        ),
+        body=(CallStatement(function_name="motorStop"),),
+    )
+
+
+def _representation_for(section: SemanticSection) -> dict:
+    """One section's Blockly representation, produced the same way B4 always
+    does — a one-section `SemanticProgram` is enough; `program_to_blockly`
+    never looks past the section it is converting."""
+    converted = program_to_blockly(SemanticProgram(sections=(section,)))
+    representation = converted.section(section.section_id)
+    assert representation is not None
+    return representation.to_representation()
+
+
+def test_a_naive_carry_through_of_the_old_branch_is_refused() -> None:
+    """Requirement 7's failure mode, submitted exactly as an unmodified
+    frontend round-trip would: the new authenticated STOP block, PLUS the old
+    unauthenticated `else if` fetched moments earlier and sent straight back.
+    """
+    live = security_workspace()
+    current = _current_security_section(live)
+    start_branch, old_unauthenticated_branch = current.statements[0], current.statements[1]
+    modified = SemanticSection(
+        section_id=SECURITY_SECTION,
+        operation=current.operation,
+        statements=(start_branch, _authenticated_stop_statement(), old_unauthenticated_branch),
+    )
+    representation = _representation_for(modified)
+    assert representation["preserved"], "the old branch must still be the one opaque fragment"
+
+    with pytest.raises(SecurityRegionOwnershipError) as excinfo:
+        live.apply_section_blockly(
+            SKETCH_NAME,
+            SECURITY_SECTION,
+            representation["workspace"],
+            representation["preserved"],
+        )
+    assert "security region" in str(excinfo.value)
+    assert "STOP" in str(excinfo.value)
+    # The rejection changed nothing: the committed vulnerability is still
+    # sitting there, in the text, exactly as it was — never silently applied.
+    assert 'else if (message == "STOP")' in live.region_source(SKETCH_NAME, SECURITY_SECTION)
+
+
+def test_full_ownership_edit_drops_the_old_unauthenticated_branch() -> None:
+    """The regression test for the exact failure mode (requirement 7).
+
+    Once the submission takes FULL ownership — no preserved material at all —
+    it is accepted, and the generated C++ has the new authenticated gate and
+    not one trace of the old bare comparison.
+    """
+    live = security_workspace()
+    current = _current_security_section(live)
+    modified = SemanticSection(
+        section_id=SECURITY_SECTION,
+        operation=current.operation,
+        statements=(current.statements[0], _authenticated_stop_statement()),
+    )
+    representation = _representation_for(modified)
+    assert representation["preserved"] == []
+
+    live.apply_section_blockly(
+        SKETCH_NAME,
+        SECURITY_SECTION,
+        representation["workspace"],
+        representation["preserved"],
+    )
+
+    source = live.region_source(SKETCH_NAME, SECURITY_SECTION)
+    assert "motorStart();" in source
+    assert "motorStop();" in source
+    assert '"STOP PANEL1-CMD-AUTH-K7"' in source
+    # The old, unauthenticated branch is gone — not hidden, not re-attached.
+    assert "else if" not in source
+    assert '"STOP"' not in source
+
+
+def test_legitimate_preserved_material_outside_the_security_region_is_still_kept() -> None:
+    """The stricter rule is SCOPED to the security region alone.
+
+    Every other editable section keeps the existing "carry unsupported C++
+    through a Blockly edit" behavior untouched — even in a project that HAS a
+    `security_region_id` declared, just for a different section.
+    """
+    live = security_workspace(editable=(SECURITY_SECTION, DRAWABLE))
+    representation = live.section_blockly(SKETCH_NAME, DRAWABLE)
+    carried = [record["text"] for record in representation["preserved"]]
+    assert any("Serial.begin(115200);" in text for text in carried)
+    assert any("WiFi.begin(" in text for text in carried)
+
+    live.apply_section_blockly(
+        SKETCH_NAME, DRAWABLE, representation["workspace"], representation["preserved"]
+    )
+    source = live.region_source(SKETCH_NAME, DRAWABLE)
+    for text in carried:
+        assert text.splitlines()[0].strip() in source
+
+
+def test_taking_ownership_of_the_security_region_does_not_disturb_other_regions() -> None:
+    """A successful security-region edit leaves every other region exactly as
+    B7's existing single-section-replacement guarantee already promises."""
+    live = security_workspace(editable=(SECURITY_SECTION, DRAWABLE, "loop"))
+    untouched_setup = live.region_source(SKETCH_NAME, DRAWABLE)
+    untouched_loop = live.region_source(SKETCH_NAME, "loop")
+
+    current = _current_security_section(live)
+    modified = SemanticSection(
+        section_id=SECURITY_SECTION,
+        operation=current.operation,
+        statements=(current.statements[0], _authenticated_stop_statement()),
+    )
+    representation = _representation_for(modified)
+    live.apply_section_blockly(
+        SKETCH_NAME,
+        SECURITY_SECTION,
+        representation["workspace"],
+        representation["preserved"],
+    )
+
+    assert live.region_source(SKETCH_NAME, DRAWABLE).split() == untouched_setup.split()
+    assert live.region_source(SKETCH_NAME, "loop").split() == untouched_loop.split()
+    # And the security edit itself really did take effect.
+    assert '"STOP PANEL1-CMD-AUTH-K7"' in live.region_source(SKETCH_NAME, SECURITY_SECTION)
+
+
+def test_ir_understood_material_may_still_be_preserved_in_the_security_region() -> None:
+    """The other half of "full ownership": a fragment B3 DID understand, and
+    only a real Blockly field could not hold, is not opaque C++ — it is not
+    the risk this rule exists to close, so it is unaffected by it.
+
+    A synthetic firmware is used because Panel 1's own security region has no
+    fragment of this kind today; the distinction being tested
+    (`understood_by_the_ir`) is generic, not specific to Panel 1's source.
+    """
+    source = (
+        "void setup() {\n}\n\nvoid loop() {\n}\n\n"
+        "static void chirp() {\n  pinMode(2, OUTPUT);\n  delay(BUZZER_CHIRP_MS);\n}\n"
+    )
+    document = analyze_source(source)
+    project = build_project_from_document(
+        document,
+        path="main.ino",
+        project_id="p",
+        scenario_id="s",
+        module_id="m",
+        firmware_name="f",
+        board=board_info_from_fqbn("esp32:esp32:esp32"),
+        editable_section_ids=("helper_chirp",),
+        security_region_id="helper_chirp",
+    )
+    live = BuildWorkspace(project)
+    representation = live.section_blockly("main.ino", "helper_chirp")
+    assert representation["preserved"][0]["understoodByTheIr"] is True
+
+    edited = copy.deepcopy(representation["workspace"])
+    edited["blocks"]["blocks"][0]["inputs"]["BODY"]["block"]["fields"]["MODE"] = "INPUT_PULLUP"
+    live.apply_section_blockly("main.ino", "helper_chirp", edited, representation["preserved"])
+
+    source_after = live.region_source("main.ino", "helper_chirp")
+    assert "pinMode(2, INPUT_PULLUP);" in source_after
+    assert "delay(BUZZER_CHIRP_MS);" in source_after

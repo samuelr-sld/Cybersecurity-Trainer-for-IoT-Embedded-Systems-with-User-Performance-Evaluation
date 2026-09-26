@@ -56,6 +56,8 @@ and it is preserved item for item.
 
 from __future__ import annotations
 
+import re
+
 from app.blockly.catalog import BlockCatalog, default_block_catalog
 from app.blockly.models import BlockDefinition, BlockKind, ImplementationStatus, ValueType
 from app.build.blockly_bridge.bindings import (
@@ -78,30 +80,56 @@ from app.build.blockly_bridge.models import (
     BridgeReason,
     PreservedSource,
 )
+from app.build.blockly_bridge.structural import (
+    ARITHMETIC_BLOCK_IDS,
+    BINARY_OPERANDS,
+    COMPARISON_BLOCK_IDS,
+    DECLARATION_TYPE_TOKENS,
+    FUNCTIONS_CALL_EXISTING_BLOCK_ID,
+    FUNCTIONS_RETURN_VOID_BLOCK_ID,
+    LOGIC_IF_BLOCK_ID,
+    LOGIC_IF_EQUALS_BLOCK_ID,
+    MATH_NUMBER_BLOCK_ID,
+    TEXT_LITERAL_BLOCK_ID,
+    VARIABLES_DECLARE_BLOCK_ID,
+    VARIABLES_GET_BLOCK_ID,
+)
 from app.build.semantic import (
+    ArithmeticValue,
     CallStatement,
     ComparisonValue,
     ConditionalStatement,
     LiteralValue,
     OperationForm,
     OperationStatement,
+    OperationValue,
+    ReturnStatement,
     SemanticArgument,
+    SemanticModelError,
     SemanticOperation,
     SemanticOperationRegistry,
     SemanticProgram,
     SemanticSection,
     SemanticStatement,
     SemanticType,
+    SemanticValue,
     SymbolValue,
     UnsupportedReason,
     UnsupportedStatement,
+    VariableDeclaration,
     default_semantic_operations,
 )
 
-#: The same two block ids `adapter.py` names — see that module's header for
-#: why neither routes through the operation registry.
-FUNCTIONS_CALL_EXISTING_BLOCK_ID = "functions.call_existing"
-LOGIC_IF_EQUALS_BLOCK_ID = "logic.if_equals"
+#: Operator and type tokens read backwards — the inverses of `structural.py`'s
+#: tables, derived rather than restated so the two directions cannot disagree.
+_COMPARISON_OPERATOR_FOR = {block_id: operator for operator, block_id in COMPARISON_BLOCK_IDS.items()}
+_ARITHMETIC_OPERATOR_FOR = {block_id: operator for operator, block_id in ARITHMETIC_BLOCK_IDS.items()}
+_DECLARATION_TYPE_FOR = {token: value_type for value_type, token in DECLARATION_TYPE_TOKENS.items()}
+
+#: A NAME field's token must be a C++ identifier: it is written into firmware
+#: verbatim, so anything wider would let a field carry arbitrary source.
+_IDENTIFIER_PATTERN = r"[A-Za-z_]\w*"
+_NUMBER_PATTERN = r"-?(?:\d+\.\d*|\.\d+|\d+)"
 
 #: What a fragment B4 preserved for its own reason means to the IR.
 #:
@@ -208,10 +236,10 @@ def _section(
     definition = block_definition_for_type(block.block_type, catalog)
     operation = _operation_of(definition, operations)
     _require_form(definition, operation, BlockKind.CONTAINER, OperationForm.CONTAINER)
-    if block.fields:
+    if block.fields or block.values:
         raise UnsupportedBlocklyStructureError(
             f"{block.block_type}: a container takes no operands, but this block draws "
-            f"{[field.name for field in block.fields]}"
+            f"{[item.name for item in (*block.fields, *block.values)]}"
         )
     _require_body_input(block, definition)
     return SemanticSection(
@@ -247,6 +275,29 @@ def _statement(
         raise InvalidBlocklyWorkspaceError(f"{section_id}: not a body item: {item!r}")
 
     definition = block_definition_for_type(item.block_type, catalog)
+    if definition.kind.yields_value:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: {definition.block_id} yields a value; it belongs in a "
+            "slot, not on its own in a statement body"
+        )
+    if definition.block_id == LOGIC_IF_BLOCK_ID:
+        return _if_statement(item, definition, section_id, catalog, bindings, operations)
+    if definition.block_id == VARIABLES_DECLARE_BLOCK_ID:
+        return _declare_statement(item, definition, catalog, operations)
+    if definition.block_id == FUNCTIONS_RETURN_VOID_BLOCK_ID:
+        _require_no_operands(item, definition, fields=())
+        if item.body or item.body_input is not None:
+            raise UnsupportedBlocklyStructureError(
+                f"{item.block_type}: {definition.block_id} declares no statement body"
+            )
+        return ReturnStatement(text=item.source_text)
+    if item.values:
+        # No other statement block has a value slot; reading one as if it
+        # did would invent an operand the catalog does not declare for it.
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: {definition.block_id} takes no value inputs, but this "
+            f"block carries {[value.name for value in item.values]}"
+        )
     if definition.block_id == FUNCTIONS_CALL_EXISTING_BLOCK_ID:
         return _call_existing_statement(item, definition, section_id)
     if definition.block_id == LOGIC_IF_EQUALS_BLOCK_ID:
@@ -353,6 +404,12 @@ def _if_equals_statement(
         raise InvalidBlocklyFieldValueError(
             f"{item.block_type}.OPERATOR: {operator!r} is not '==' or '!='"
         )
+    if not re.fullmatch(_IDENTIFIER_PATTERN, left):
+        # LEFT is written into firmware verbatim as a name; anything that is
+        # not an identifier would be arbitrary source riding in a field.
+        raise InvalidBlocklyFieldValueError(
+            f"{item.block_type}.LEFT: {left!r} is not a variable name"
+        )
     try:
         condition = ComparisonValue(
             left=SymbolValue(name=left),
@@ -370,6 +427,199 @@ def _if_equals_statement(
         return ConditionalStatement(condition=condition, body=body, text=item.source_text)
     except ValueError as error:
         raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
+
+
+def _if_statement(
+    item: BlocklyBlock,
+    definition: BlockDefinition,
+    section_id: str,
+    catalog: BlockCatalog,
+    bindings: FieldBindingTable,
+    operations: SemanticOperationRegistry,
+) -> ConditionalStatement:
+    """A generic `logic.if` block: a comparison in CONDITION, a body in DO.
+
+    The condition must be a COMPARISON block. The IR could state a bare
+    boolean condition, but `analyzer.py` reads only a comparison back out of
+    an `if` head — so accepting anything else here would write firmware whose
+    next reading comes back as opaque source, which the security region's
+    full-ownership rule would then refuse to let the student edit again.
+    """
+    _require_no_operands(item, definition, fields=(), slots=("CONDITION",))
+    slot = item.value("CONDITION")
+    if slot is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: its CONDITION slot is empty, which {definition.block_id} "
+            "needs"
+        )
+    condition = _value_of(slot, section_id, catalog, operations)
+    if not isinstance(condition, ComparisonValue):
+        raise InvalidBlocklyFieldValueError(
+            f"{item.block_type}.CONDITION: an if condition must be a comparison block, "
+            f"got {slot.block_id}"
+        )
+    _require_body_input(item, definition)
+    body = tuple(
+        _statement(child, section_id, catalog, bindings, operations) for child in item.body
+    )
+    return ConditionalStatement(condition=condition, body=body, text=item.source_text)
+
+
+def _declare_statement(
+    item: BlocklyBlock,
+    definition: BlockDefinition,
+    catalog: BlockCatalog,
+    operations: SemanticOperationRegistry,
+) -> VariableDeclaration:
+    """A `variables.declare` block: TYPE and NAME fields, an INITIAL value."""
+    _require_no_operands(item, definition, fields=("TYPE", "NAME"), slots=("INITIAL",))
+    fields = {field.name: field.value for field in item.fields}
+    type_token, name = fields.get("TYPE"), fields.get("NAME")
+    if type_token is None or name is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: needs TYPE and NAME fields, which {definition.block_id} declares"
+        )
+    value_type = _DECLARATION_TYPE_FOR.get(type_token)
+    if value_type is None:
+        raise InvalidBlocklyFieldValueError(
+            f"{item.block_type}.TYPE: {type_token!r} is not one of "
+            f"{sorted(_DECLARATION_TYPE_FOR)}"
+        )
+    slot = item.value("INITIAL")
+    if slot is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: {name} needs an initial value in its INITIAL slot"
+        )
+    initializer = _value_of(slot, item.block_type, catalog, operations)
+    try:
+        return VariableDeclaration(
+            value_type=value_type, name=name, initializer=initializer, text=item.source_text
+        )
+    except SemanticModelError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
+
+
+def _value_of(
+    block: BlocklyBlock,
+    section_id: str,
+    catalog: BlockCatalog,
+    operations: SemanticOperationRegistry,
+) -> SemanticValue:
+    """One value block, read back as the IR value it stands for.
+
+    The exact inverse of `adapter.py::_value_block`. Structural value blocks
+    are found by block id (`structural.py`); any other value block must name a
+    VALUE operation the IR declares, whose operands hang from the catalog
+    block's input slots and are read through this same function — so an
+    `indexOf` inside a `+` inside a `substring` needs no special case.
+    """
+    definition = block_definition_for_type(block.block_type, catalog)
+    if not definition.kind.yields_value:
+        raise UnsupportedBlocklyStructureError(
+            f"{block.block_type}: {definition.block_id} is a {definition.kind.value}; only a "
+            "value block can fill a slot"
+        )
+    if block.body or block.body_input is not None:
+        raise UnsupportedBlocklyStructureError(
+            f"{block.block_type}: a value block carries no statement body"
+        )
+    block_id = definition.block_id
+    fields = {field.name: field.value for field in block.fields}
+
+    if block_id == TEXT_LITERAL_BLOCK_ID:
+        _require_no_operands(block, definition, fields=("VALUE",))
+        return LiteralValue(value=_field(block, fields, "VALUE"), value_type=SemanticType.TEXT)
+    if block_id == MATH_NUMBER_BLOCK_ID:
+        _require_no_operands(block, definition, fields=("VALUE",))
+        text = _field(block, fields, "VALUE").strip()
+        if not re.fullmatch(_NUMBER_PATTERN, text):
+            raise InvalidBlocklyFieldValueError(f"{block.block_type}.VALUE: {text!r} is not a number")
+        number = float(text) if "." in text else int(text)
+        return LiteralValue(value=number, value_type=SemanticType.NUMBER)
+    if block_id == VARIABLES_GET_BLOCK_ID:
+        _require_no_operands(block, definition, fields=("NAME",))
+        name = _field(block, fields, "NAME")
+        if not re.fullmatch(_IDENTIFIER_PATTERN, name):
+            raise InvalidBlocklyFieldValueError(
+                f"{block.block_type}.NAME: {name!r} is not a variable name"
+            )
+        return SymbolValue(name=name)
+
+    binary = _COMPARISON_OPERATOR_FOR.get(block_id) or _ARITHMETIC_OPERATOR_FOR.get(block_id)
+    if binary is not None:
+        _require_no_operands(block, definition, fields=(), slots=BINARY_OPERANDS)
+        left, right = (
+            _value_of(_slot(block, name), section_id, catalog, operations)
+            for name in BINARY_OPERANDS
+        )
+        kind = ComparisonValue if block_id in _COMPARISON_OPERATOR_FOR else ArithmeticValue
+        try:
+            return kind(left=left, operator=binary, right=right)
+        except SemanticModelError as error:
+            raise InvalidBlocklyFieldValueError(f"{block.block_type}: {error}") from error
+
+    operation = _operation_of(definition, operations)
+    if operation.form is not OperationForm.VALUE:
+        raise UnrepresentableOperationError(
+            f"{operation.operation_id}: the catalog calls {block_id} a value, the IR calls "
+            f"it a {operation.form.value}"
+        )
+    slots = tuple(
+        item.name for item in definition.inputs if item.value_type is not ValueType.STATEMENTS
+    )
+    if slots != operation.parameter_names:
+        raise UnrepresentableOperationError(
+            f"{operation.operation_id}: IR parameters {list(operation.parameter_names)} do not "
+            f"match {block_id}'s inputs {list(slots)}"
+        )
+    _require_no_operands(block, definition, fields=(), slots=slots)
+    arguments = tuple(
+        SemanticArgument(
+            name=name,
+            value=_value_of(_slot(block, name), section_id, catalog, operations),
+        )
+        for name in slots
+    )
+    try:
+        return OperationValue(operation=operation, arguments=arguments)
+    except SemanticModelError as error:
+        raise InvalidBlocklyFieldValueError(f"{block.block_type}: {error}") from error
+
+
+def _slot(block: BlocklyBlock, name: str) -> BlocklyBlock:
+    found = block.value(name)
+    if found is None:
+        raise MissingBlocklyFieldError(f"{block.block_type}: its {name} slot is empty")
+    return found
+
+
+def _field(block: BlocklyBlock, fields: dict[str, str], name: str) -> str:
+    value = fields.get(name)
+    if value is None:
+        raise MissingBlocklyFieldError(f"{block.block_type}: no {name} field")
+    return value
+
+
+def _require_no_operands(
+    block: BlocklyBlock,
+    definition: BlockDefinition,
+    *,
+    fields: tuple[str, ...],
+    slots: tuple[str, ...] = (),
+) -> None:
+    """Refuse any field or slot this block's reader does not consume.
+
+    A workspace is untrusted input, so a field or input the catalog block has
+    no use for is reported rather than silently ignored — the same rule
+    `_arguments` applies to a registered operation's fields.
+    """
+    extra_fields = sorted({field.name for field in block.fields} - set(fields))
+    extra_slots = sorted({value.name for value in block.values} - set(slots))
+    if extra_fields or extra_slots:
+        raise UnsupportedBlocklyStructureError(
+            f"{block.block_type}: {sorted(extra_fields + extra_slots)} belong to no operand "
+            f"of {definition.block_id}"
+        )
 
 
 def _arguments(

@@ -37,10 +37,12 @@ from __future__ import annotations
 
 from app.build.semantic.analyzer import analyze_document
 from app.build.semantic.emissions import (
+    CPP_DECLARATION_TYPES,
     CallEmission,
     CppEmission,
     CppEmissionTable,
     FunctionEmission,
+    MethodEmission,
     build_default_emissions,
     default_cpp_emissions,
 )
@@ -57,11 +59,17 @@ from app.build.semantic.errors import (
 )
 from app.build.semantic.generator import INDENT, generate_cpp
 from app.build.semantic.models import (
+    ARITHMETIC_OPERATORS,
+    COMPARISON_OPERATORS,
+    DECLARABLE_TYPES,
+    ArithmeticValue,
     CallStatement,
     ComparisonValue,
     ConditionalStatement,
     LiteralValue,
     OperationStatement,
+    OperationValue,
+    ReturnStatement,
     SemanticArgument,
     SemanticProgram,
     SemanticSection,
@@ -70,6 +78,8 @@ from app.build.semantic.models import (
     SymbolValue,
     UnsupportedReason,
     UnsupportedStatement,
+    VariableDeclaration,
+    is_variable_name,
 )
 from app.build.semantic.operations import (
     FUNCTIONS_IMPLEMENTATION,
@@ -77,6 +87,9 @@ from app.build.semantic.operations import (
     GPIO_PIN_MODE,
     PROGRAM_LOOP,
     PROGRAM_SETUP,
+    TEXT_INDEX_OF,
+    TEXT_LENGTH,
+    TEXT_SUBSTRING,
     TIME_DELAY,
     OperationForm,
     SemanticOperation,
@@ -89,13 +102,26 @@ from app.build.semantic.operations import (
 )
 
 __all__ = [
+    "ARITHMETIC_OPERATORS",
+    "COMPARISON_OPERATORS",
+    "CPP_DECLARATION_TYPES",
+    "DECLARABLE_TYPES",
     "FUNCTIONS_IMPLEMENTATION",
     "GPIO_DIGITAL_WRITE",
     "GPIO_PIN_MODE",
     "INDENT",
     "PROGRAM_LOOP",
     "PROGRAM_SETUP",
+    "TEXT_INDEX_OF",
+    "TEXT_LENGTH",
+    "TEXT_SUBSTRING",
     "TIME_DELAY",
+    "ArithmeticValue",
+    "MethodEmission",
+    "OperationValue",
+    "ReturnStatement",
+    "VariableDeclaration",
+    "is_variable_name",
     "CallEmission",
     "CallStatement",
     "ComparisonValue",

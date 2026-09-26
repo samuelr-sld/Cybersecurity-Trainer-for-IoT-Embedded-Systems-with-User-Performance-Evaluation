@@ -159,6 +159,21 @@ def token_shaped_firmware(payload: str, token: str, separator: str) -> str | Non
     return None
 
 
+def stop_forgeable_firmware(payload: str, token: str, separator: str) -> str | None:
+    """Checks the token for START but obeys ANY stop, forged or not.
+
+    Passes `baseline-stop` through `authorized-start` and fails exactly at
+    `forged-stop-running` — a later probe than the committed vulnerability's
+    `forged-start-no-token`, used to prove the cleanup restoration triggers
+    on an early failure regardless of WHICH probe caught it.
+    """
+    if payload.startswith("STOP"):
+        return "STOP"
+    if payload == f"START{separator}{token}":
+        return "START"
+    return None
+
+
 class FakePanel:
     """A device on the far end of the evidence channel. No broker, no board.
 
@@ -958,6 +973,159 @@ def test_a_device_that_never_changes_state_is_not_a_pass() -> None:
 
 
 # =============================================================================
+# 21b. Guaranteed physical-state restoration: a failure must not leave the
+#      motor running just because `restore-stop` was never reached.
+# =============================================================================
+
+
+class FlakyPanel(FakePanel):
+    """A `FakePanel` whose Nth `publish` raises, then behaves normally again.
+
+    Models an evidence channel that drops mid-probe (`EvidenceChannelError`,
+    exactly like `DroppingPanel` elsewhere in this file) but only once, so
+    the cleanup restoration's OWN publish call — issued right after — can
+    still be observed succeeding.
+    """
+
+    def __init__(self, *args, fail_on_call: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._fail_on_call = fail_on_call
+        self._calls = 0
+
+    def publish(self, identity_id: str, topic: str, payload: str) -> None:
+        self._calls += 1
+        if self._calls == self._fail_on_call:
+            raise EvidenceChannelError("the broker closed the connection mid-probe")
+        super().publish(identity_id, topic, payload)
+
+
+class CleanupFailsPanel(FakePanel):
+    """A `FakePanel` whose cleanup publish call (and only that one) fails."""
+
+    def __init__(self, *args, fail_on_call: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._fail_on_call = fail_on_call
+        self._calls = 0
+
+    def publish(self, identity_id: str, topic: str, payload: str) -> None:
+        self._calls += 1
+        if self._calls == self._fail_on_call:
+            raise EvidenceChannelError("cleanup broker rejected the STOP")
+        super().publish(identity_id, topic, payload)
+
+
+def _cleanup_publish(panel: FakePanel) -> tuple[str, str, str]:
+    """The last thing the panel saw published — the cleanup attempt, by contract."""
+    return panel.published[-1]
+
+
+def test_an_early_forged_start_failure_triggers_a_cleanup_stop() -> None:
+    """The committed vulnerable firmware fails at probe 2, motor left RUNNING."""
+    factory = panel_factory(firmware=vulnerable_firmware)
+    result = check(factory=factory)
+    assert result.outcome is ValidationOutcome.FAILURE
+    assert result.details["failed_probe"] == "forged-start-no-token"
+
+    panel = factory.built[0]
+    criterion = declaration().criterion
+    engine_criterion = remediation_spec_for(package()).criterion
+    # 2 probes were sent before the failure (baseline-stop, forged-start-
+    # no-token), plus exactly one cleanup STOP — never a second one.
+    assert len(panel.published) == 3
+    identity, topic, payload = _cleanup_publish(panel)
+    assert identity == criterion.authorized.identity_id
+    assert topic == criterion.control_topic
+    assert payload == engine_criterion.probes[-1].payload(
+        valid_token=FIXTURES["TRAINER_LAB_PANEL1_COMMAND_TOKEN"],
+        invalid_token=engine_criterion.invalid_token,
+        separator=engine_criterion.token_separator,
+    )
+    assert result.details["cleanup_stop_attempted"] is True
+    assert result.details["cleanup_stop_error"] is None
+
+
+def test_an_early_forged_stop_failure_triggers_a_cleanup_stop() -> None:
+    """A later probe (5 of 6) fails; cleanup must not depend on which one."""
+    factory = panel_factory(firmware=stop_forgeable_firmware)
+    result = check(factory=factory)
+    assert result.outcome is ValidationOutcome.FAILURE
+    assert result.details["failed_probe"] == "forged-stop-running"
+
+    panel = factory.built[0]
+    criterion = declaration().criterion
+    # 5 probes were sent before the failure, plus exactly one cleanup STOP.
+    assert len(panel.published) == 6
+    identity, topic, payload = _cleanup_publish(panel)
+    assert identity == criterion.authorized.identity_id
+    assert topic == criterion.control_topic
+    assert result.details["cleanup_stop_attempted"] is True
+    assert result.details["cleanup_stop_error"] is None
+
+
+def test_a_probe_exception_triggers_cleanup_before_propagating() -> None:
+    """A dropped evidence channel must still be cleaned up, not just reported."""
+    built: list[FlakyPanel] = []
+
+    def factory(criterion, secrets):
+        panel = FlakyPanel(criterion, secrets, fail_on_call=2)
+        built.append(panel)
+        return panel
+
+    result = check(factory=factory)
+    assert result.outcome is ValidationOutcome.ERROR
+    assert result.details["stage"] == "probe"
+
+    panel = built[0]
+    # Call 1 (baseline-stop) succeeded, call 2 (forged-start-no-token) raised
+    # and is never recorded, call 3 is the cleanup STOP that followed it.
+    assert len(panel.published) == 2
+    criterion = declaration().criterion
+    identity, topic, payload = _cleanup_publish(panel)
+    assert identity == criterion.authorized.identity_id
+    assert topic == criterion.control_topic
+    assert FIXTURES["TRAINER_LAB_PANEL1_COMMAND_TOKEN"] in payload
+
+
+def test_a_cleanup_failure_does_not_replace_the_original_failure() -> None:
+    """The verdict the probes reached must survive even if cleanup itself fails."""
+
+    def factory(criterion, secrets):
+        return CleanupFailsPanel(
+            criterion, secrets, fail_on_call=3, firmware=vulnerable_firmware
+        )
+
+    result = check(factory=factory)
+    assert result.outcome is ValidationOutcome.FAILURE
+    assert result.details["failed_probe"] == "forged-start-no-token"
+    assert result.details["cleanup_stop_attempted"] is True
+    assert result.details["cleanup_stop_error"] is not None
+    assert "cleanup broker rejected" in result.details["cleanup_stop_error"]
+
+
+def test_a_successful_run_sends_no_extra_cleanup_stop() -> None:
+    """Requirement 9: a passing run must not send a redundant restore STOP."""
+    factory = panel_factory(firmware=remediated_firmware)
+    result = check(factory=factory)
+    assert result.outcome is ValidationOutcome.SUCCESS
+    panel = factory.built[0]
+    assert len(panel.published) == len(declaration().criterion.probes)
+    assert "cleanup_stop_attempted" not in result.details
+
+
+def test_cleanup_uses_the_authorized_identity_and_valid_token() -> None:
+    factory = panel_factory(firmware=vulnerable_firmware)
+    check(factory=factory)
+    criterion = declaration().criterion
+    panel = factory.built[0]
+    identity, topic, payload = _cleanup_publish(panel)
+    assert identity == criterion.authorized.identity_id
+    assert identity != criterion.unauthorized.identity_id
+    assert topic == criterion.control_topic
+    assert FIXTURES["TRAINER_LAB_PANEL1_COMMAND_TOKEN"] in payload
+    assert criterion.invalid_token not in payload
+
+
+# =============================================================================
 # 22-25. Unavailable, error, and the evidence a verdict carries
 # =============================================================================
 
@@ -1476,6 +1644,11 @@ def test_the_semantic_operation_set_now_includes_the_no_device_correction() -> N
     in `test_build_section_blockly.py`), and the legacy `edit_region` text
     path remains available beside it — this test only pins the operation
     table itself.
+
+    The token-parsing hardening then added exactly three VALUE operations
+    (`text.index_of`/`text.substring`/`text.length`) — the string queries the
+    documented `"<COMMAND> <TOKEN>"` remediation needs. Local declarations,
+    `return;`, `<=` and `+` are structural IR additions, again not rows.
     """
     from app.build.semantic import default_semantic_operations
 
@@ -1486,6 +1659,9 @@ def test_the_semantic_operation_set_now_includes_the_no_device_correction() -> N
         "gpio.pin_mode",
         "gpio.digital_write",
         "time.delay",
+        "text.index_of",
+        "text.substring",
+        "text.length",
     )
 
 

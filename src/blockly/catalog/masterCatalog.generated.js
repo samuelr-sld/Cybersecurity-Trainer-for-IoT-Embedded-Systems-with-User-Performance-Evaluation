@@ -346,9 +346,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_equal",
+      "generatorId": "arduino_cpp:logic_equal"
     },
     {
       "id": "logic.not_equal",
@@ -372,9 +372,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_not_equal",
+      "generatorId": "arduino_cpp:logic_not_equal"
     },
     {
       "id": "logic.greater",
@@ -476,9 +476,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_less_equal",
+      "generatorId": "arduino_cpp:logic_less_equal"
     },
     {
       "id": "logic.if",
@@ -502,9 +502,9 @@ export const MASTER_CATALOG = {
       "output": null,
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_if",
+      "generatorId": "arduino_cpp:logic_if"
     },
     {
       "id": "logic.if_else",
@@ -842,9 +842,9 @@ export const MASTER_CATALOG = {
       "output": "number",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "math_number",
+      "generatorId": "arduino_cpp:math_number"
     },
     {
       "id": "math.add",
@@ -868,9 +868,9 @@ export const MASTER_CATALOG = {
       "output": "number",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "math_add",
+      "generatorId": "arduino_cpp:math_add"
     },
     {
       "id": "math.subtract",
@@ -1233,9 +1233,9 @@ export const MASTER_CATALOG = {
       "output": "text",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "text_literal",
+      "generatorId": "arduino_cpp:text_literal"
     },
     {
       "id": "text.join",
@@ -1280,9 +1280,9 @@ export const MASTER_CATALOG = {
       "output": "number",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "text_length",
+      "generatorId": "arduino_cpp:text_length"
     },
     {
       "id": "text.contains",
@@ -1311,6 +1311,32 @@ export const MASTER_CATALOG = {
       "generatorId": null
     },
     {
+      "id": "text.index_of",
+      "categoryId": "text",
+      "displayName": "find position",
+      "description": "The position of the first occurrence of a search string in some text, or -1.",
+      "kind": "expression",
+      "semanticOperation": "text.index_of",
+      "inputs": [
+        {
+          "name": "TEXT",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "SEARCH",
+          "valueType": "text",
+          "description": ""
+        }
+      ],
+      "output": "number",
+      "dependencies": [],
+      "capabilities": [],
+      "status": "implemented",
+      "blocklyType": "text_index_of",
+      "generatorId": "arduino_cpp:text_index_of"
+    },
+    {
       "id": "text.substring",
       "categoryId": "text",
       "displayName": "substring",
@@ -1337,9 +1363,9 @@ export const MASTER_CATALOG = {
       "output": "text",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "text_substring",
+      "generatorId": "arduino_cpp:text_substring"
     },
     {
       "id": "text.char_at",
@@ -1486,10 +1512,15 @@ export const MASTER_CATALOG = {
       "id": "variables.declare",
       "categoryId": "variables",
       "displayName": "declare variable",
-      "description": "Declares a variable with an optional initial value.",
+      "description": "Declares a local variable of a type, with an initial value.",
       "kind": "statement",
       "semanticOperation": "variables.declare",
       "inputs": [
+        {
+          "name": "TYPE",
+          "valueType": "text",
+          "description": ""
+        },
         {
           "name": "NAME",
           "valueType": "text",
@@ -1504,9 +1535,9 @@ export const MASTER_CATALOG = {
       "output": null,
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "variables_declare",
+      "generatorId": "arduino_cpp:variables_declare"
     },
     {
       "id": "variables.get",
@@ -1525,9 +1556,9 @@ export const MASTER_CATALOG = {
       "output": "any",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "variables_get",
+      "generatorId": "arduino_cpp:variables_get"
     },
     {
       "id": "variables.set",
@@ -1731,6 +1762,21 @@ export const MASTER_CATALOG = {
       "status": "cataloged",
       "blocklyType": null,
       "generatorId": null
+    },
+    {
+      "id": "functions.return_void",
+      "categoryId": "functions",
+      "displayName": "return",
+      "description": "Leaves the current function immediately, returning nothing.",
+      "kind": "statement",
+      "semanticOperation": "functions.return_void",
+      "inputs": [],
+      "output": null,
+      "dependencies": [],
+      "capabilities": [],
+      "status": "implemented",
+      "blocklyType": "return_void",
+      "generatorId": "arduino_cpp:return_void"
     },
     {
       "id": "functions.implementation",
@@ -5445,6 +5491,22 @@ export const FULL_TOOLBOX = {
       "contents": [
         {
           "kind": "block",
+          "type": "logic_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_not_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_less_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_if"
+        },
+        {
+          "kind": "block",
           "type": "if_equals"
         }
       ]
@@ -5459,25 +5521,64 @@ export const FULL_TOOLBOX = {
       "kind": "category",
       "name": "Math",
       "colour": "230",
-      "contents": []
+      "contents": [
+        {
+          "kind": "block",
+          "type": "math_number"
+        },
+        {
+          "kind": "block",
+          "type": "math_add"
+        }
+      ]
     },
     {
       "kind": "category",
       "name": "Text",
       "colour": "160",
-      "contents": []
+      "contents": [
+        {
+          "kind": "block",
+          "type": "text_literal"
+        },
+        {
+          "kind": "block",
+          "type": "text_length"
+        },
+        {
+          "kind": "block",
+          "type": "text_index_of"
+        },
+        {
+          "kind": "block",
+          "type": "text_substring"
+        }
+      ]
     },
     {
       "kind": "category",
       "name": "Variables",
       "colour": "330",
-      "contents": []
+      "contents": [
+        {
+          "kind": "block",
+          "type": "variables_declare"
+        },
+        {
+          "kind": "block",
+          "type": "variables_get"
+        }
+      ]
     },
     {
       "kind": "category",
       "name": "Functions",
       "colour": "290",
       "contents": [
+        {
+          "kind": "block",
+          "type": "return_void"
+        },
         {
           "kind": "block",
           "type": "function_implementation"
@@ -5663,7 +5764,76 @@ export const POPULATED_TOOLBOX = {
       "contents": [
         {
           "kind": "block",
+          "type": "logic_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_not_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_less_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_if"
+        },
+        {
+          "kind": "block",
           "type": "if_equals"
+        }
+      ]
+    },
+    {
+      "kind": "category",
+      "name": "Math",
+      "colour": "230",
+      "contents": [
+        {
+          "kind": "block",
+          "type": "math_number"
+        },
+        {
+          "kind": "block",
+          "type": "math_add"
+        }
+      ]
+    },
+    {
+      "kind": "category",
+      "name": "Text",
+      "colour": "160",
+      "contents": [
+        {
+          "kind": "block",
+          "type": "text_literal"
+        },
+        {
+          "kind": "block",
+          "type": "text_length"
+        },
+        {
+          "kind": "block",
+          "type": "text_index_of"
+        },
+        {
+          "kind": "block",
+          "type": "text_substring"
+        }
+      ]
+    },
+    {
+      "kind": "category",
+      "name": "Variables",
+      "colour": "330",
+      "contents": [
+        {
+          "kind": "block",
+          "type": "variables_declare"
+        },
+        {
+          "kind": "block",
+          "type": "variables_get"
         }
       ]
     },
@@ -5672,6 +5842,10 @@ export const POPULATED_TOOLBOX = {
       "name": "Functions",
       "colour": "290",
       "contents": [
+        {
+          "kind": "block",
+          "type": "return_void"
+        },
         {
           "kind": "block",
           "type": "function_implementation"

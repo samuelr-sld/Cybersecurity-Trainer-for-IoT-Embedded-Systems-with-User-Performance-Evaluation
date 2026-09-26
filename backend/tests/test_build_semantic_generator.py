@@ -54,6 +54,7 @@ from app.build.semantic import (
     InvalidContainerError,
     InvalidSemanticValueError,
     LiteralValue,
+    MethodEmission,
     MissingOperationArgumentError,
     OperationForm,
     OperationStatement,
@@ -796,10 +797,17 @@ def test_every_emission_matches_its_operations_form():
     for operation_id in default_cpp_emissions.operation_ids:
         declared = default_semantic_operations.require(operation_id)
         emission = default_cpp_emissions.require(operation_id)
-        expected = (
-            FunctionEmission if declared.form is OperationForm.CONTAINER else CallEmission
-        )
+        expected = {
+            OperationForm.CONTAINER: FunctionEmission,
+            OperationForm.STATEMENT: CallEmission,
+            OperationForm.VALUE: MethodEmission,
+        }[declared.form]
         assert isinstance(emission, expected), operation_id
+
+
+def test_every_value_operation_has_an_emission():
+    for operation in default_semantic_operations.with_form(OperationForm.VALUE):
+        assert isinstance(default_cpp_emissions.require(operation.operation_id), MethodEmission)
 
 
 def test_the_generator_spells_every_call_the_way_the_analyzer_reads_it():
@@ -812,6 +820,27 @@ def test_the_generator_spells_every_call_the_way_the_analyzer_reads_it():
         emission = default_cpp_emissions.require(operation_id)
         assert isinstance(emission, CallEmission)
         assert emission.call_name == call_name
+
+
+def test_the_generator_spells_every_method_the_way_the_analyzer_reads_it():
+    from app.build.semantic.analyzer import _METHOD_OPERATIONS
+
+    assert set(_METHOD_OPERATIONS.values()) == {
+        operation.operation_id
+        for operation in default_semantic_operations.with_form(OperationForm.VALUE)
+    }
+    for method_name, operation_id in _METHOD_OPERATIONS.items():
+        emission = default_cpp_emissions.require(operation_id)
+        assert isinstance(emission, MethodEmission)
+        assert emission.method_name == method_name
+
+
+def test_the_generator_spells_every_declaration_type_the_way_the_analyzer_reads_it():
+    from app.build.semantic import CPP_DECLARATION_TYPES, DECLARABLE_TYPES
+    from app.build.semantic.analyzer import _DECLARATION_TYPES
+
+    assert set(CPP_DECLARATION_TYPES) == set(DECLARABLE_TYPES)
+    assert {value: key for key, value in _DECLARATION_TYPES.items()} == CPP_DECLARATION_TYPES
 
 
 def test_a_missing_emission_is_a_clean_miss_rather_than_a_guess():

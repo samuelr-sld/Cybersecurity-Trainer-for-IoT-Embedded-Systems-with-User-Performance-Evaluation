@@ -126,7 +126,27 @@ CORRECTION_IMPLEMENTED = {
     "logic.if_equals": "if_equals",
 }
 
-ALL_IMPLEMENTED = {**LEGACY_IMPLEMENTED, **CORRECTION_IMPLEMENTED}
+#: The token-parsing hardening's blocks: the catalog's own GENERIC entries,
+#: implemented now that the bridge models nested value inputs, plus one new
+#: entry each for `text.index_of` and a value-less `functions.return_void`.
+#: Each is one small construct; Panel 1's remediation is composed from them.
+TOKEN_PARSING_IMPLEMENTED = {
+    "variables.declare": "variables_declare",
+    "variables.get": "variables_get",
+    "text.literal": "text_literal",
+    "text.index_of": "text_index_of",
+    "text.substring": "text_substring",
+    "text.length": "text_length",
+    "math.number": "math_number",
+    "math.add": "math_add",
+    "logic.equal": "logic_equal",
+    "logic.not_equal": "logic_not_equal",
+    "logic.less_equal": "logic_less_equal",
+    "logic.if": "logic_if",
+    "functions.return_void": "return_void",
+}
+
+ALL_IMPLEMENTED = {**LEGACY_IMPLEMENTED, **CORRECTION_IMPLEMENTED, **TOKEN_PARSING_IMPLEMENTED}
 
 
 def _block(**overrides) -> BlockDefinition:
@@ -304,11 +324,14 @@ def test_toolbox_only_offers_blocks_blockly_can_build() -> None:
 def test_populated_toolbox_hides_empty_categories() -> None:
     toolbox = build_toolbox(default_block_catalog, hide_empty_categories=True)
     categories = [item for item in toolbox["contents"] if item["kind"] == "category"]
-    # Category declaration order (app/blockly/categories.py): Logic and
-    # Functions now have IMPLEMENTED blocks too, ahead of the four Arduino
-    # categories the legacy POC populated.
+    # Category declaration order (app/blockly/categories.py): Logic, Math,
+    # Text, Variables and Functions now have IMPLEMENTED blocks too, ahead of
+    # the four Arduino categories the legacy POC populated.
     assert [item["name"] for item in categories] == [
         "Logic",
+        "Math",
+        "Text",
+        "Variables",
         "Functions",
         "Program",
         "Inputs",

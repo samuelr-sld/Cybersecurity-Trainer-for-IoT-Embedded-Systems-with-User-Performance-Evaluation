@@ -126,6 +126,12 @@ class BlocklyField:
     operand as it was WRITTEN (`1000`, `START_BUTTON`, `INPUT_PULLUP`), never
     a resolved value. `app/build/semantic/models.py` does not resolve names
     and neither does this layer.
+
+    Non-empty, but whitespace IS a value: a `text.literal` field holding a
+    single space is the separator `" "` Panel 1's token parser searches for,
+    and trimming or refusing it would change what the student wrote. Whether
+    a given field may hold whitespace is its reader's decision (a NAME field
+    must still be an identifier).
     """
 
     name: str
@@ -134,8 +140,29 @@ class BlocklyField:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not re.match(_FIELD_NAME_PATTERN, self.name):
             raise BlocklyModelError(f"invalid field name: {self.name!r}")
-        if not isinstance(self.value, str) or not self.value.strip():
+        if not isinstance(self.value, str) or not self.value:
             raise BlocklyModelError(f"field {self.name}: value must be non-empty text")
+
+
+@dataclass(frozen=True)
+class BlocklyValueInput:
+    """One VALUE socket of a block and the value block plugged into it.
+
+    `logic.if`'s CONDITION holding a `logic.less_equal`, `text.substring`'s
+    FROM holding a `math.number`. Distinct from a block's statement BODY: a
+    value input holds exactly ONE block, which yields a value and never
+    chains through `next`. Serialized by Blockly under the same `inputs`
+    object as a body, so `to_state()` writes both there.
+    """
+
+    name: str
+    block: BlocklyBlock
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not re.match(_FIELD_NAME_PATTERN, self.name):
+            raise BlocklyModelError(f"invalid value input name: {self.name!r}")
+        if not isinstance(self.block, BlocklyBlock):
+            raise BlocklyModelError(f"value input {self.name}: not a block: {self.block!r}")
 
 
 @dataclass(frozen=True)
@@ -188,6 +215,8 @@ class BlocklyBlock:
     fields: tuple[BlocklyField, ...] = ()
     body_input: str | None = None
     body: tuple[BlocklyBlock | PreservedSource, ...] = ()
+    #: VALUE sockets and the value block in each — see `BlocklyValueInput`.
+    values: tuple[BlocklyValueInput, ...] = ()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -224,6 +253,21 @@ class BlocklyBlock:
             )
         if self.body_input is not None and not re.match(_FIELD_NAME_PATTERN, self.body_input):
             raise BlocklyModelError(f"{self.block_type}: invalid body input {self.body_input!r}")
+        socket_names = [item.name for item in self.values]
+        for item in self.values:
+            if not isinstance(item, BlocklyValueInput):
+                raise BlocklyModelError(f"{self.block_type}: not a value input: {item!r}")
+        if len(set(socket_names)) != len(socket_names) or self.body_input in socket_names:
+            raise BlocklyModelError(f"{self.block_type}: duplicate input names")
+        if set(socket_names) & set(names):
+            raise BlocklyModelError(f"{self.block_type}: a name is both a field and an input")
+
+    def value(self, name: str) -> BlocklyBlock | None:
+        """The value block plugged into this socket, or None if it is empty."""
+        for item in self.values:
+            if item.name == name:
+                return item.block
+        return None
 
     @property
     def child_blocks(self) -> tuple[BlocklyBlock, ...]:
@@ -251,10 +295,15 @@ class BlocklyBlock:
         state: dict[str, Any] = {"type": self.block_type}
         if self.fields:
             state["fields"] = {field.name: field.value for field in self.fields}
+        inputs: dict[str, Any] = {
+            item.name: {"block": item.block.to_state()} for item in self.values
+        }
         chain = _chain(self.child_blocks)
         if chain is not None:
             assert self.body_input is not None  # guaranteed by __post_init__
-            state["inputs"] = {self.body_input: {"block": chain}}
+            inputs[self.body_input] = {"block": chain}
+        if inputs:
+            state["inputs"] = inputs
         return state
 
 

@@ -48,14 +48,26 @@ const COMPARISON_OPERATORS = [
   ['≠', '!='],
 ]
 
+// The TYPE dropdown of `variables_declare`: the visible label is the C++
+// type a student recognises, the stored value is the backend's language-
+// neutral type token (backend/app/build/blockly_bridge/structural.py).
+const DECLARATION_TYPES = [
+  ['String', 'text'],
+  ['int', 'number'],
+  ['bool', 'boolean'],
+]
+
 //: Block types this module defines. The toolbox is no longer built here: it
 //: comes from the master block catalog (`./catalog/`), which names these
-//: eight types as its IMPLEMENTED blocks — `catalog.test.js` fails if the two
+//: types as its IMPLEMENTED blocks — `catalog.test.js` fails if the two
 //: lists ever disagree. The first five are the original Blockly POC set; the
-//: last three are the no-device/Blockly-integration correction's own
+//: next three are the no-device/Blockly-integration correction's own
 //: dedicated additions — see `backend/app/blockly/definitions/programming.py`
 //: for why they exist beside (not instead of) the still-CATALOGED generic
-//: `functions.define`/`functions.call`/`logic.if_else`.
+//: `functions.define`/`functions.call`/`logic.if_else`. The rest are the
+//: catalog's GENERIC value/statement blocks (variables, text, math,
+//: comparisons, `if`, `return`) — small composable pieces, none of them
+//: specific to any panel.
 export const ARDUINO_BLOCK_TYPES = [
   'arduino_setup',
   'arduino_loop',
@@ -65,7 +77,34 @@ export const ARDUINO_BLOCK_TYPES = [
   'function_implementation',
   'call_existing_function',
   'if_equals',
+  'variables_declare',
+  'variables_get',
+  'text_literal',
+  'text_index_of',
+  'text_substring',
+  'text_length',
+  'math_number',
+  'math_add',
+  'logic_equal',
+  'logic_not_equal',
+  'logic_less_equal',
+  'logic_if',
+  'return_void',
 ]
+
+// A two-operand value block: `A <symbol> B`, both sockets value inputs.
+function binaryValueBlock(symbol, output, colour, tooltip) {
+  return {
+    init() {
+      this.appendValueInput('A')
+      this.appendValueInput('B').appendField(symbol)
+      this.setInputsInline(true)
+      this.setOutput(true, output)
+      this.setColour(colour)
+      this.setTooltip(tooltip)
+    },
+  }
+}
 
 let registered = false
 
@@ -202,6 +241,123 @@ export function registerArduinoBlocks() {
       this.setTooltip(
         'Runs the body only when LEFT (a named value in scope) equals or differs from the fixed text on the right.',
       )
+    },
+  }
+
+  // --- generic value/statement blocks ---------------------------------------
+  // Each maps to one semantic construct server-side (see backend/app/build/
+  // blockly_bridge/structural.py and the catalog's `text.*` operations). Value
+  // blocks plug into value sockets; nothing here emits C++ the backend uses —
+  // the workspace JSON is sent to the backend, which generates the firmware.
+
+  Blockly.Blocks['variables_declare'] = {
+    init() {
+      this.appendDummyInput()
+        .appendField('declare')
+        .appendField(new Blockly.FieldDropdown(DECLARATION_TYPES), 'TYPE')
+        .appendField(new Blockly.FieldTextInput('name'), 'NAME')
+      this.appendValueInput('INITIAL').appendField('=')
+      this.setInputsInline(true)
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(330)
+      this.setTooltip('Declares a local variable of a type, with an initial value.')
+    },
+  }
+
+  Blockly.Blocks['variables_get'] = {
+    init() {
+      this.appendDummyInput().appendField(new Blockly.FieldTextInput('name'), 'NAME')
+      this.setOutput(true, null)
+      this.setColour(330)
+      this.setTooltip('Reads a variable, parameter or constant by name.')
+    },
+  }
+
+  Blockly.Blocks['text_literal'] = {
+    init() {
+      this.appendDummyInput()
+        .appendField('"')
+        .appendField(new Blockly.FieldTextInput('text'), 'VALUE')
+        .appendField('"')
+      this.setOutput(true, 'String')
+      this.setColour(160)
+      this.setTooltip('A fixed piece of text.')
+    },
+  }
+
+  Blockly.Blocks['text_index_of'] = {
+    init() {
+      this.appendValueInput('SEARCH').appendField('position of')
+      this.appendValueInput('TEXT').appendField('in')
+      this.setInputsInline(true)
+      this.setOutput(true, 'Number')
+      this.setColour(160)
+      this.setTooltip('Where SEARCH first appears in TEXT, counting from 0 — or -1 if it does not.')
+    },
+  }
+
+  Blockly.Blocks['text_substring'] = {
+    init() {
+      this.appendValueInput('TEXT').appendField('text of')
+      this.appendValueInput('FROM').appendField('from')
+      this.appendValueInput('TO').appendField('to')
+      this.setInputsInline(true)
+      this.setOutput(true, 'String')
+      this.setColour(160)
+      this.setTooltip('The part of TEXT from position FROM up to (not including) TO.')
+    },
+  }
+
+  Blockly.Blocks['text_length'] = {
+    init() {
+      this.appendValueInput('TEXT').appendField('length of')
+      this.setInputsInline(true)
+      this.setOutput(true, 'Number')
+      this.setColour(160)
+      this.setTooltip('The number of characters in TEXT.')
+    },
+  }
+
+  Blockly.Blocks['math_number'] = {
+    init() {
+      this.appendDummyInput().appendField(new Blockly.FieldNumber(0), 'VALUE')
+      this.setOutput(true, 'Number')
+      this.setColour(230)
+      this.setTooltip('A number.')
+    },
+  }
+
+  Blockly.Blocks['math_add'] = binaryValueBlock('+', 'Number', 230, 'A plus B.')
+  Blockly.Blocks['logic_equal'] = binaryValueBlock('=', 'Boolean', 30, 'True when A equals B.')
+  Blockly.Blocks['logic_not_equal'] = binaryValueBlock('≠', 'Boolean', 30, 'True when A differs from B.')
+  Blockly.Blocks['logic_less_equal'] = binaryValueBlock(
+    '≤',
+    'Boolean',
+    30,
+    'True when A is less than or equal to B.',
+  )
+
+  Blockly.Blocks['logic_if'] = {
+    init() {
+      this.appendValueInput('CONDITION').setCheck('Boolean').appendField('if')
+      this.appendStatementInput('DO')
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(30)
+      this.setTooltip('Runs the body only when the comparison in the socket is true.')
+    },
+  }
+
+  // Leaves the function immediately. No next connection: nothing after a
+  // `return;` in the same stack could ever run.
+  Blockly.Blocks['return_void'] = {
+    init() {
+      this.appendDummyInput().appendField('return')
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(false)
+      this.setColour(290)
+      this.setTooltip('Stops this function here and returns — nothing below it runs.')
     },
   }
 }

@@ -96,16 +96,18 @@ class OperationForm(str, Enum):
                is identified by (`program.setup`, `program.loop`). Declares no
                parameters — the body is the section's `statements`.
     STATEMENT  performs one action inside a body (`gpio.pin_mode`).
-
-    The catalog's `BlockKind` additionally has VALUE and EXPRESSION for blocks
-    that yield a value. No supported operation yields one yet, so no matching
-    form is declared here; the IR's value layer today is the leaf expressions
-    `LiteralValue`/`SymbolValue` in `models.py`. The form a value-producing
-    operation needs arrives with the first such operation.
+    VALUE      computes a value from its operands (`text.index_of`) and stands
+               in an operand slot rather than in a body — the IR form is
+               `models.OperationValue`. The only form with a `result` type.
+               Added with the first value-producing operations (the string
+               queries Panel 1's token-parsing remediation needs); the
+               catalog's VALUE/EXPRESSION distinction is not restated, because
+               the IR only ever needs "does this yield a value".
     """
 
     CONTAINER = "container"
     STATEMENT = "statement"
+    VALUE = "value"
 
 
 @dataclass(frozen=True)
@@ -145,12 +147,23 @@ class SemanticOperation:
     form: OperationForm
     parameters: tuple[SemanticParameter, ...] = ()
     description: str = ""
+    #: The type a VALUE operation yields; None for every other form.
+    result: SemanticType | None = None
 
     def __post_init__(self) -> None:
         if not is_operation_id(self.operation_id):
             raise SemanticModelError(f"invalid operation id: {self.operation_id!r}")
         if not isinstance(self.form, OperationForm):
             raise SemanticModelError(f"{self.operation_id}: invalid form {self.form!r}")
+        if self.form is OperationForm.VALUE:
+            if not isinstance(self.result, SemanticType):
+                raise SemanticModelError(f"{self.operation_id}: a value operation needs a result type")
+            if not self.parameters:
+                raise SemanticModelError(f"{self.operation_id}: a value operation needs operands")
+        elif self.result is not None:
+            raise SemanticModelError(
+                f"{self.operation_id}: only a value operation has a result type"
+            )
         names = [parameter.name for parameter in self.parameters]
         for parameter in self.parameters:
             if not isinstance(parameter, SemanticParameter):
@@ -237,6 +250,9 @@ FUNCTIONS_IMPLEMENTATION = "functions.implementation"
 GPIO_PIN_MODE = "gpio.pin_mode"
 GPIO_DIGITAL_WRITE = "gpio.digital_write"
 TIME_DELAY = "time.delay"
+TEXT_INDEX_OF = "text.index_of"
+TEXT_SUBSTRING = "text.substring"
+TEXT_LENGTH = "text.length"
 
 
 def build_default_operations() -> SemanticOperationRegistry:
@@ -257,6 +273,15 @@ def build_default_operations() -> SemanticOperationRegistry:
     (`SemanticSection.signature`), never modelled here: the operation is
     deliberately the SAME for every named function a firmware defines, so the
     panel-agnostic registry never has to learn a panel's own function names.
+
+    `text.index_of`/`text.substring`/`text.length` are the first VALUE
+    operations, added for one documented need: Panel 1's remediation parses a
+    `"<COMMAND> <TOKEN>"` payload — find the separator, slice the command and
+    the token out either side of it. `text.length` is there so `substring` can
+    stay a fixed-arity operation (`FROM`, `TO` — the catalog's own inputs)
+    rather than growing an optional operand; "the rest of the text" is
+    `substring(FROM, length)`. Their ids and operand names are the catalog's
+    (`TEXT`/`SEARCH`/`FROM`/`TO`), reused verbatim like every other row here.
 
     The remaining ~200 catalog entries are intentionally absent. They are
     CATALOGED metadata with no block, no generator and no firmware behind
@@ -311,6 +336,34 @@ def build_default_operations() -> SemanticOperationRegistry:
                 form=OperationForm.STATEMENT,
                 parameters=(SemanticParameter("MS", SemanticType.NUMBER),),
                 description="Pauses the program for a number of milliseconds.",
+            ),
+            SemanticOperation(
+                operation_id=TEXT_INDEX_OF,
+                form=OperationForm.VALUE,
+                parameters=(
+                    SemanticParameter("TEXT", SemanticType.TEXT, "the text searched"),
+                    SemanticParameter("SEARCH", SemanticType.TEXT, "what to find"),
+                ),
+                result=SemanticType.NUMBER,
+                description="The position of the first SEARCH in TEXT, or -1 when absent.",
+            ),
+            SemanticOperation(
+                operation_id=TEXT_SUBSTRING,
+                form=OperationForm.VALUE,
+                parameters=(
+                    SemanticParameter("TEXT", SemanticType.TEXT, "the text sliced"),
+                    SemanticParameter("FROM", SemanticType.NUMBER, "first position, inclusive"),
+                    SemanticParameter("TO", SemanticType.NUMBER, "end position, exclusive"),
+                ),
+                result=SemanticType.TEXT,
+                description="The part of TEXT from FROM up to (not including) TO.",
+            ),
+            SemanticOperation(
+                operation_id=TEXT_LENGTH,
+                form=OperationForm.VALUE,
+                parameters=(SemanticParameter("TEXT", SemanticType.TEXT),),
+                result=SemanticType.NUMBER,
+                description="The number of characters in TEXT.",
             ),
         )
     )

@@ -22,18 +22,33 @@ LOGIC = (
     _logic.expression("logic.not", "not", "Logical negation.", BOOLEAN, (("VALUE", BOOLEAN),)),
     _logic.expression("logic.and", "and", "True when both operands are true.", BOOLEAN, _AB_BOOL),
     _logic.expression("logic.or", "or", "True when either operand is true.", BOOLEAN, _AB_BOOL),
-    _logic.expression("logic.equal", "equal", "True when both operands are equal.", BOOLEAN, _AB_ANY),
-    _logic.expression("logic.not_equal", "not equal", "True when the operands differ.", BOOLEAN, _AB_ANY),
+    # --- Panel 1 token-parsing vocabulary ------------------------------------
+    # The generic comparison/`if` blocks below are IMPLEMENTED (not new
+    # dedicated ones) because the Blockly bridge now models nested VALUE
+    # inputs: a condition is a comparison block plugged into `logic.if`'s
+    # CONDITION socket, exactly as the catalog always described them. Only
+    # the three operators the IR's `ComparisonValue` states (`==`, `!=`, `<=`)
+    # are implemented; the other orderings stay CATALOGED.
+    _logic.expression(
+        "logic.equal", "equal", "True when both operands are equal.", BOOLEAN, _AB_ANY,
+        implemented_as="logic_equal",
+    ),
+    _logic.expression(
+        "logic.not_equal", "not equal", "True when the operands differ.", BOOLEAN, _AB_ANY,
+        implemented_as="logic_not_equal",
+    ),
     _logic.expression("logic.greater", "greater than", "True when A is greater than B.", BOOLEAN, _AB_NUM),
     _logic.expression("logic.less", "less than", "True when A is less than B.", BOOLEAN, _AB_NUM),
     _logic.expression(
         "logic.greater_equal", "greater or equal", "True when A is greater than or equal to B.", BOOLEAN, _AB_NUM
     ),
     _logic.expression(
-        "logic.less_equal", "less or equal", "True when A is less than or equal to B.", BOOLEAN, _AB_NUM
+        "logic.less_equal", "less or equal", "True when A is less than or equal to B.", BOOLEAN, _AB_NUM,
+        implemented_as="logic_less_equal",
     ),
     _logic.statement(
-        "logic.if", "if", "Runs a body when a condition is true.", (("CONDITION", BOOLEAN), ("DO", BODY))
+        "logic.if", "if", "Runs a body when a condition is true.", (("CONDITION", BOOLEAN), ("DO", BODY)),
+        implemented_as="logic_if",
     ),
     _logic.statement(
         "logic.if_else",
@@ -102,8 +117,11 @@ LOOPS = (
 )
 
 MATH = (
-    _math.value("math.number", "number", "A numeric literal.", NUMBER, inputs=(("VALUE", NUMBER),)),
-    _math.expression("math.add", "add", "A plus B.", NUMBER, _AB_NUM),
+    _math.value(
+        "math.number", "number", "A numeric literal.", NUMBER, inputs=(("VALUE", NUMBER),),
+        implemented_as="math_number",
+    ),
+    _math.expression("math.add", "add", "A plus B.", NUMBER, _AB_NUM, implemented_as="math_add"),
     _math.expression("math.subtract", "subtract", "A minus B.", NUMBER, _AB_NUM),
     _math.expression("math.multiply", "multiply", "A times B.", NUMBER, _AB_NUM),
     _math.expression("math.divide", "divide", "A divided by B.", NUMBER, _AB_NUM),
@@ -129,11 +147,25 @@ MATH = (
 )
 
 TEXTS = (
-    _text.value("text.literal", "text", "A text literal.", TEXT, inputs=(("VALUE", TEXT),)),
+    _text.value(
+        "text.literal", "text", "A text literal.", TEXT, inputs=(("VALUE", TEXT),),
+        implemented_as="text_literal",
+    ),
     _text.expression("text.join", "join", "Concatenates two pieces of text.", TEXT, (("A", TEXT), ("B", TEXT))),
-    _text.expression("text.length", "length", "The number of characters in some text.", NUMBER, (("TEXT", TEXT),)),
+    _text.expression(
+        "text.length", "length", "The number of characters in some text.", NUMBER, (("TEXT", TEXT),),
+        implemented_as="text_length",
+    ),
     _text.expression(
         "text.contains", "contains", "True when text contains a search string.", BOOLEAN, (("TEXT", TEXT), ("SEARCH", TEXT))
+    ),
+    _text.expression(
+        "text.index_of",
+        "find position",
+        "The position of the first occurrence of a search string in some text, or -1.",
+        NUMBER,
+        (("TEXT", TEXT), ("SEARCH", TEXT)),
+        implemented_as="text_index_of",
     ),
     _text.expression(
         "text.substring",
@@ -141,6 +173,7 @@ TEXTS = (
         "A slice of some text between two positions.",
         TEXT,
         (("TEXT", TEXT), ("FROM", NUMBER), ("TO", NUMBER)),
+        implemented_as="text_substring",
     ),
     _text.expression(
         "text.char_at", "character at", "The character at a position.", TEXT, (("TEXT", TEXT), ("INDEX", NUMBER))
@@ -159,13 +192,20 @@ TEXTS = (
 )
 
 VARIABLES = (
+    # TYPE is the declared type (text / number / boolean); INITIAL is required
+    # by the implemented block, since the IR's `VariableDeclaration` always
+    # initializes. `variables.get` reads a local, a parameter or a constant.
     _variables.statement(
         "variables.declare",
         "declare variable",
-        "Declares a variable with an optional initial value.",
-        (("NAME", TEXT), ("INITIAL", ANY)),
+        "Declares a local variable of a type, with an initial value.",
+        (("TYPE", TEXT), ("NAME", TEXT), ("INITIAL", ANY)),
+        implemented_as="variables_declare",
     ),
-    _variables.value("variables.get", "get variable", "Reads a variable.", ANY, inputs=(("NAME", TEXT),)),
+    _variables.value(
+        "variables.get", "get variable", "Reads a variable.", ANY, inputs=(("NAME", TEXT),),
+        implemented_as="variables_get",
+    ),
     _variables.statement(
         "variables.set", "set variable", "Assigns a value to a variable.", (("NAME", TEXT), ("VALUE", ANY))
     ),
@@ -197,6 +237,15 @@ FUNCTIONS = (
     ),
     _functions.value("functions.parameter", "parameter", "Reads a parameter inside a function.", ANY, inputs=(("NAME", TEXT),)),
     _functions.statement("functions.return", "return", "Returns a value from a function.", (("VALUE", ANY),)),
+    # A value-less `return;` — how a guard clause rejects its input and leaves
+    # a void function early. Distinct from `functions.return` above, which
+    # returns a value and stays CATALOGED.
+    _functions.statement(
+        "functions.return_void",
+        "return",
+        "Leaves the current function immediately, returning nothing.",
+        implemented_as="return_void",
+    ),
     # --- no-device/Blockly-integration correction ---------------------------
     # Two deliberately narrow, IMPLEMENTED additions, distinct from the two
     # generic CATALOGED entries above. `functions.define`/`functions.call`

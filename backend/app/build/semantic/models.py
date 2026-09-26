@@ -6,11 +6,15 @@
                 -> OperationStatement    (operation + named arguments)
                 -> CallStatement         (call an existing, zero-arg function)
                 -> ConditionalStatement  (if (CONDITION) { body: SemanticStatement[] })
+                -> VariableDeclaration   (TYPE NAME = VALUE, a local)
+                -> ReturnStatement       (return; — void)
                 -> UnsupportedStatement  (exact source text + why)
                      -> SemanticValue
                           -> LiteralValue    (typed scalar)
-                          -> SymbolValue     (named constant/parameter reference)
-                          -> ComparisonValue (LEFT ==/!= RIGHT, always boolean)
+                          -> SymbolValue     (named constant/parameter/local reference)
+                          -> ComparisonValue (LEFT ==/!=/<= RIGHT, always boolean)
+                          -> ArithmeticValue (LEFT + RIGHT, numeric)
+                          -> OperationValue  (a VALUE operation + named operands)
 
 THE QUESTION THIS LAYER ANSWERS. `app/build/discovery/models.py` already
 states the split it keeps from `FileSegment`; this module adds the third:
@@ -150,11 +154,18 @@ class LiteralValue(SemanticValue):
         return str(self.value)
 
 
-#: The comparison operators `ComparisonValue` may express. A closed pair
-#: rather than every C++ relational operator: it is exactly what an
-#: authorization-style check needs (`message == expected`, `role != "guest"`)
-#: and nothing this phase has a construct that would use `<`/`>`/`<=`/`>=` for.
-_COMPARISON_OPERATORS = ("==", "!=")
+#: The comparison operators `ComparisonValue` may express. Still a closed set
+#: rather than every C++ relational operator: `==`/`!=` are what an
+#: authorization-style check needs (`message == expected`, `token != TOKEN`),
+#: and `<=` is the one ordering test Panel 1's token parser needs — rejecting
+#: a payload whose separator is missing or leading (`separator <= 0`). `<`,
+#: `>` and `>=` stay absent until a construct needs one.
+COMPARISON_OPERATORS = ("==", "!=", "<=")
+_COMPARISON_OPERATORS = COMPARISON_OPERATORS
+
+#: The arithmetic operators `ArithmeticValue` may express: `+`, for the one
+#: offset the token parser computes (`separator + 1`). Nothing wider.
+ARITHMETIC_OPERATORS = ("+",)
 
 
 @dataclass(frozen=True)
@@ -217,8 +228,12 @@ class SymbolValue(SemanticValue):
     name: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name.strip():
-            raise SemanticModelError(f"symbol name must be a non-empty string, got {self.name!r}")
+        # An identifier, not merely non-empty text: B6 writes the name into
+        # firmware verbatim, so a "name" holding `x); system(` would be source
+        # smuggled through an editor field. Every producer already yields an
+        # identifier; this makes it impossible to construct anything else.
+        if not isinstance(self.name, str) or not re.match(r"^[A-Za-z_]\w*$", self.name):
+            raise SemanticModelError(f"symbol name must be an identifier, got {self.name!r}")
 
     def fits(self, value_type: SemanticType) -> bool:
         return isinstance(value_type, SemanticType)
@@ -226,6 +241,124 @@ class SymbolValue(SemanticValue):
     @property
     def source_text(self) -> str:
         return self.name
+
+
+def _numeric_slot(value_type: SemanticType) -> bool:
+    """NUMBER, or PIN under `LiteralValue.fits`' one-way widening."""
+    return value_type in (SemanticType.NUMBER, SemanticType.PIN)
+
+
+@dataclass(frozen=True)
+class ArithmeticValue(SemanticValue):
+    """`LEFT + RIGHT` — numeric, and only `+` (see `ARITHMETIC_OPERATORS`).
+
+    The shape of `ComparisonValue`, for the same reason: an operator over two
+    existing values is structure, not a platform operation, so it needs no row
+    in the operation registry. Always numeric, so it fits a NUMBER slot (and a
+    PIN slot, by the same widening a numeric literal gets).
+    """
+
+    left: SemanticValue
+    operator: str
+    right: SemanticValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.left, SemanticValue):
+            raise SemanticModelError(f"arithmetic left operand is not a value: {self.left!r}")
+        if not isinstance(self.right, SemanticValue):
+            raise SemanticModelError(f"arithmetic right operand is not a value: {self.right!r}")
+        if self.operator not in ARITHMETIC_OPERATORS:
+            raise SemanticModelError(f"invalid arithmetic operator: {self.operator!r}")
+        for side, operand in (("left", self.left), ("right", self.right)):
+            if not operand.fits(SemanticType.NUMBER):
+                raise SemanticModelError(
+                    f"arithmetic {side} operand ({operand.source_text}) is not numeric"
+                )
+
+    def fits(self, value_type: SemanticType) -> bool:
+        return _numeric_slot(value_type)
+
+    @property
+    def source_text(self) -> str:
+        return f"{self.left.source_text} {self.operator} {self.right.source_text}"
+
+
+@dataclass(frozen=True)
+class OperationValue(SemanticValue):
+    """A VALUE-form operation applied to its operands: `text.index_of(...)`.
+
+    The value-position counterpart of `OperationStatement`, validated the same
+    way and for the same reason — COMPLETE BY CONSTRUCTION: operands cover
+    every declared parameter exactly once, in declared order, and each fits
+    its parameter. Its own type is the operation's declared `result`, so
+    `fits` needs no guess. Carries no C++ at all; how `text.index_of` is
+    spelled is `emissions.py`'s business.
+    """
+
+    operation: SemanticOperation
+    arguments: tuple["SemanticArgument", ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operation, SemanticOperation):
+            raise SemanticModelError(f"not a SemanticOperation: {self.operation!r}")
+        if self.operation.form is not OperationForm.VALUE:
+            raise SemanticModelError(
+                f"{self.operation.operation_id}: a {self.operation.form.value} operation "
+                "does not yield a value"
+            )
+        _check_arguments(self.operation, self.arguments)
+
+    @property
+    def operation_id(self) -> str:
+        return self.operation.operation_id
+
+    @property
+    def result(self) -> SemanticType:
+        assert self.operation.result is not None  # guaranteed for a VALUE form
+        return self.operation.result
+
+    def value(self, name: str) -> SemanticValue | None:
+        """The operand bound to this parameter name, or None."""
+        for argument in self.arguments:
+            if argument.name == name:
+                return argument.value
+        return None
+
+    def fits(self, value_type: SemanticType) -> bool:
+        if not isinstance(value_type, SemanticType):
+            return False
+        if self.result is value_type:
+            return True
+        return value_type is SemanticType.PIN and self.result is SemanticType.NUMBER
+
+    @property
+    def source_text(self) -> str:
+        """Diagnostics only — `text.index_of(message, " ")`, never C++."""
+        operands = ", ".join(argument.value.source_text for argument in self.arguments)
+        return f"{self.operation_id}({operands})"
+
+
+def _check_arguments(operation: SemanticOperation, arguments: tuple) -> None:
+    """The completeness rule `OperationStatement` and `OperationValue` share."""
+    for argument in arguments:
+        if not isinstance(argument, SemanticArgument):
+            raise SemanticModelError(f"{operation.operation_id}: not an argument: {argument!r}")
+    supplied = tuple(argument.name for argument in arguments)
+    expected = operation.parameter_names
+    if supplied != expected:
+        raise SemanticModelError(
+            f"{operation.operation_id}: arguments {list(supplied)} do not match "
+            f"parameters {list(expected)}"
+        )
+    for argument in arguments:
+        parameter = operation.parameter(argument.name)
+        assert parameter is not None  # guaranteed by the name check above
+        if not argument.value.fits(parameter.value_type):
+            raise SemanticModelError(
+                f"{operation.operation_id}: argument {argument.name} "
+                f"({argument.value.source_text}) does not fit a "
+                f"{parameter.value_type.value} parameter"
+            )
 
 
 # --- statements -------------------------------------------------------------
@@ -336,27 +469,7 @@ class OperationStatement(SemanticStatement):
                 f"{self.operation.operation_id}: statement text must be non-empty source "
                 "or absent"
             )
-        for argument in self.arguments:
-            if not isinstance(argument, SemanticArgument):
-                raise SemanticModelError(
-                    f"{self.operation.operation_id}: not an argument: {argument!r}"
-                )
-        supplied = tuple(argument.name for argument in self.arguments)
-        expected = self.operation.parameter_names
-        if supplied != expected:
-            raise SemanticModelError(
-                f"{self.operation.operation_id}: arguments {list(supplied)} do not match "
-                f"parameters {list(expected)}"
-            )
-        for argument in self.arguments:
-            parameter = self.operation.parameter(argument.name)
-            assert parameter is not None  # guaranteed by the name check above
-            if not argument.value.fits(parameter.value_type):
-                raise SemanticModelError(
-                    f"{self.operation.operation_id}: argument {argument.name} "
-                    f"({argument.value.source_text}) does not fit a "
-                    f"{parameter.value_type.value} parameter"
-                )
+        _check_arguments(self.operation, self.arguments)
 
     @property
     def operation_id(self) -> str:
@@ -532,6 +645,109 @@ class ConditionalStatement(SemanticStatement):
         return True
 
 
+#: Words a local variable may not be named. C++'s keywords that can plausibly
+#: be typed into a name field, plus the three type names a declaration is
+#: written with — a variable called `String` or `int` is source nobody means.
+#: Identifier shape is checked separately; this is only the reserved set.
+_RESERVED_NAMES = frozenset(
+    {
+        "auto", "bool", "break", "case", "char", "class", "const", "continue",
+        "default", "delete", "do", "double", "else", "enum", "false", "float",
+        "for", "goto", "if", "int", "long", "new", "nullptr", "return", "short",
+        "signed", "sizeof", "static", "String", "struct", "switch", "this",
+        "true", "typedef", "union", "unsigned", "void", "volatile", "while",
+    }
+)
+
+#: The types a local may be declared with — the three the value layer can
+#: already state. Their C++ spellings live in `emissions.py`, not here.
+DECLARABLE_TYPES = (SemanticType.TEXT, SemanticType.NUMBER, SemanticType.BOOLEAN)
+
+
+def is_variable_name(name: object) -> bool:
+    """True for a name a local variable may be declared under."""
+    return (
+        isinstance(name, str)
+        and re.match(r"^[A-Za-z_]\w*$", name) is not None
+        and name not in _RESERVED_NAMES
+    )
+
+
+@dataclass(frozen=True)
+class VariableDeclaration(SemanticStatement):
+    """Declare a local variable and initialize it: `String token = ...;`.
+
+    LOCAL, TYPED, ALWAYS INITIALIZED — the minimum a function body needs to
+    name an intermediate value (Panel 1's parser names its token, the
+    separator position, and the two slices either side of it). A declaration
+    with no initializer, a global, an array, a `const`/`static` qualifier and
+    re-assignment are all absent: nothing in scope needs them, and each is a
+    real extension rather than a free one.
+
+    A later REFERENCE to the variable is an ordinary `SymbolValue` carrying
+    its name — the IR's existing named-reference leaf, which already stands
+    for parameters and constants and deliberately resolves nothing. There is
+    no second "variable reference" class to keep in step with it.
+
+    `value_type` is the variable's declared type (`DECLARABLE_TYPES`), and the
+    initializer must fit it — so `int separator = "x";` cannot be stated.
+    """
+
+    value_type: SemanticType
+    name: str
+    initializer: SemanticValue
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.value_type not in DECLARABLE_TYPES:
+            raise SemanticModelError(f"a local cannot be declared as {self.value_type!r}")
+        if not is_variable_name(self.name):
+            raise SemanticModelError(f"invalid local variable name: {self.name!r}")
+        if not isinstance(self.initializer, SemanticValue):
+            raise SemanticModelError(f"{self.name}: initializer is not a value")
+        if not self.initializer.fits(self.value_type):
+            raise SemanticModelError(
+                f"{self.name}: initializer ({self.initializer.source_text}) does not fit a "
+                f"{self.value_type.value} variable"
+            )
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError("declaration text must be non-empty source or absent")
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class ReturnStatement(SemanticStatement):
+    """`return;` — leave the current function now, returning nothing.
+
+    What turns a condition into a REJECTION: `if (token != TOKEN) { return; }`
+    stops a malformed or unauthorized command before any branch below can act
+    on it. Void only — a value-returning `return` is a different construct
+    (the catalog's still-CATALOGED `functions.return`), and every function
+    whose body Build Mode edits today returns `void`.
+    """
+
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError("return statement text must be non-empty source or absent")
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
 # --- sections and programs --------------------------------------------------
 
 
@@ -691,6 +907,34 @@ class SemanticProgram:
         for section in self.sections:
             if section.operation_id is not None:
                 used.add(section.operation_id)
-            for statement in section.operation_statements:
-                used.add(statement.operation_id)
+            for statement in section.statements:
+                used.update(_statement_operations(statement))
         return tuple(sorted(used))
+
+
+def _statement_operations(statement: SemanticStatement) -> set[str]:
+    """Every operation id a statement expresses, nested bodies and values included."""
+    if isinstance(statement, OperationStatement):
+        found = {statement.operation_id}
+        for argument in statement.arguments:
+            found |= _value_operations(argument.value)
+        return found
+    if isinstance(statement, ConditionalStatement):
+        found = _value_operations(statement.condition)
+        for item in statement.body:
+            found |= _statement_operations(item)
+        return found
+    if isinstance(statement, VariableDeclaration):
+        return _value_operations(statement.initializer)
+    return set()
+
+
+def _value_operations(value: SemanticValue) -> set[str]:
+    if isinstance(value, OperationValue):
+        found = {value.operation_id}
+        for argument in value.arguments:
+            found |= _value_operations(argument.value)
+        return found
+    if isinstance(value, (ComparisonValue, ArithmeticValue)):
+        return _value_operations(value.left) | _value_operations(value.right)
+    return set()

@@ -25,10 +25,17 @@ WHAT IS RECOGNIZED, AND NOTHING ELSE:
   * inside such a body, a statement of the exact shape
     `name(argument, ...);` where `name` is a BARE identifier in the call
     table below and every argument is a literal or a named constant;
-  * anything else in the body — a control-flow block, a declaration, an
-    assignment, a method call on an object (`client.publish(...)`), a call
-    with an expression argument (`digitalWrite(PIN, run ? HIGH : LOW)`) —
-    keeps its exact source text and a reason.
+  * a zero-argument call to any other bare name (`motorStart();`), a plain
+    `if (COMPARISON) { ... }` head, a void `return;`, and a single initialized
+    local `String|int|bool NAME = VALUE;` — where a condition or initializer
+    may use the value layer's small expression grammar (`_ExpressionReader`:
+    `==`/`!=`/`<=`, `+`, and the `String` methods `indexOf`/`substring`/
+    `length`);
+  * anything else in the body — other control flow, an uninitialized or
+    qualified declaration, an assignment, a statement-level method call
+    (`client.publish(...)`), a call with an expression argument
+    (`digitalWrite(PIN, run ? HIGH : LOW)`) — keeps its exact source text and
+    a reason.
 
 ALL OR NOTHING PER STATEMENT. If any argument of a recognized call is not
 representable, the WHOLE statement becomes unsupported. A half-understood
@@ -62,13 +69,17 @@ from __future__ import annotations
 import re
 
 from app.build.discovery import BuildDocument, CodeSection, SectionKind, code_mask
-from app.build.semantic.errors import SemanticAnalysisError
+from app.build.semantic.errors import SemanticAnalysisError, SemanticModelError
 from app.build.semantic.models import (
+    COMPARISON_OPERATORS,
+    ArithmeticValue,
     CallStatement,
     ComparisonValue,
     ConditionalStatement,
     LiteralValue,
     OperationStatement,
+    OperationValue,
+    ReturnStatement,
     SemanticArgument,
     SemanticProgram,
     SemanticSection,
@@ -77,6 +88,7 @@ from app.build.semantic.models import (
     SymbolValue,
     UnsupportedReason,
     UnsupportedStatement,
+    VariableDeclaration,
 )
 from app.build.semantic.operations import (
     FUNCTIONS_IMPLEMENTATION,
@@ -84,7 +96,11 @@ from app.build.semantic.operations import (
     GPIO_PIN_MODE,
     PROGRAM_LOOP,
     PROGRAM_SETUP,
+    TEXT_INDEX_OF,
+    TEXT_LENGTH,
+    TEXT_SUBSTRING,
     TIME_DELAY,
+    OperationForm,
     SemanticOperationRegistry,
     SemanticType,
     default_semantic_operations,
@@ -119,6 +135,23 @@ _CALL_OPERATIONS = {
     "pinMode": GPIO_PIN_MODE,
     "digitalWrite": GPIO_DIGITAL_WRITE,
     "delay": TIME_DELAY,
+}
+
+#: The `String` method each VALUE operation is written as — the receiver is
+#: the operation's first operand. The inverse of `emissions.py`'s
+#: `MethodEmission` rows, pinned against them by the test suite.
+_METHOD_OPERATIONS = {
+    "indexOf": TEXT_INDEX_OF,
+    "substring": TEXT_SUBSTRING,
+    "length": TEXT_LENGTH,
+}
+
+#: The C++ type names a local declaration is recognized with. The inverse of
+#: `emissions.py`'s `CPP_DECLARATION_TYPES`, pinned by the test suite.
+_DECLARATION_TYPES = {
+    "String": SemanticType.TEXT,
+    "int": SemanticType.NUMBER,
+    "bool": SemanticType.BOOLEAN,
 }
 
 #: C++'s own fixed control-flow vocabulary. Excluding these by name is not
@@ -372,6 +405,13 @@ def _statement(
     if conditional is not None:
         return conditional
 
+    if re.fullmatch(r"return\s*;", mask[start:end].strip()):
+        return ReturnStatement(text=text)
+
+    declaration = _try_declaration(source, mask, start, end, operations)
+    if declaration is not None:
+        return declaration
+
     call = _match_call(mask, start, end)
     if call is None:
         return UnsupportedStatement(text=text, reason=UnsupportedReason.NOT_A_CALL)
@@ -442,8 +482,10 @@ def _try_conditional(
     close_paren = _matching_paren(mask, open_paren, end)
     if close_paren is None:
         return None
-    condition = _try_condition(source, mask, open_paren + 1, close_paren)
-    if condition is None:
+    condition = _expression(source[open_paren + 1 : close_paren], operations)
+    if not isinstance(condition, ComparisonValue):
+        # Only a comparison is a condition here, as before: `if (ready)` stays
+        # carried verbatim rather than silently becoming a block.
         return None
     brace_open = _next_code(mask, close_paren + 1, end)
     if brace_open is None or mask[brace_open] != "{":
@@ -463,30 +505,217 @@ def _try_conditional(
     )
 
 
-def _try_condition(source: str, mask: str, start: int, end: int) -> SemanticValue | None:
-    """`LEFT == RIGHT` / `LEFT != RIGHT` within `[start, end)`, or None.
+def _try_declaration(
+    source: str,
+    mask: str,
+    start: int,
+    end: int,
+    operations: SemanticOperationRegistry,
+) -> VariableDeclaration | None:
+    """`TYPE NAME = VALUE;` as a local declaration, or None if it is not one.
 
-    The split point is found on the MASK, at paren/bracket depth 0, for the
-    same reason every other boundary in this module is — an `==` inside a
-    string literal or a nested call's arguments must never be mistaken for
-    the comparison's own operator.
+    Exactly one declarator of one of `_DECLARATION_TYPES`, always initialized,
+    no qualifier — see `VariableDeclaration`. Matched on the MASK so a `=`
+    inside a string can never be the initializer's `=`; the initializer itself
+    is then read from the SOURCE by `_expression`. Anything else — `String
+    message;`, `static int n = 0;`, `int a = 1, b = 2;`, an initializer the
+    value layer cannot state — is None, and the caller carries it verbatim.
     """
-    depth = 0
-    i = start
-    while i < end - 1:
-        char = mask[i]
-        if char in "([{":
-            depth += 1
-        elif char in ")]}":
-            depth -= 1
-        elif depth == 0 and mask[i : i + 2] in ("==", "!="):
-            left = _value(source[start:i])
-            right = _value(source[i + 2 : end])
-            if left is None or right is None:
-                return None
-            return ComparisonValue(left=left, operator=mask[i : i + 2], right=right)
-        i += 1
-    return None
+    match = re.fullmatch(
+        r"(String|int|bool)\s+([A-Za-z_]\w*)\s*=([^;]*);", mask[start:end].strip()
+    )
+    if match is None:
+        return None
+    offset = start + (len(mask[start:end]) - len(mask[start:end].lstrip()))
+    value = _expression(source[offset + match.start(3) : offset + match.end(3)], operations)
+    if value is None:
+        return None
+    try:
+        return VariableDeclaration(
+            value_type=_DECLARATION_TYPES[match.group(1)],
+            name=match.group(2),
+            initializer=value,
+            text=source[start:end].strip(),
+        )
+    except SemanticModelError:
+        # A reserved name, or an initializer that does not fit the declared
+        # type (`int n = "x";`): source the IR must not claim to understand.
+        return None
+
+
+# --- expressions: the value layer, read from source -------------------------
+#
+# A deliberately tiny recursive-descent reader over ONE expression's source
+# text — the grammar the value layer can state and nothing more:
+#
+#     comparison := sum [ ("==" | "!=" | "<=") sum ]
+#     sum        := postfix ( "+" postfix )*
+#     postfix    := primary ( "." METHOD "(" arguments ")" )*
+#     primary    := literal | NAME | String(TEXT) | "(" comparison ")"
+#
+# It lexes its own text rather than consulting `code_mask`, because the mask
+# blanks string literals and comments alike and an expression needs to tell
+# them apart: a string is a value, a comment inside an expression is source
+# this reader refuses (None) so the whole statement is carried verbatim.
+# Any token outside the grammar — `-` between operands, `<`, `&&`, `*`, a
+# bare function call, a char literal — is likewise None. There is no error
+# path: unrecognized means unsupported, exactly like the call recognizer.
+
+_TOKEN_PATTERN = (
+    r"\s+"
+    r"|(?P<comment>//|/\*)"
+    r'|(?P<string>"(?:[^"\\\n]|\\.)*")'
+    r"|(?P<number>(?:\d+\.\d*|\.\d+|\d+))"
+    r"|(?P<name>[A-Za-z_]\w*)"
+    r"|(?P<punct>==|!=|<=|[-+().,])"
+)
+
+
+def _tokens(text: str) -> list[tuple[str, str]] | None:
+    """`text` as `(kind, token)` pairs, or None if it holds anything else."""
+    tokens: list[tuple[str, str]] = []
+    position = 0
+    while position < len(text):
+        match = re.match(_TOKEN_PATTERN, text[position:])
+        if match is None or match.end() == 0 or match.lastgroup == "comment":
+            return None
+        if match.lastgroup is not None:
+            tokens.append((match.lastgroup, match.group(match.lastgroup)))
+        position += match.end()
+    return tokens
+
+
+def _expression(text: str, operations: SemanticOperationRegistry) -> SemanticValue | None:
+    """One expression's source as a semantic value, or None if it is not one."""
+    tokens = _tokens(text)
+    if not tokens:
+        return None
+    reader = _ExpressionReader(tokens, operations)
+    try:
+        value = reader.comparison()
+    except (_NotAnExpression, SemanticModelError):
+        return None
+    return value if reader.done else None
+
+
+class _NotAnExpression(Exception):
+    """Internal: the tokens left the grammar. Never escapes `_expression`."""
+
+
+class _ExpressionReader:
+    def __init__(self, tokens: list[tuple[str, str]], operations: SemanticOperationRegistry):
+        self._tokens = tokens
+        self._position = 0
+        self._operations = operations
+
+    @property
+    def done(self) -> bool:
+        return self._position == len(self._tokens)
+
+    def _peek(self, offset: int = 0) -> tuple[str, str] | None:
+        index = self._position + offset
+        return self._tokens[index] if index < len(self._tokens) else None
+
+    def _take(self, token: str) -> bool:
+        current = self._peek()
+        if current is not None and current[0] == "punct" and current[1] == token:
+            self._position += 1
+            return True
+        return False
+
+    def _expect(self, token: str) -> None:
+        if not self._take(token):
+            raise _NotAnExpression(token)
+
+    def comparison(self) -> SemanticValue:
+        left = self.sum()
+        current = self._peek()
+        if current is not None and current[0] == "punct" and current[1] in COMPARISON_OPERATORS:
+            self._position += 1
+            return ComparisonValue(left=left, operator=current[1], right=self.sum())
+        return left
+
+    def sum(self) -> SemanticValue:
+        value = self.postfix()
+        while self._take("+"):
+            value = ArithmeticValue(left=value, operator="+", right=self.postfix())
+        return value
+
+    def postfix(self) -> SemanticValue:
+        value = self.primary()
+        while self._take("."):
+            kind, method = self._peek() or ("", "")
+            operation_id = _METHOD_OPERATIONS.get(method) if kind == "name" else None
+            operation = None if operation_id is None else self._operations.operation(operation_id)
+            if operation is None or operation.form is not OperationForm.VALUE:
+                raise _NotAnExpression(method)
+            self._position += 1
+            self._expect("(")
+            operands = [value, *self._arguments()]
+            if len(operands) != len(operation.parameters):
+                raise _NotAnExpression(method)
+            value = OperationValue(
+                operation=operation,
+                arguments=tuple(
+                    SemanticArgument(name=parameter.name, value=operand)
+                    for parameter, operand in zip(operation.parameters, operands)
+                ),
+            )
+        return value
+
+    def _arguments(self) -> list[SemanticValue]:
+        if self._take(")"):
+            return []
+        values = [self.comparison()]
+        while self._take(","):
+            values.append(self.comparison())
+        self._expect(")")
+        return values
+
+    def primary(self) -> SemanticValue:
+        current = self._peek()
+        if current is None:
+            raise _NotAnExpression("end")
+        kind, token = current
+        if self._take("("):
+            value = self.comparison()
+            self._expect(")")
+            return value
+        if self._take("-"):
+            number = self._peek()
+            if number is None or number[0] != "number":
+                raise _NotAnExpression("-")
+            self._position += 1
+            return _number(f"-{number[1]}")
+        self._position += 1
+        if kind == "number":
+            return _number(token)
+        if kind == "string":
+            return LiteralValue(value=_unescape(token[1:-1]), value_type=SemanticType.TEXT)
+        if kind == "name":
+            if token == "String" and self._take("("):
+                # `String("...")` — how `generator.py` writes a text literal
+                # that a method is called on. Read back as the literal it is.
+                literal = self._peek()
+                if literal is None or literal[0] != "string":
+                    raise _NotAnExpression(token)
+                self._position += 1
+                self._expect(")")
+                return LiteralValue(value=_unescape(literal[1][1:-1]), value_type=SemanticType.TEXT)
+            following = self._peek()
+            if following is not None and following == ("punct", "("):
+                raise _NotAnExpression(token)  # a bare function call
+            value = _value(token)
+            if value is None:
+                raise _NotAnExpression(token)
+            return value
+        raise _NotAnExpression(token)
+
+
+def _number(text: str) -> LiteralValue:
+    if re.fullmatch(_INTEGER_PATTERN, text):
+        return LiteralValue(value=int(text), value_type=SemanticType.NUMBER)
+    return LiteralValue(value=float(text), value_type=SemanticType.NUMBER)
 
 
 def _match_call(mask: str, start: int, end: int) -> tuple[int, int, int, int] | None:
@@ -543,8 +772,13 @@ def _argument_texts(source: str, mask: str, start: int, end: int) -> list[str]:
     An empty argument list yields no entries; a trailing or doubled comma
     yields an empty entry, which `_value` then refuses — a malformed call is
     carried verbatim rather than silently accepted with a missing operand.
+
+    EMPTINESS IS DECIDED ON THE SOURCE, not the mask: `code_mask` blanks a
+    string literal to spaces, so on the mask `print("hi")` has the same empty
+    argument list as `print()`. Asking the mask alone once turned such a call
+    into a zero-argument `CallStatement` that regenerated without its operand.
     """
-    if _next_code(mask, start, end) is None:
+    if not source[start:end].strip():
         return []
     texts: list[str] = []
     depth = 0
