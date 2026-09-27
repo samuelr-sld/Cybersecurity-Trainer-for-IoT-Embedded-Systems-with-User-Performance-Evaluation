@@ -678,6 +678,37 @@ def test_compile_started_is_not_delivered_twice(
         assert rest[0]["event"] == "compile_succeeded"
 
 
+# --- regression: an abrupt disconnect while a real await is in flight -------
+#
+# Distinct from `test_disconnect_removes_build_session`, which closes an
+# otherwise-idle connection: that exercises the *graceful* path, where the
+# endpoint's `finally` runs with no cancellation anywhere near it. This one
+# disconnects while the server task is genuinely suspended elsewhere (inside
+# the still-running compile's `asyncio.to_thread`), which is what gives an
+# abrupt disconnect the chance to land a cancellation on the connection's
+# task at all. It pins that `app/build_websocket.py`'s teardown — one await
+# on `BuildService.end_session`, one on `BuildSessionManager.remove` —
+# survives that: today neither call has an internal suspension point of its
+# own (see both docstrings), so a cancellation delivered elsewhere in the
+# task cannot land inside this `finally` and abandon it partway through, the
+# same class of bug `app/sessions.py::SessionManager.discard` exists to
+# prevent for Hack Mode. If either call ever gains a genuine `await` (a slow
+# store write, a contended lock, ...), this test starts failing.
+
+
+def test_session_is_removed_after_an_abrupt_disconnect_mid_compile(
+    client: TestClient, blocking_compiler: _BlockingCompiler
+) -> None:
+    with client.websocket_connect("/ws/build") as ws:
+        session_id, _ = _open_session(ws)
+        _compile(ws)
+        assert ws.receive_json()["event"] == "compile_started"
+        # Deliberately never released: the client vanishes with the compile
+        # still genuinely in flight, rather than idle at `websocket.receive`.
+
+    assert build_session_manager._sessions.get(session_id) is None
+
+
 def _compile_ok(ws) -> None:
     """Compile over the socket and consume the four resulting frames.
 

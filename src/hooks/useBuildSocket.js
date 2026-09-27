@@ -100,7 +100,9 @@ export default function useBuildSocket(handlers) {
       socket.send(
         JSON.stringify({ type: 'edit_region', path, region_id: regionId, source }),
       )
+      return true
     }
+    return false
   }, [])
 
   // THE INTENDED EDITING INTERFACE (Phase B8 correction). A student clicks a
@@ -111,10 +113,17 @@ export default function useBuildSocket(handlers) {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'section_blockly', path, section_id: sectionId }))
+      return true
     }
+    return false
   }, [])
 
-  // The write leg. `workspace` is the Blockly serialization state
+  // The write leg — sent only as the first step of the COMPILE/FLASH chain
+  // (src/build/compileChain.js); there is no student-facing save that sends
+  // it on its own. Like every sender here it returns whether the frame was
+  // actually sent, so that chain can end itself instead of waiting forever
+  // for an answer to a frame that never left. `workspace` is the Blockly
+  // serialization state
   // (`Blockly.serialization.workspaces.save(...)`) for exactly the one
   // section named by `sectionId`; `preserved` is the fragment list that came
   // back with it (or an edited copy of that list — e.g. cleared by the
@@ -132,7 +141,9 @@ export default function useBuildSocket(handlers) {
           preserved,
         }),
       )
+      return true
     }
+    return false
   }, [])
 
   // Field-less by design — see backend/app/models/build_messages.py:
@@ -142,7 +153,9 @@ export default function useBuildSocket(handlers) {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'compile' }))
+      return true
     }
+    return false
   }, [])
 
   // Field-less by design, for stronger reasons than compile — see
@@ -156,7 +169,9 @@ export default function useBuildSocket(handlers) {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'flash' }))
+      return true
     }
+    return false
   }, [])
 
   // Field-less, read-only, and safe to send as often as needed — see
@@ -167,7 +182,9 @@ export default function useBuildSocket(handlers) {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'hardware_status' }))
+      return true
     }
+    return false
   }, [])
 
   // Field-less, same reasoning as `sendCompile`/`sendFlash` — see
@@ -182,7 +199,9 @@ export default function useBuildSocket(handlers) {
     const socket = socketRef.current
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'validate' }))
+      return true
     }
+    return false
   }, [])
 
   return {

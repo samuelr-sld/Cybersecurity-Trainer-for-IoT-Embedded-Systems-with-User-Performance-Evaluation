@@ -9,6 +9,15 @@ import useBuildSocket, { CONNECTION_STATUS } from '../hooks/useBuildSocket'
 // between this header and Hack Mode's.
 import HardwareHeaderStatus from '../components/HardwareHeaderStatus'
 import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE } from '../hardware/deviceState'
+import {
+  CHAIN_INTENT,
+  CHAIN_NOTICE,
+  CHAIN_PHASE,
+  INITIAL_CHAIN,
+  chainBusy,
+  createChainDriver,
+  transmitVia,
+} from '../build/compileChain'
 
 // Backend `BuildEventType` values (backend/app/build/events.py) -> Activity
 // Log copy. A plain lookup, not a switch, so an event type this map doesn't
@@ -65,13 +74,6 @@ const POLICY_LABEL = {
   explore: 'EXPLORE',
   editable: 'EDITABLE',
 }
-
-// The security-test control is wired to nothing yet — that phase is not
-// implemented (see CLAUDE.md). It stays a visibly disabled placeholder
-// rather than claiming a result nothing measured. COMPILE, FLASH and now
-// VALIDATE are all real controls — see the console actions below — so none
-// of them is in this list.
-const FUTURE_CONTROLS = [{ key: 'security_test', label: 'SECURITY TEST' }]
 
 // Backend `FlashStatus` -> banner copy. NO ESP32 DEVICE DETECTED is
 // deliberately worded as a device fact, not a build or toolchain problem.
@@ -133,6 +135,14 @@ const VALIDATION_OUTCOME_NOTE = {
 // evaluation metrics, this only needs to read that value instead of
 // `Date.now()` at push-time; the elapsed-since-session-start display and the
 // per-session reset stay exactly as they are.
+// The Activity Log's session clock. Only ever called from the `session`
+// socket handler, never during render — kept as a module-level function so
+// that stays obvious to the React Compiler's purity check, which cannot see
+// that `useBuildSocket` invokes its handlers from socket callbacks.
+function sessionClockNow() {
+  return Date.now()
+}
+
 function formatElapsedSince(startMs) {
   // `startMs` is null only in the instant before `onSession` has set it —
   // see `sessionStartRef` — which no logged event can ever observe (the
@@ -161,6 +171,23 @@ const COMPILE_TOAST_CONTENT = {
   failed: { icon: '✕', title: 'Compilation failed' },
 }
 
+// Why an EDIT -> COMPILE -> FLASH chain stopped short (src/build/
+// compileChain.js). REQUEST_REFUSED has no copy of its own: the backend's
+// `error` frame already says why, in the line above this one.
+const CHAIN_NOTICE_TEXT = {
+  [CHAIN_NOTICE.EDIT_REJECTED]:
+    'Compile stopped — the backend rejected this edit, so nothing was saved, compiled or flashed. Your blocks are kept as they are: fix them and compile again.',
+  [CHAIN_NOTICE.COMPILE_FAILED_NO_FLASH]: 'Flash cancelled — compilation failed, so nothing was uploaded.',
+  [CHAIN_NOTICE.EDITED_DURING_CHAIN_NO_FLASH]:
+    'Flash cancelled — the blocks changed while compiling, so that build is already out of date. Flash again to build and upload the current blocks.',
+}
+
+// Shown when a student tries to leave a section that still holds edits
+// COMPILE has not submitted. There is no separate save step any more, so
+// switching away would otherwise silently throw those blocks away.
+const SWITCH_BLOCKED_NOTICE =
+  'This section has edits that are not compiled yet. Press COMPILE to submit them before opening another section or file.'
+
 // "Near enough to the bottom that a new Activity Log entry should still
 // auto-scroll into view" — see the activityLogRef/onScroll wiring below.
 const ACTIVITY_LOG_AUTOSCROLL_THRESHOLD_PX = 32
@@ -181,20 +208,39 @@ export default function BuildMode({ onBack, onMenu }) {
   const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [sectionData, setSectionData] = useState(null)
   const [sectionLoading, setSectionLoading] = useState(false)
-  // The student's current in-progress edit for the open section, or null
-  // when the editor should show what the backend last sent. Exactly ONE of
-  // these is ever non-null at a time: `sectionPendingWorkspace` for a
-  // representable section's Blockly canvas, `legacyDraft` for the raw-text
-  // fallback a still-unrepresentable EDITABLE section falls back to. Both
-  // are cleared the moment the matching `code_edited` event confirms the
-  // save landed — see the `onEvent` handler below.
-  const [sectionPendingWorkspace, setSectionPendingWorkspace] = useState(null)
+  // THE LOCAL DRAFT AND THE EDIT -> COMPILE -> FLASH CHAIN. There is no
+  // student-facing save: a section's edits live in the chain driver
+  // (src/build/compileChain.js `createChainDriver`) until COMPILE or FLASH
+  // submits them. The driver keeps the draft's CONTENT and a version number
+  // that changes on EVERY local edit; the backend's acknowledgement clears
+  // the draft only if the version it answers is still the current one, so an
+  // edit made while a request was in flight is never mistaken for submitted.
+  //
+  // The driver is one stable, mutable object (created once, never replaced)
+  // because socket handlers must advance it synchronously, the instant a
+  // frame arrives. Render code never reads it:
+  // `draftVersion` and `chain` below are the state mirrors it renders from,
+  // refreshed by `syncChain` after every driver call. They replace the old
+  // `sectionPendingWorkspace`/`pendingCompileSync`/`flashPending` flags —
+  // "submitting", "compiling before flash" and "flashing" are all phases of
+  // this one chain.
+  const [driver] = useState(createChainDriver)
+  // The open canvas's `{flush()}` (src/components/BlocklyWorkspace.jsx), so
+  // COMPILE/FLASH can take the canvas exactly as it is at the click rather
+  // than as of the last asynchronously-delivered Blockly change event.
+  const blocklyApiRef = useRef(null)
+  const [draftVersion, setDraftVersion] = useState(null)
+  const [chain, setChain] = useState(INITIAL_CHAIN)
+  // Why the last chain stopped short, or a refused section switch — plain
+  // copy, shown under the backend's own error line.
+  const [chainNotice, setChainNotice] = useState('')
   // The preserved-fragment list to resubmit alongside a Blockly edit — see
   // `BlocklySection.records`/`app/build/blockly_bridge/workspace_state.py`.
   // Starts as exactly what `section_blockly` answered; CLEAR empties it
   // outright, which is the honest "the student deleted this" edit the
   // no-restore-original requirement calls for — never something this
-  // frontend invents on its own.
+  // frontend invents on its own, and never done automatically to get a
+  // security-region edit past the backend's ownership rule.
   const [sectionPreserved, setSectionPreserved] = useState([])
   const [legacyTextOpen, setLegacyTextOpen] = useState(false)
   const [legacyDraft, setLegacyDraft] = useState(null)
@@ -207,40 +253,13 @@ export default function BuildMode({ onBack, onMenu }) {
   // tell it to.
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
 
-  // True from the moment a flash is requested until the backend answers.
-  // The backend sends one batch of frames when the whole action finishes,
-  // so its intermediate DETECTING/RUNNING statuses are never observable
-  // here — this local flag is what keeps the button disabled and the banner
-  // honest ("detecting or uploading, we don't know which yet") for the ~15s
-  // a real upload takes, instead of pretending to know the sub-step.
-  const [flashPending, setFlashPending] = useState(false)
-
-  // Same pattern as `flashPending` (Phase B7): true from the moment
-  // validation is requested until the backend answers with a fresh `state`
-  // (or rejects the request with an `error` frame). The backend's own
-  // `validation_started`/succeeded/failed events already stream through
-  // `onEvent` into the Activity Log below; this local flag is only what
-  // keeps the button disabled and the terminal honest while the check runs.
+  // True from the moment validation is requested until the backend answers
+  // with a fresh `state` (or rejects the request with an `error` frame). The
+  // backend's own `validation_started`/succeeded/failed events already stream
+  // through `onEvent` into the Activity Log below; this local flag is only
+  // what keeps the button disabled and the terminal honest while the check
+  // runs.
   const [validationPending, setValidationPending] = useState(false)
-
-  // True from the moment COMPILE is clicked with an unsaved section edit
-  // still open until the backend has confirmed that edit reached the
-  // BuildWorkspace — see `compile()` below. Kept separate from `isCompiling`
-  // (which only reflects `state.compile_status`) because this covers the
-  // brief save round-trip that happens *before* a `compile` request is even
-  // sent.
-  const [pendingCompileSync, setPendingCompileSync] = useState(false)
-  // Set together with `pendingCompileSync`; cleared (and `sendCompile`
-  // fired) the moment the matching `code_edited` event streams in — see the
-  // `onEvent` handler below. A ref, not state, because it must be read
-  // synchronously inside that handler without waiting for a re-render.
-  const compileAfterSyncRef = useRef(false)
-  // `sendCompile` itself only exists once `useBuildSocket` below has
-  // returned, but the `onEvent` handler passed *into* that call needs to
-  // invoke it — this ref is populated by the effect right after the hook
-  // call and lets the handler read the current `sendCompile` without a
-  // circular reference.
-  const sendCompileRef = useRef(() => {})
 
   // The moment THIS Build Mode session started, for Activity Log elapsed
   // timestamps (see `formatElapsedSince`) — set in `onSession` below (never
@@ -258,6 +277,21 @@ export default function BuildMode({ onBack, onMenu }) {
   const [failureToastDismissed, setFailureToastDismissed] = useState(false)
   const successToastTimeoutRef = useRef(null)
 
+  // Mirror the driver into render state after every call, and surface why a
+  // chain stopped short, if it did.
+  function syncChain(result) {
+    setChain(driver.chain)
+    setDraftVersion(driver.draftVersion)
+    if (result?.notice && CHAIN_NOTICE_TEXT[result.notice]) {
+      setChainNotice(CHAIN_NOTICE_TEXT[result.notice])
+    }
+    if (result?.sendFailed) {
+      // Nothing was sent, so nothing will ever answer; the driver has
+      // already ended the chain rather than leave COMPILE/FLASH disabled.
+      setProtocolError('Not connected to the Build Mode backend — nothing was sent.')
+    }
+  }
+
   const {
     status,
     sendEditRegion,
@@ -271,34 +305,42 @@ export default function BuildMode({ onBack, onMenu }) {
     onSession: () => {
       setEvents([])
       setProtocolError('')
-      setFlashPending(false)
+      setChainNotice('')
       setValidationPending(false)
-      sessionStartRef.current = Date.now()
+      sessionStartRef.current = sessionClockNow()
       setShowSuccessToast(false)
       setFailureToastDismissed(false)
       if (successToastTimeoutRef.current) {
         clearTimeout(successToastTimeoutRef.current)
         successToastTimeoutRef.current = null
       }
-      compileAfterSyncRef.current = false
-      setPendingCompileSync(false)
+      syncChain(driver.reset())
       setSelectedSectionId(null)
       setSectionData(null)
       setSectionLoading(false)
-      setSectionPendingWorkspace(null)
       setSectionPreserved([])
       setLegacyTextOpen(false)
       setLegacyDraft(null)
     },
     onState: (data) => {
       setState(data)
-      setFlashPending(false)
       setValidationPending(false)
     },
     onSection: (data) => {
       setSectionLoading(false)
       setSectionData(data)
-      setSectionPendingWorkspace(null)
+      // The draft baseline is exactly what the backend just answered — the
+      // workspace the canvas is about to load and its preserved list — so a
+      // CLEAR with no block changes still submits a complete edit.
+      syncChain(
+        driver.loadBaseline({
+          kind: 'blocks',
+          path: data?.path,
+          sectionId: data?.sectionId,
+          workspace: data?.workspace,
+          preserved: data?.preserved || [],
+        }),
+      )
       setSectionPreserved(data?.preserved || [])
       setLegacyTextOpen(false)
       setLegacyDraft(null)
@@ -308,20 +350,20 @@ export default function BuildMode({ onBack, onMenu }) {
         ...evts,
         { event: message.event, data: message.data, at: formatElapsedSince(sessionStartRef.current) },
       ])
-      // EDIT -> COMPILE without SAVE: `code_edited` is the one event both
-      // `edit_region` and `edit_section_blocks` produce on success (never
-      // `hardware_status`'s periodic poll, which emits no events at all —
-      // see backend/app/build/service.py::detect_hardware), so this is an
-      // unambiguous confirmation that whichever save `compile()` below sent
-      // has landed in the backend's BuildWorkspace.
+      // `code_edited` is the one event both `edit_region` and
+      // `edit_section_blocks` produce on success (never `hardware_status`'s
+      // periodic poll, which emits no events at all — see backend/app/build/
+      // service.py::detect_hardware), so it is an unambiguous confirmation
+      // that the edit the chain submitted has landed in the backend's
+      // BuildWorkspace. The chain clears the draft only if no newer edit was
+      // made meanwhile, then sends `compile`.
       if (message.event === 'code_edited') {
-        setSectionPendingWorkspace(null)
-        setLegacyDraft(null)
-        if (compileAfterSyncRef.current) {
-          compileAfterSyncRef.current = false
-          setPendingCompileSync(false)
-          sendCompileRef.current()
-        }
+        setProtocolError('')
+        syncChain(driver.editAcknowledged())
+      } else if (message.event === 'compile_succeeded' || message.event === 'compile_failed') {
+        syncChain(driver.compileFinished(message.event === 'compile_succeeded'))
+      } else if (message.event === 'flash_succeeded' || message.event === 'flash_failed') {
+        syncChain(driver.flashFinished())
       }
       // Drives the compile toast directly off the real backend events that
       // start/end a compile, rather than diffing `state.compile_status` in
@@ -352,28 +394,32 @@ export default function BuildMode({ onBack, onMenu }) {
     },
     onError: (message) => {
       setProtocolError(message)
-      setFlashPending(false)
       setValidationPending(false)
       setSectionLoading(false)
-      // The sync edit itself was rejected (e.g. an unknown/locked region) —
-      // abort rather than compiling stale source.
-      if (compileAfterSyncRef.current) {
-        compileAfterSyncRef.current = false
-        setPendingCompileSync(false)
-      }
+      // A rejected edit (e.g. the security region's ownership rule) or a
+      // refused compile/flash ends the chain: nothing further is sent, and
+      // the draft is left exactly as the student made it.
+      syncChain(driver.error())
     },
   })
 
+  // The socket senders only exist once `useBuildSocket` has returned, but the
+  // handlers passed INTO it drive the chain — so the chain's way out is
+  // attached here, right after the hook call.
   useEffect(() => {
-    sendCompileRef.current = sendCompile
-  }, [sendCompile])
+    const senders = { sendEditRegion, sendEditSectionBlocks, sendCompile, sendFlash }
+    driver.attach((send, draft) => transmitVia(senders, send, draft))
+  }, [driver, sendEditRegion, sendEditSectionBlocks, sendCompile, sendFlash])
 
   const hasActiveProject = Boolean(state?.has_active_project)
   const files = state?.files || {}
   const fileNames = Object.keys(files)
   const resolvedActiveFile = activeFile && files[activeFile] ? activeFile : fileNames[0] || null
   const activeSegments = files[resolvedActiveFile]?.segments || []
-  const sectionDirty = sectionPendingWorkspace !== null || legacyDraft !== null
+  const sectionDirty = draftVersion !== null
+  const busy = chainBusy(chain)
+  const flashing = chain.phase === CHAIN_PHASE.FLASHING
+  const submitting = chain.phase === CHAIN_PHASE.SUBMITTING
 
   const compileStatus = state?.compile_status || 'not_started'
   const isCompiling = compileStatus === 'running'
@@ -396,11 +442,11 @@ export default function BuildMode({ onBack, onMenu }) {
     [],
   )
 
-  // `running` covers both the brief unsaved-edit sync and the real compile,
-  // since from the student's point of view both are "compiling" — see
-  // `compile()`. `succeeded`/`failed` reflect the real backend
-  // `compile_status`; nothing here is simulated.
-  const compileToastKind = pendingCompileSync || isCompiling
+  // `running` covers both the brief edit submission and the real compile,
+  // since from the student's point of view both are "compiling" — see the
+  // chain in src/build/compileChain.js. `succeeded`/`failed` reflect the
+  // real backend `compile_status`; nothing here is simulated.
+  const compileToastKind = submitting || isCompiling
     ? 'running'
     : compileStatus === 'failed' && !failureToastDismissed
       ? 'failed'
@@ -412,18 +458,18 @@ export default function BuildMode({ onBack, onMenu }) {
   const flashOutput = state?.flash_output || null
   // The backend's own answer to "would a flash be accepted right now?" —
   // true only while the last compile succeeded AND the workspace still
-  // matches what it built (backend/app/build_sessions.py: flash_ready). The
-  // button follows that rather than second-guessing it here, so it can
-  // never offer an action the backend would refuse.
+  // matches what it built (backend/app/build_sessions.py: flash_ready).
   const flashReady = Boolean(state?.flash_ready)
-  // `!sectionDirty` closes the one gap `flash_ready` alone can't: it
-  // reflects the *backend* workspace's fingerprint, which a local unsaved
-  // edit never touches, so it can still read `true` from an earlier compile
-  // while the editor shows different code than what was built. Compiling
-  // always syncs first (see `compile()`), so this never blocks a legitimate
-  // flash for more than the moment it takes to hit COMPILE again.
-  const canFlash = flashReady && !flashPending && !isCompiling && !pendingCompileSync && !sectionDirty
-  const flashBannerStatus = flashPending ? 'running' : flashStatus
+  // FLASH is offered whenever nothing else is in flight: it no longer
+  // requires a prior COMPILE, because the chain compiles first whenever the
+  // editor holds an unsubmitted draft (`sectionDirty`, which `flash_ready`
+  // cannot see) or the backend's last build is not the current source
+  // (`!flashReady`). It then flashes only after that compile succeeded with
+  // no newer edit made meanwhile, and the backend re-checks the same content
+  // hash before uploading anything.
+  const canFlash = hasActiveProject && !busy && !isCompiling && !validationPending
+  const flashNeedsCompile = sectionDirty || !flashReady
+  const flashBannerStatus = flashing ? 'running' : flashStatus
 
   const validationStatus = state?.validation_status || 'not_started'
   const validationOutput = state?.validation_output || null
@@ -441,12 +487,7 @@ export default function BuildMode({ onBack, onMenu }) {
   // This can never offer an action the backend would refuse; it only avoids
   // a round trip to find that out.
   const canValidate =
-    flashStatus === 'succeeded' &&
-    flashReady &&
-    !validationPending &&
-    !flashPending &&
-    !isCompiling &&
-    !pendingCompileSync
+    flashStatus === 'succeeded' && flashReady && !validationPending && !busy && !isCompiling
   const validationBannerStatus = validationPending ? 'running' : validationStatus
 
   // Backend `hardware` block (backend/app/build_sessions.py: `snapshot`) —
@@ -471,27 +512,30 @@ export default function BuildMode({ onBack, onMenu }) {
   // toolchain, and re-checks immediately once the socket (re)connects. Kept
   // running even with no active project — the header must stay truthful
   // while a student waits for a panel to be identified.
-  const pollGuardRef = useRef({ isCompiling, flashPending, pendingCompileSync })
+  const pollGuardRef = useRef({ isCompiling })
   useEffect(() => {
-    pollGuardRef.current = { isCompiling, flashPending, pendingCompileSync }
+    pollGuardRef.current = { isCompiling }
   })
   useEffect(() => {
     if (!socketLinked) return undefined
     const poll = () => {
-      if (pollGuardRef.current.isCompiling || pollGuardRef.current.flashPending || pollGuardRef.current.pendingCompileSync) return
+      // The driver, not `chain`: the chain may have advanced since the last
+      // render, and a poll must never compete with a submission, compile or
+      // upload that is already on the wire.
+      if (pollGuardRef.current.isCompiling || driver.isBusy()) return
       sendHardwareStatus()
     }
     poll()
     const id = setInterval(poll, HARDWARE_POLL_INTERVAL_MS)
     return () => clearInterval(id)
-  }, [socketLinked, sendHardwareStatus])
+  }, [socketLinked, sendHardwareStatus, driver])
 
   // The Flash Terminal under the code editor — real Arduino CLI/esptool
   // output (`flashOutput.stdout`/`stderr`), never simulated text. Built the
   // same way the old `.flash-result` block was (same banner/device/failure-
   // note copy), just rendered as one scrollable terminal block instead of a
   // separate colored banner plus a nested `<pre>`.
-  const flashTerminalText = flashPending
+  const flashTerminalText = flashing
     ? 'Detecting device / uploading…'
     : flashStatus === 'not_started'
       ? 'Flash output will appear here once you flash the firmware.'
@@ -554,6 +598,16 @@ export default function BuildMode({ onBack, onMenu }) {
     }
   }, [events])
 
+  // Leaving the open section while it holds an uncompiled draft is REFUSED,
+  // not silently allowed: with no separate save step, switching away would
+  // throw the student's blocks away. The same guard covers an in-flight chain,
+  // whose socket answers must still land on the section that submitted.
+  function canLeaveSection() {
+    if (!sectionDirty && !busy) return true
+    setChainNotice(SWITCH_BLOCKED_NOTICE)
+    return false
+  }
+
   // A section IS the interaction surface (Phase B8 correction) — clicking
   // one opens it, whatever its policy. LOCKED/EXPLORE need no round trip
   // (their current text is already in `state.files`); only EDITABLE asks
@@ -563,9 +617,11 @@ export default function BuildMode({ onBack, onMenu }) {
     if (regionId === selectedSectionId) return
     const segment = activeSegments.find((s) => s.region_id === regionId)
     if (!segment) return
+    if (!canLeaveSection()) return
+    setChainNotice('')
     setSelectedSectionId(regionId)
     setSectionData(null)
-    setSectionPendingWorkspace(null)
+    syncChain(driver.loadBaseline(null))
     setSectionPreserved([])
     setLegacyTextOpen(false)
     setLegacyDraft(null)
@@ -577,46 +633,70 @@ export default function BuildMode({ onBack, onMenu }) {
 
   function switchFile(name) {
     if (name === resolvedActiveFile) return
+    if (!canLeaveSection()) return
+    setChainNotice('')
     setActiveFile(name)
     setSelectedSectionId(null)
     setSectionData(null)
-    setSectionPendingWorkspace(null)
+    syncChain(driver.loadBaseline(null))
     setSectionPreserved([])
     setLegacyTextOpen(false)
     setLegacyDraft(null)
   }
 
-  function saveSection() {
-    if (!resolvedActiveFile || !selectedSectionId) return
-    if (sectionPendingWorkspace !== null) {
-      sendEditSectionBlocks(resolvedActiveFile, selectedSectionId, sectionPendingWorkspace, sectionPreserved)
-    } else if (legacyDraft !== null) {
-      sendEditRegion(resolvedActiveFile, selectedSectionId, legacyDraft)
-    }
+  // Blockly reported a change: the CURRENT serialized workspace becomes the
+  // draft COMPILE will submit.
+  function onBlocksChange(workspace) {
+    syncChain(driver.edit({ workspace }))
+  }
+
+  // CLEAR is an edit like any other — it changes what COMPILE submits — so it
+  // produces a new draft version even when no block moved.
+  function clearPreserved() {
+    setSectionPreserved([])
+    syncChain(driver.edit({ preserved: [] }))
+  }
+
+  function openLegacyText(segment) {
+    setLegacyTextOpen(true)
+    setLegacyDraft(segment.text || '')
+    // Opening the text editor is not an edit; typing in it is.
+    syncChain(
+      driver.loadBaseline({
+        kind: 'text',
+        path: resolvedActiveFile,
+        sectionId: segment.region_id,
+        source: segment.text || '',
+      }),
+    )
+  }
+
+  function onLegacyTextChange(source) {
+    setLegacyDraft(source)
+    syncChain(driver.edit({ source }))
+  }
+
+  // COMPILE and FLASH are the same chain with a different final step — see
+  // src/build/compileChain.js. Starting one clears the previous attempt's
+  // messages, so a rejection from an earlier attempt can never be mistaken
+  // for the verdict on this one.
+  function startChain(intent) {
+    if (busy || driver.isBusy() || isCompiling || validationPending) return
+    // Report any canvas change Blockly has not delivered yet, synchronously,
+    // so the draft the chain submits below is the CURRENT workspace.
+    blocklyApiRef.current?.flush()
+    setProtocolError('')
+    setChainNotice('')
+    syncChain(driver.request(intent, flashReady))
   }
 
   function compile() {
-    if (isCompiling || pendingCompileSync) return
-    if (sectionDirty && resolvedActiveFile && selectedSectionId) {
-      // EDIT -> COMPILE without SAVE. Synchronize the current in-progress
-      // edit into the backend BuildWorkspace first — reused rather than
-      // bypassed, exactly as a manual SAVE would — and only send `compile`
-      // once the backend has confirmed that edit (see the `onEvent` handler
-      // above). This is not "auto-clicking SAVE": SAVE and COMPILE remain
-      // distinct actions a user can each trigger independently; COMPILE just
-      // also carries whatever edit the editor currently holds.
-      compileAfterSyncRef.current = true
-      setPendingCompileSync(true)
-      saveSection()
-    } else {
-      sendCompile()
-    }
+    startChain(CHAIN_INTENT.COMPILE)
   }
 
   function flash() {
     if (!canFlash) return
-    setFlashPending(true)
-    sendFlash()
+    startChain(CHAIN_INTENT.FLASH)
   }
 
   function validate() {
@@ -631,21 +711,22 @@ export default function BuildMode({ onBack, onMenu }) {
   }
 
   function flashHint() {
-    if (canFlash) return 'Upload the compiled firmware to the connected ESP32'
-    if (isCompiling || pendingCompileSync) return 'Wait for the current compilation to finish'
-    if (flashPending) return 'A flash is already in progress'
-    if (sectionDirty) return 'Compile your latest edits before flashing'
-    if (compileStatus === 'succeeded') {
-      return 'The firmware changed since the last build — compile again before flashing'
+    if (canFlash) {
+      return flashNeedsCompile
+        ? 'Compile the current blocks, then upload them to the connected ESP32'
+        : 'Upload the compiled firmware to the connected ESP32'
     }
-    return 'Compile the firmware successfully before flashing'
+    if (flashing) return 'A flash is already in progress'
+    if (busy || isCompiling) return 'Wait for the current compilation to finish'
+    if (validationPending) return 'Wait for the validation check to finish'
+    return 'Flash is not available right now'
   }
 
   function validationHint() {
     if (canValidate) return 'Run the validation check against the flashed firmware'
     if (validationPending) return 'A validation check is already running'
-    if (isCompiling || pendingCompileSync) return 'Wait for the current compilation to finish'
-    if (flashPending) return 'Wait for the current flash to finish'
+    if (flashing) return 'Wait for the current flash to finish'
+    if (busy || isCompiling) return 'Wait for the current compilation to finish'
     if (flashStatus !== 'succeeded') return 'Flash the compiled firmware to the device before validating'
     if (!flashReady) {
       return 'The firmware changed since the last flash — compile and flash again before validating'
@@ -799,29 +880,24 @@ export default function BuildMode({ onBack, onMenu }) {
                   </li>
                 </ul>
               </section>
-              {/* All five Build/Development action controls live together
-                  here, in the existing left-hand information column — not
-                  in a new sidebar or toolbar. Only their position moved;
-                  every button below still calls the exact same handler it
-                  always did. */}
+              {/* The Build/Development action controls, in the existing
+                  left-hand information column. There is deliberately no
+                  SAVE control: COMPILE is the point at which an edit is
+                  submitted, ownership-checked and persisted, and FLASH runs
+                  that same chain first whenever the build is out of date
+                  (src/build/compileChain.js). */}
               <section className="panel">
                 <h3>BUILD ACTIONS</h3>
                 <div className="build-actions-list">
                   <button
                     type="button"
                     className="btn-solid"
-                    disabled={!sectionDirty}
-                    onClick={saveSection}
-                  >
-                    SAVE SECTION
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-outline"
-                    disabled={isCompiling || pendingCompileSync || flashPending}
+                    disabled={busy || isCompiling || validationPending || !hasActiveProject}
                     onClick={compile}
                   >
-                    {pendingCompileSync ? '… SYNCING' : isCompiling ? '… COMPILING' : '▶ COMPILE'}
+                    {(busy && chain.intent === CHAIN_INTENT.COMPILE) || (!busy && isCompiling)
+                      ? '… COMPILING'
+                      : '▶ COMPILE'}
                   </button>
                   <button
                     type="button"
@@ -830,7 +906,11 @@ export default function BuildMode({ onBack, onMenu }) {
                     onClick={flash}
                     title={flashHint()}
                   >
-                    {flashPending ? '… FLASHING' : '▲ FLASH'}
+                    {flashing
+                      ? '… FLASHING'
+                      : busy && chain.intent === CHAIN_INTENT.FLASH
+                        ? '… COMPILING BEFORE FLASH'
+                        : '▲ FLASH'}
                   </button>
                   <button
                     type="button"
@@ -841,14 +921,6 @@ export default function BuildMode({ onBack, onMenu }) {
                   >
                     {validationPending ? '… VALIDATING' : 'RUN VALIDATION TEST'}
                   </button>
-                  {FUTURE_CONTROLS.map(({ key, label }) => (
-                    <span className="future-control" key={key}>
-                      <button type="button" className="btn-outline" disabled>
-                        {label}
-                      </button>
-                      <em>COMING IN PHASE 3B</em>
-                    </span>
-                  ))}
                 </div>
               </section>
             </>
@@ -910,7 +982,8 @@ export default function BuildMode({ onBack, onMenu }) {
                           <BlocklyWorkspace
                             key={selectedSectionId}
                             initialWorkspaceState={sectionData.workspace}
-                            onWorkspaceChange={setSectionPendingWorkspace}
+                            onWorkspaceChange={onBlocksChange}
+                            apiRef={blocklyApiRef}
                           />
                         </div>
                         {sectionPreserved.length > 0 && (
@@ -920,7 +993,7 @@ export default function BuildMode({ onBack, onMenu }) {
                               <button
                                 type="button"
                                 className="btn-outline small"
-                                onClick={() => setSectionPreserved([])}
+                                onClick={clearPreserved}
                               >
                                 CLEAR
                               </button>
@@ -952,10 +1025,7 @@ export default function BuildMode({ onBack, onMenu }) {
                             <button
                               type="button"
                               className="btn-outline"
-                              onClick={() => {
-                                setLegacyTextOpen(true)
-                                setLegacyDraft(segment.text || '')
-                              }}
+                              onClick={() => openLegacyText(segment)}
                             >
                               EDIT AS TEXT (LEGACY)
                             </button>
@@ -965,7 +1035,7 @@ export default function BuildMode({ onBack, onMenu }) {
                             className="code-editor-full"
                             spellCheck={false}
                             value={legacyDraft ?? ''}
-                            onChange={(e) => setLegacyDraft(e.target.value)}
+                            onChange={(e) => onLegacyTextChange(e.target.value)}
                           />
                         )}
                       </>
@@ -975,19 +1045,21 @@ export default function BuildMode({ onBack, onMenu }) {
               })
             )}
           </div>
-          {/* Every action button (SAVE/COMPILE/FLASH/validation/security
-              test) now lives in the left-hand BUILD ACTIONS panel — see
-              above. This bar is just the workspace's save-state readout. */}
+          {/* Every action button (COMPILE/FLASH/validation/security test)
+              lives in the left-hand BUILD ACTIONS panel — see above. This bar
+              is the workspace's submission-state readout, plus why the last
+              COMPILE/FLASH chain stopped short, if it did. */}
           <div className="console">
             <div className={`console-out ${protocolError ? 'warn' : ''}`}>
               {protocolError
                 ? `✗ ${protocolError}`
                 : sectionDirty
-                  ? '● unsaved edits — not yet sent to the backend'
+                  ? '● edits not compiled yet — COMPILE submits and builds them'
                   : state?.dirty
-                    ? '● firmware saved — differs from the original firmware'
+                    ? '● firmware compiled from your edits — differs from the original firmware'
                     : 'Firmware matches the original firmware.'}
             </div>
+            {chainNotice && <div className="console-out warn">{chainNotice}</div>}
           </div>
           {/* Flash output stays inline (real Arduino CLI/esptool upload
               text matters to a student watching hardware upload) — see
@@ -1001,7 +1073,7 @@ export default function BuildMode({ onBack, onMenu }) {
             <div className="flash-terminal-header">
               <span>FLASH TERMINAL</span>
               <span className="status-pill">
-                {flashPending ? 'UPLOADING…' : BUILD_STATUS_LABEL[flashStatus] || flashStatus}
+                {flashing ? 'UPLOADING…' : BUILD_STATUS_LABEL[flashStatus] || flashStatus}
               </span>
             </div>
             <pre className="flash-terminal-body">{flashTerminalText}</pre>

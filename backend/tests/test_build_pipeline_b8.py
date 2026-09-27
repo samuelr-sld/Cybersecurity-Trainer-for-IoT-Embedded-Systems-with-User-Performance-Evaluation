@@ -1044,6 +1044,32 @@ def test_an_early_forged_start_failure_triggers_a_cleanup_stop() -> None:
     assert result.details["cleanup_stop_error"] is None
 
 
+def test_the_p0_case_a_forged_start_left_running_by_an_untouched_baseline_is_not_confirmed_stopped() -> None:
+    """THE P0 THIS FIX CLOSES. The committed vulnerable baseline recognises
+    only the bare command word "STOP" (see `vulnerable_firmware`), so the
+    tokenized STOP the cleanup restoration sends is silently ignored: the
+    broker still accepts the publish (`cleanup_stop_error` stays None), but
+    the motor the `forged-start-no-token` probe already started stays
+    RUNNING. Before this fix, "the publish did not raise" was the only
+    signal reported and that read as an unqualified cleanup success; now the
+    validator reads the same evidence topic every probe reads and reports
+    the true, unconfirmed physical state instead."""
+    factory = panel_factory(firmware=vulnerable_firmware)
+    result = check(factory=factory)
+    assert result.outcome is ValidationOutcome.FAILURE
+
+    # The publish itself succeeded...
+    assert result.details["cleanup_stop_attempted"] is True
+    assert result.details["cleanup_stop_error"] is None
+    # ...but the panel never actually stopped, and that must be visible.
+    assert result.details["cleanup_confirmed"] is False
+    assert result.details["cleanup_observed_state"] == "RUNNING"
+    assert result.details["cleanup_outcome"] == "attempted_unconfirmed"
+
+    panel = factory.built[0]
+    assert panel.state() == "RUNNING"
+
+
 def test_an_early_forged_stop_failure_triggers_a_cleanup_stop() -> None:
     """A later probe (5 of 6) fails; cleanup must not depend on which one."""
     factory = panel_factory(firmware=stop_forgeable_firmware)
@@ -1060,6 +1086,12 @@ def test_an_early_forged_stop_failure_triggers_a_cleanup_stop() -> None:
     assert topic == criterion.control_topic
     assert result.details["cleanup_stop_attempted"] is True
     assert result.details["cleanup_stop_error"] is None
+    # This firmware DOES obey the tokenized restore STOP (it accepts any
+    # STOP, forged or not — that is its own, different bug), so the panel
+    # is genuinely observed at rest afterwards: a confirmed cleanup.
+    assert result.details["cleanup_confirmed"] is True
+    assert result.details["cleanup_observed_state"] == "STOPPED"
+    assert result.details["cleanup_outcome"] == "confirmed"
 
 
 def test_a_probe_exception_triggers_cleanup_before_propagating() -> None:
@@ -1084,6 +1116,13 @@ def test_a_probe_exception_triggers_cleanup_before_propagating() -> None:
     assert identity == criterion.authorized.identity_id
     assert topic == criterion.control_topic
     assert FIXTURES["TRAINER_LAB_PANEL1_COMMAND_TOKEN"] in payload
+    # A validator exception is not a verdict, but the cleanup it triggered
+    # is still reported — and the default (remediated) firmware genuinely
+    # obeys the restore STOP, so this recovers to a confirmed cleanup.
+    assert result.details["cleanup_stop_attempted"] is True
+    assert result.details["cleanup_stop_error"] is None
+    assert result.details["cleanup_confirmed"] is True
+    assert result.details["cleanup_outcome"] == "confirmed"
 
 
 def test_a_cleanup_failure_does_not_replace_the_original_failure() -> None:
@@ -1100,6 +1139,10 @@ def test_a_cleanup_failure_does_not_replace_the_original_failure() -> None:
     assert result.details["cleanup_stop_attempted"] is True
     assert result.details["cleanup_stop_error"] is not None
     assert "cleanup broker rejected" in result.details["cleanup_stop_error"]
+    # A publish that never reached the panel cannot possibly be confirmed.
+    assert result.details["cleanup_confirmed"] is False
+    assert result.details["cleanup_observed_state"] is None
+    assert result.details["cleanup_outcome"] == "attempted_unconfirmed"
 
 
 def test_a_successful_run_sends_no_extra_cleanup_stop() -> None:
@@ -1110,6 +1153,11 @@ def test_a_successful_run_sends_no_extra_cleanup_stop() -> None:
     panel = factory.built[0]
     assert len(panel.published) == len(declaration().criterion.probes)
     assert "cleanup_stop_attempted" not in result.details
+    # No cleanup ran at all, so none of the tri-state cleanup keys appear —
+    # the run's own `restore-stop` probe (already in `result.details["probes"]`)
+    # is the evidence that the panel is at rest, and it is not duplicated.
+    assert "cleanup_confirmed" not in result.details
+    assert "cleanup_outcome" not in result.details
 
 
 def test_cleanup_uses_the_authorized_identity_and_valid_token() -> None:
@@ -1183,6 +1231,13 @@ def test_a_channel_lost_mid_check_is_an_error() -> None:
     result = check(factory=lambda c, s: DroppingPanel(c, s))
     assert result.outcome is ValidationOutcome.ERROR
     assert result.details["stage"] == "probe"
+    # The channel that broke the check is the same channel cleanup needs, so
+    # the best-effort restoration also fails here — reported, not hidden,
+    # and the outcome it attaches to is still ERROR, never FAILURE.
+    assert result.details["cleanup_stop_attempted"] is True
+    assert result.details["cleanup_stop_error"] is not None
+    assert result.details["cleanup_confirmed"] is False
+    assert result.details["cleanup_outcome"] == "attempted_unconfirmed"
 
 
 def test_a_device_that_reports_no_state_is_an_error_not_a_verdict() -> None:

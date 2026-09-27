@@ -400,6 +400,51 @@ async def _handle_message(
     await channel.send(ErrorMessage(message="unsupported message type"))
 
 
+#: Frames a session may have waiting behind a running command. The frontend
+#: sends one `hardware_status` every 10s, so this covers a command running
+#: for minutes; beyond it a frame is refused (with an `error`), never
+#: buffered without bound.
+MAX_PENDING_FRAMES = 64
+
+
+async def _process_frames(
+    channel: _Channel, session: HackSession, frames: "asyncio.Queue[str | None]"
+) -> None:
+    """Handle one session's frames, strictly in order, one at a time.
+
+    WHY THIS IS A SEPARATE TASK FROM RECEIVING. It used to be the body of
+    the endpoint's own `receive()` loop, which meant nothing called
+    `receive()` while a command ran. uvicorn's WebSocket protocol pauses
+    reading the socket as soon as one frame is waiting for the app, and
+    resumes only on the app's next `receive()` — so during any long command
+    (a real 4 MiB `esptool.py read_flash` takes minutes) the first 10-second
+    `hardware_status` poll froze the socket, the browser's replies to
+    uvicorn's keepalive pings went unread, and uvicorn closed the connection
+    with 1011 about 40s in. The command's result was then written into a
+    dead socket, and the student's terminal simply never answered again.
+
+    The endpoint now keeps receiving (so pings and a disconnect are always
+    seen) and hands each raw frame here. This loop is the old loop body,
+    unchanged: frames are still parsed and handled in arrival order, and a
+    session still runs exactly one command at a time.
+    """
+    while True:
+        raw = await frames.get()
+        if raw is None:
+            # Binary frames are not part of the protocol; refuse rather
+            # than guessing at an encoding.
+            await channel.send(ErrorMessage(message="binary frames are not supported"))
+            continue
+
+        try:
+            message = _parse(raw)
+        except ValueError as exc:
+            await channel.send(ErrorMessage(message=str(exc)))
+            continue
+
+        await _handle_message(channel, session, message)
+
+
 @router.websocket("/ws/hack")
 async def hack_websocket(websocket: WebSocket) -> None:
     """Serve one Hack Mode terminal session."""
@@ -434,31 +479,38 @@ async def hack_websocket(websocket: WebSocket) -> None:
         "hack session opened: %s [%s]", session.session_id, selection.describe()
     )
 
+    # See `_process_frames` for why receiving and handling are two tasks.
+    frames: asyncio.Queue[str | None] = asyncio.Queue()
+    worker = asyncio.create_task(
+        _process_frames(channel, session, frames),
+        name=f"hack-worker-{session.session_id}",
+    )
+    receiving: asyncio.Future | None = None
+
     try:
         await channel.send(SessionMessage(session_id=session.session_id))
         await channel.send(OutputMessage(data=BANNER))
 
         while True:
-            frame = await websocket.receive()
+            receiving = asyncio.ensure_future(websocket.receive())
+            await asyncio.wait({receiving, worker}, return_when=asyncio.FIRST_COMPLETED)
+            if not receiving.done():
+                # The worker ended, which it only does by raising: surface
+                # that exactly as the old inline loop would have.
+                receiving.cancel()
+                worker.result()
+                break
+
+            frame = receiving.result()
             if frame["type"] == "websocket.disconnect":
                 break
 
-            raw = frame.get("text")
-            if raw is None:
-                # Binary frames are not part of the protocol; refuse rather
-                # than guessing at an encoding.
+            if frames.qsize() >= MAX_PENDING_FRAMES:
                 await channel.send(
-                    ErrorMessage(message="binary frames are not supported")
+                    ErrorMessage(message="too many pending messages; wait for the running command")
                 )
                 continue
-
-            try:
-                message = _parse(raw)
-            except ValueError as exc:
-                await channel.send(ErrorMessage(message=str(exc)))
-                continue
-
-            await _handle_message(channel, session, message)
+            frames.put_nowait(frame.get("text"))
 
     except WebSocketDisconnect:
         pass
@@ -472,7 +524,12 @@ async def hack_websocket(websocket: WebSocket) -> None:
         # session at all: both leaked on every real disconnect, and the held
         # port then blocked Build Mode from flashing that board.
         #
-        # So teardown is four synchronous calls that cannot be interrupted.
+        # `worker.cancel()` stops a command still running for a student who
+        # has left: a real `esptool` read in flight is killed with its whole
+        # process tree (`app/build/process.py::run_capture`) rather than
+        # left reading until its timeout, holding the port.
+        #
+        # So teardown is synchronous calls that cannot be interrupted.
         # `pump.cancel()` only requests cancellation (the task ends on the
         # next loop pass, writing nothing — `_Channel.send` absorbs a closed
         # socket), `release()` closes the port inline, `recorder.finish()`
@@ -481,6 +538,9 @@ async def hack_websocket(websocket: WebSocket) -> None:
         # lock. See `SerialTransport.release`, `HackEventRecorder.finish`
         # and `SessionManager.discard` — all three are documented as
         # await-free precisely because of this block.
+        if receiving is not None:
+            receiving.cancel()
+        worker.cancel()
         pump.cancel()
         session.serial.release()
         session.recorder.finish()

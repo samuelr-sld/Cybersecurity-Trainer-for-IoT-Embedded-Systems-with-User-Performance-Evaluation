@@ -167,13 +167,47 @@ static void pollButtons() {
 }
 
 static void ensureConnected() {
-  while (!client.connected()) {
-    if (client.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD)) {
-      client.subscribe(COMMAND_TOPIC);
-      client.publish(STATE_TOPIC, motorRunning ? "RUNNING" : "STOPPED", true);
-    } else {
-      delay(1000);
+  // Maintain Wi-Fi and MQTT WITHOUT blocking: called on every loop() pass, it
+  // makes at most one attempt and returns, so pollButtons() keeps running with
+  // no Wi-Fi, with Wi-Fi but no broker, or after the broker drops. The local
+  // START/STOP buttons never depend on the network; only MQTT does.
+  static const unsigned long WIFI_RETRY_MS = 10000;
+  static const unsigned long MQTT_RETRY_MS = 5000;
+  static bool wifiWasConnected = false;
+  static unsigned long lastWifiAttempt = 0;
+  static unsigned long lastMqttAttempt = 0;
+  static bool mqttAttempted = false;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiWasConnected) {
+      wifiWasConnected = false;
+      Serial.println("WiFi connection lost");
     }
+    if (millis() - lastWifiAttempt >= WIFI_RETRY_MS) {
+      lastWifiAttempt = millis();
+      Serial.print("WiFi not connected, status code: ");
+      Serial.println(WiFi.status());
+      WiFi.reconnect();  // asynchronous; returns immediately
+    }
+    return;
+  }
+  if (!wifiWasConnected) {
+    wifiWasConnected = true;
+    Serial.print("WiFi connected, IP address: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  if (client.connected()) {
+    return;
+  }
+  if (mqttAttempted && millis() - lastMqttAttempt < MQTT_RETRY_MS) {
+    return;
+  }
+  mqttAttempted = true;
+  lastMqttAttempt = millis();
+  if (client.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD)) {
+    client.subscribe(COMMAND_TOPIC);
+    client.publish(STATE_TOPIC, motorRunning ? "RUNNING" : "STOPPED", true);
   }
 }
 
@@ -194,25 +228,14 @@ void setup() {
   Serial.println("Connecting to WiFi...");
   Serial.print("SSID: ");
   Serial.println(WIFI_SSID);
+  // Started, not awaited: ensureConnected() reports the outcome and retries
+  // from loop(), so the buttons work from the moment setup() returns.
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-  const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000;
-  unsigned long wifiConnectStart = millis();
-  while (WiFi.status() != WL_CONNECTED &&
-         millis() - wifiConnectStart < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi connected, IP address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.print("WiFi connection FAILED, status code: ");
-    Serial.println(WiFi.status());
-  }
-
+  // Bound each MQTT connect attempt (TCP connect, then CONNACK) so an
+  // unreachable broker cannot stall button polling for long.
+  espClient.setConnectionTimeout(1000);
+  client.setSocketTimeout(2);
   client.setServer(MQTT_BROKER, MQTT_PORT);
   client.setCallback(onMessage);
 }

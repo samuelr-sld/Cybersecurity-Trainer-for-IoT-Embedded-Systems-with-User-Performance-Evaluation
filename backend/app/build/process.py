@@ -37,19 +37,56 @@ call sites, the adapter protocols and `BuildService` are all unchanged. The
 cost is one pooled thread parked for the duration of a compile/upload, which
 is bounded by the caller's timeout.
 
-STILL NO SHELL. `subprocess.run` is given a real argument *list* and never a
-command string, `shell` is left at its default of False (this module cannot
-even name that keyword — the static guards ban the bare identifier), and no
-argument is ever concatenated into a command line. Nothing here interpolates
-caller-supplied text into anything but one argv element.
+STILL NO SHELL. `subprocess.Popen` is given a real argument *list* and never
+a command string, `shell` is left at its default of False (this module
+cannot even name that keyword — the static guards ban the bare identifier),
+and no argument is ever concatenated into a command line. Nothing here
+interpolates caller-supplied text into anything but one argv element.
+
+THE TIMEOUT IS A HARD BOUND ON THE WHOLE PROCESS TREE. This used to be
+`subprocess.run(timeout=...)`, which is not a hard bound: on a timeout it
+kills only the DIRECT child and then, on Windows, calls `communicate()` with
+no timeout at all to collect the output. The ESP32 core's `esptool.exe` is
+a PyInstaller one-file bundle — a bootloader parent that runs the real tool
+as a CHILD process holding the same stdout/stderr pipes. Killing the parent
+orphaned the child, the pipes never reached EOF, and `run_capture` waited
+for as long as the orphan kept running (a full 4 MiB `read_flash` at the
+default baud: minutes past the timeout). The awaiting Hack Mode command
+therefore never returned, and because a session answers one command at a
+time, every later command in that session queued behind it. On POSIX the
+same bundle survives a SIGKILL of its parent too, holding the serial port.
+
+So a timeout now kills the whole TREE (`_kill_tree`: `taskkill /T` on
+Windows; a process-group kill on POSIX, where the child is started in its
+own session), and the post-kill drain is itself bounded by
+`KILL_GRACE_SECONDS`. If some descendant still escaped, the output is
+abandoned rather than waited for: `ProcessTimedOut` is raised regardless,
+so `timeout_seconds + 2 * KILL_GRACE_SECONDS` is the most any caller can
+ever wait. A cancelled caller (a WebSocket torn down mid-command) kills the
+tree too, instead of leaving it running unobserved until its timeout.
+The tree-killers are fixed argument arrays with only an integer PID in
+them — the same no-shell discipline as everything else here.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
 import subprocess
+import sys
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+_WINDOWS = sys.platform == "win32"
+
+#: How long a kill, and the output drain after it, may take before the
+#: process is abandoned. Bounds the time past `timeout_seconds` a caller can
+#: wait; small, because a killed process has nothing left to do.
+KILL_GRACE_SECONDS: float = 5.0
 
 
 class ProcessTimedOut(Exception):
@@ -70,22 +107,122 @@ class ProcessResult:
     stderr: bytes
 
 
-def _run_blocking(args: tuple[str, ...], timeout_seconds: float) -> ProcessResult:
-    """Blocking body of `run_capture`; only ever called on a worker thread."""
+def _tree_kill_argv(pid: int) -> list[str] | None:
+    """The fixed argv that kills `pid` AND its descendants, or None if the
+    platform's killer is not installed (the direct kill still happens)."""
+    if _WINDOWS:
+        killer = shutil.which("taskkill")
+        return [killer, "/PID", str(pid), "/T", "/F"] if killer else None
+    killer = shutil.which("kill")
+    # The child was started with `start_new_session`, so its process-group id
+    # is its pid; the negative id addresses the whole group.
+    return [killer, "-KILL", "--", f"-{pid}"] if killer else None
+
+
+def _kill_tree(process: subprocess.Popen) -> None:
+    """Kill a child and everything it started. Never raises.
+
+    The tree kill must run while the direct child is still alive on Windows:
+    `taskkill /T` finds descendants through their parent, and an orphan whose
+    parent is already gone can no longer be found that way. (While the child
+    is unreaped its PID cannot be reused, so it is never someone else's.) On
+    POSIX a process group outlives its leader, so the group kill is always
+    sent.
+    """
+    argv = _tree_kill_argv(process.pid)
+    if argv is not None and (not _WINDOWS or process.poll() is None):
+        try:
+            subprocess.run(  # noqa: S603 - fixed argument array, never a shell
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=KILL_GRACE_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("tree kill failed for pid %s", process.pid, exc_info=True)
     try:
-        completed = subprocess.run(  # noqa: S603 - argument array, never a shell
-            list(args),
-            capture_output=True,
-            timeout=timeout_seconds,
+        process.kill()
+    except OSError:
+        pass
+
+
+class _Running:
+    """The one running child, shared by the worker thread and its awaiter.
+
+    Lets a cancelled `run_capture` kill the process it started even though
+    the blocking wait lives on another thread. `abandon()` before the child
+    exists is remembered, so the worker kills it the moment it is attached.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen | None = None
+        self._abandoned = False
+
+    def attach(self, process: subprocess.Popen) -> bool:
+        """Record the child; False if the caller has already given up on it."""
+        with self._lock:
+            self._process = process
+            return not self._abandoned
+
+    def abandon(self) -> None:
+        """Kill the child's tree off the event loop — `taskkill` blocks."""
+        with self._lock:
+            self._abandoned = True
+            process = self._process
+        if process is not None:
+            threading.Thread(
+                target=_kill_tree, args=(process,), name="process-abandon", daemon=True
+            ).start()
+
+
+def _drain_after_kill(process: subprocess.Popen) -> None:
+    """Collect what a killed process left, but never wait on it for long.
+
+    If a descendant escaped the tree kill and still holds the pipes, the
+    output is abandoned: the reader threads (daemon threads, on Windows) end
+    whenever the pipes finally close, and nobody waits for them.
+    """
+    try:
+        process.communicate(timeout=KILL_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "pid %s: output pipes still open %.0fs after kill; abandoning them",
+            process.pid,
+            KILL_GRACE_SECONDS,
         )
+    except (OSError, ValueError):
+        pass
+
+
+def _run_blocking(
+    args: tuple[str, ...], timeout_seconds: float, running: _Running | None = None
+) -> ProcessResult:
+    """Blocking body of `run_capture`; only ever called on a worker thread."""
+    process = subprocess.Popen(  # noqa: S603 - argument array, never a shell
+        list(args),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=not _WINDOWS,
+    )
+    if running is not None and not running.attach(process):
+        _kill_tree(process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as expired:
-        # `subprocess.run` has already killed the child and reaped it before
-        # raising, so there is no orphaned toolchain process left behind.
+        _kill_tree(process)
+        _drain_after_kill(process)
         raise ProcessTimedOut() from expired
+    except BaseException:
+        _kill_tree(process)
+        raise
     return ProcessResult(
-        exit_code=completed.returncode,
-        stdout=completed.stdout or b"",
-        stderr=completed.stderr or b"",
+        exit_code=process.returncode,
+        stdout=stdout or b"",
+        stderr=stderr or b"",
     )
 
 
@@ -97,5 +234,15 @@ async def run_capture(
     Raises `FileNotFoundError` if the executable does not exist, `OSError`
     for any other launch failure, and `ProcessTimedOut` if the process had
     to be killed — the three outcomes the Build Mode adapters categorize.
+    Returns or raises within `timeout_seconds + 2 * KILL_GRACE_SECONDS`,
+    whatever the process tree does. If the caller is cancelled, the process
+    tree is killed rather than left running.
     """
-    return await asyncio.to_thread(_run_blocking, tuple(args), timeout_seconds)
+    running = _Running()
+    try:
+        return await asyncio.to_thread(
+            _run_blocking, tuple(args), timeout_seconds, running
+        )
+    except asyncio.CancelledError:
+        running.abandon()
+        raise

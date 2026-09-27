@@ -116,14 +116,19 @@ async def handle(command: ParsedCommand, context: CommandContext) -> CommandResu
             exit_code=_EXIT_FAILURE,
         )
 
-    outcome = await default_flash_reader.read_flash(
-        FlashReadRequest(
-            port=state.port,
-            offset=offset,
-            size=size,
-            timeout_seconds=config.HARDWARE_FLASH_READ_TIMEOUT_SECONDS,
+    # The read owns the port for its whole duration, exactly like a flash
+    # upload does (`BuildService.flash_workspace`): a MAC probe started by
+    # another session's poll would reset the board mid-read. `read_flash`
+    # itself is bounded (see `app/build/process.py`), so the hold is too.
+    with device_monitor.hold_identity_probe():
+        outcome = await default_flash_reader.read_flash(
+            FlashReadRequest(
+                port=state.port,
+                offset=offset,
+                size=size,
+                timeout_seconds=config.HARDWARE_FLASH_READ_TIMEOUT_SECONDS,
+            )
         )
-    )
     if not outcome.ok:
         return CommandResult.text(
             f"esptool.py: could not read flash ({outcome.category.value})"

@@ -993,12 +993,15 @@ def test_panel_one_setup_keeps_its_wifi_and_mqtt_source_between_the_blocks():
         raise AssertionError(f"no preserved item starts with {prefix!r}: {items}")
 
     wifi_begin = index_of("WiFi.begin(")
-    wifi_wait = index_of("while (WiFi.status()")
     set_server = index_of("client.setServer(")
     set_callback = index_of("client.setCallback(")
 
     assert wifi_begin > 8
-    assert wifi_begin < wifi_wait < set_server < set_callback
+    assert wifi_begin < set_server < set_callback
+    # setup() STARTS Wi-Fi but never waits for it: the local START/STOP
+    # buttons must work from boot with no network, so connecting is left to
+    # the non-blocking ensureConnected() in loop().
+    assert not any(item.startswith("while (WiFi.status()") for item in items)
 
 
 def test_panel_one_loop_draws_its_two_zero_arg_calls_and_preserves_the_rest():

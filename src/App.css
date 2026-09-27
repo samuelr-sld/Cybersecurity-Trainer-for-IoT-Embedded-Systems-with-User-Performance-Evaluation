@@ -750,19 +750,18 @@ th {
   min-height: 480px;
 }
 
-/* Build Mode — BUILD ACTIONS: every action button (SAVE/COMPILE/FLASH/
-   validation/security test) grouped in the existing left-hand information
-   column (see CLAUDE.md) rather than a separate sidebar. Stacked and
-   full-width for a narrow ~240px column, using the same `.btn-solid`/
-   `.btn-outline`/`.future-control` styles those controls already had. */
+/* Build Mode — BUILD ACTIONS: every action button (COMPILE/FLASH/RUN
+   VALIDATION TEST) grouped in the existing left-hand information column
+   (see CLAUDE.md) rather than a separate sidebar. Stacked and full-width for
+   a narrow ~240px column, using the same `.btn-solid`/`.btn-outline` styles
+   those controls already had. */
 .build-actions-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.build-actions-list button,
-.build-actions-list .future-control {
+.build-actions-list button {
   width: 100%;
 }
 
@@ -1280,20 +1279,6 @@ button.section-header.active {
   color: var(--bad);
 }
 
-.future-control {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.future-control em {
-  font-style: normal;
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-
 .status-pill {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -1432,4 +1417,112 @@ button.section-header.active {
 .activity-log-scroll {
   max-height: 260px;
   overflow-y: auto;
+}
+
+/* Mode Session Preparation — the checklist between HACK/BUILD and the mode
+   itself (src/screens/ModePreparation.jsx). Each mark is a backend-confirmed
+   stage; nothing here animates progress the backend has not reported. */
+.prep-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.prep-card {
+  width: 100%;
+  max-width: 560px;
+  padding: 28px 32px;
+  border: 2px solid var(--line);
+  background: var(--panel);
+}
+
+.prep-card h2 {
+  margin: 0 0 6px;
+  letter-spacing: 0.08em;
+}
+
+.prep-sub {
+  margin: 0 0 20px;
+  color: var(--muted);
+}
+
+.prep-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--mono);
+}
+
+.prep-step {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  color: var(--muted);
+}
+
+.prep-mark {
+  width: 1.2em;
+  text-align: center;
+}
+
+.prep-step.is-running {
+  color: var(--ink);
+}
+
+.prep-step.is-running .prep-mark {
+  color: var(--warn);
+}
+
+.prep-step.is-succeeded {
+  color: var(--ink);
+}
+
+.prep-step.is-succeeded .prep-mark {
+  color: var(--ok);
+}
+
+.prep-step.is-failed,
+.prep-step.is-failed .prep-mark {
+  color: var(--bad);
+}
+
+.prep-ready {
+  margin: 18px 0 0;
+  color: var(--ok);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.prep-failure {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.prep-failure p {
+  margin: 4px 0;
+}
+
+.prep-failure-title {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.prep-detail {
+  max-height: 160px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: var(--term);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.prep-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
 }

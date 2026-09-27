@@ -171,7 +171,12 @@ class EsptoolFlashReader:
 
         timed_out, run_capture = _process_api()
 
-        with tempfile.TemporaryDirectory(prefix="hack-flash-read-") as tmp_dir:
+        # `ignore_cleanup_errors`: after a timeout the killed tool's file may
+        # still be locked for a moment on Windows, and a failed cleanup must
+        # not turn a reported TIMEOUT into an exception.
+        with tempfile.TemporaryDirectory(
+            prefix="hack-flash-read-", ignore_cleanup_errors=True
+        ) as tmp_dir:
             out_path = Path(tmp_dir) / "read_flash.bin"
             args = [
                 executable,

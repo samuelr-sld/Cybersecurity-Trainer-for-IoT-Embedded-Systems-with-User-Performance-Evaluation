@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import __version__, build_websocket, config, websocket
+from app import __version__, build_websocket, config, preparation_websocket, websocket
 from app.hardware import device_monitor
 from app.models.build_messages import BUILD_PROTOCOL_VERSION
 from app.models.messages import PROTOCOL_VERSION
@@ -93,6 +93,7 @@ app.add_middleware(
 
 app.include_router(websocket.router)
 app.include_router(build_websocket.router)
+app.include_router(preparation_websocket.router)
 
 
 @app.get("/health")

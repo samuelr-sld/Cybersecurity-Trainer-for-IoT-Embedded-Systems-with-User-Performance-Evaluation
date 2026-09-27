@@ -104,6 +104,25 @@ EvidenceFactory = Callable[
 SUPPORTED_EVIDENCE = (EvidenceChannel.MQTT_STATE_TOPIC,)
 
 
+@dataclasses.dataclass(frozen=True)
+class _CleanupAttempt:
+    """What `_restore` actually managed to establish about the panel.
+
+    `attempted` is always True when one of these exists — `_restore` only
+    runs when a run did not itself reach and pass the declared restore
+    probe. `confirmed` is true only when the panel was subsequently observed
+    on its evidence topic at the restore probe's declared `expect_state`;
+    `error is None` says only that the broker accepted the publish, which is
+    NOT the same fact — see `_restore`'s docstring for why conflating them
+    is exactly the gap this type exists to close.
+    """
+
+    attempted: bool
+    error: str | None
+    confirmed: bool
+    observed_state: str | None
+
+
 class SmartHomeAuthorizationValidator:
     """Checks that a remediated panel authorizes motor commands per command.
 
@@ -120,10 +139,21 @@ class SmartHomeAuthorizationValidator:
     still be running, so `_probe_all` always attempts one authorized STOP,
     using that same final probe's identity and valid token, whenever the run
     did not itself already reach and pass it. A run that passes all six never
-    sends a second one (see `_run_probes`'s `reached_restore`). The cleanup
-    attempt can itself fail; when it does, it is only ever added to a result
-    as extra detail (`cleanup_stop_attempted`/`cleanup_stop_error`) — never as
-    a replacement for the verdict the probes already reached.
+    sends a second one (see `_run_probes`'s `reached_restore`).
+
+    A PUBLISH THE BROKER ACCEPTED IS NOT A CONFIRMED STOP. The committed
+    vulnerable baseline only recognises the bare command word "STOP" and
+    silently ignores the tokenized payload the restore probe sends, so
+    `evidence.publish` can raise nothing while the motor keeps running. For
+    that reason `_restore` also reads back the same evidence topic every
+    probe already reads (`evidence.await_state`) and reports whether the
+    panel was actually observed at the restore probe's declared
+    `expect_state` afterwards. The cleanup attempt — and its confirmation,
+    or lack of one — can itself fail without ever touching the verdict; it
+    is only ever added to a result as extra detail
+    (`cleanup_stop_attempted`/`cleanup_stop_error`/`cleanup_confirmed`/
+    `cleanup_observed_state`/`cleanup_outcome`) — never as a replacement for
+    the verdict the probes already reached.
     """
 
     def __init__(
@@ -257,13 +287,27 @@ class SmartHomeAuthorizationValidator:
 
         try:
             result, reached_restore = self._run_probes(criterion, evidence, context, fixtures)
+        except EvidenceChannelError as error:
+            # The channel broke mid-run. The panel may be mid-command, so it
+            # is cleaned up — and that cleanup's own outcome (confirmed or
+            # not) is attached to the ERROR verdict this produces, exactly as
+            # it would be for a probe FAILURE below.
+            cleanup = self._restore(criterion, evidence, fixtures)
+            return self._with_cleanup_outcome(
+                ValidationResult.error(
+                    f"the check lost the panel's evidence channel: {error}",
+                    criterion=criterion.criterion_id,
+                    evidence=criterion.evidence.value,
+                    stage="probe",
+                ),
+                cleanup,
+            )
         except Exception:
-            # A probe broke instead of producing a verdict — most often the
-            # `EvidenceChannelError` `_run` turns into ERROR, but restoration
-            # must not depend on which exception this is. The panel may be
-            # mid-command, so it is cleaned up here exactly as a probe
-            # FAILURE is below, then the original exception still propagates
-            # unchanged: a broken check must never be reported as a verdict.
+            # Some other exception broke the check instead of producing a
+            # verdict. Restoration must not depend on which exception this
+            # is, so the panel is cleaned up here exactly as above, then the
+            # original exception still propagates unchanged: a broken check
+            # must never be reported as a verdict.
             self._restore(criterion, evidence, fixtures)
             raise
 
@@ -272,8 +316,8 @@ class SmartHomeAuthorizationValidator:
             # the panel is already at rest — sending a second STOP would be
             # pure noise on the wire.
             return result
-        cleanup_error = self._restore(criterion, evidence, fixtures)
-        return self._with_cleanup_outcome(result, cleanup_error)
+        cleanup = self._restore(criterion, evidence, fixtures)
+        return self._with_cleanup_outcome(result, cleanup)
 
     def _run_probes(
         self,
@@ -374,15 +418,22 @@ class SmartHomeAuthorizationValidator:
         criterion: AuthorizationCriterion,
         evidence: AuthorizationEvidence,
         fixtures: Mapping[str, str],
-    ) -> str | None:
-        """Best-effort authorized STOP, sent regardless of how the run ended.
+    ) -> "_CleanupAttempt":
+        """Best-effort authorized STOP, sent regardless of how the run ended,
+        then a read of the same evidence topic every probe already reads to
+        find out whether the panel actually obeyed it.
 
-        Reuses the declared `restore-stop` probe's OWN identity and valid
-        token (`criterion.probes[-1]`) — this is not a second command the
-        validator invents, it is that probe's payload, sent independently of
-        whether the run ever reached it. Returns None on success or a
-        description of the failure; it never raises, because a cleanup
-        failure must never replace the verdict the probes already reached.
+        Reuses the declared `restore-stop` probe's OWN identity, token and
+        declared `expect_state` (`criterion.probes[-1]`) — this is not a
+        second command the validator invents, it is that probe's payload,
+        sent and then CONFIRMED independently of whether the run ever
+        reached it. A publish the broker accepted is not proof of anything:
+        the committed vulnerable baseline only recognises the bare command
+        word "STOP" and silently drops a tokenized payload, so the motor can
+        stay RUNNING even though `evidence.publish` raised nothing. Returns a
+        `_CleanupAttempt`; never raises, because a cleanup failure — or an
+        unconfirmed one — must never replace the verdict the probes already
+        reached.
         """
         restore_probe = criterion.probes[-1]
         token = fixtures.get(criterion.token_env, "")
@@ -403,23 +454,55 @@ class SmartHomeAuthorizationValidator:
                 criterion.criterion_id,
                 error,
             )
-            return str(error)
-        return None
+            return _CleanupAttempt(
+                attempted=True, error=str(error), confirmed=False, observed_state=None
+            )
+
+        observed = evidence.await_state(
+            restore_probe.expect_state, criterion.response_timeout_seconds
+        )
+        confirmed = observed == restore_probe.expect_state
+        if not confirmed:
+            # The publish did not raise, so the broker accepted it — but
+            # accepted-by-the-broker and obeyed-by-the-firmware are exactly
+            # the two facts this whole validator exists to tell apart. A
+            # baseline that ignores the tokenized STOP leaves this False.
+            logger.warning(
+                "cleanup restoration STOP for criterion %s was not confirmed: the "
+                "panel reported %s, expected %s",
+                criterion.criterion_id,
+                observed,
+                restore_probe.expect_state,
+            )
+        return _CleanupAttempt(
+            attempted=True, error=None, confirmed=confirmed, observed_state=observed
+        )
 
     @staticmethod
     def _with_cleanup_outcome(
-        result: ValidationResult, cleanup_error: str | None
+        result: ValidationResult, cleanup: "_CleanupAttempt"
     ) -> ValidationResult:
         """Attach what the cleanup restoration did, without touching the verdict.
 
         Only ever adds detail keys — `outcome` and `message` are exactly what
-        `_run_probes` already decided, so a cleanup failure can be seen by an
+        the probes (or the lost-channel error) already decided, so a cleanup
+        failure, or a cleanup the panel never confirmed, can be seen by an
         evaluator but can never masquerade as, or override, the original
-        security result.
+        security result. `cleanup_confirmed`/`cleanup_outcome` are the
+        explicit tri-state answer: a run that never needed cleanup carries
+        none of these keys at all (see `_probe_all`'s `reached_restore`
+        short-circuit); one that did carries `cleanup_outcome` of either
+        `"confirmed"` or `"attempted_unconfirmed"` — never a silent
+        `"succeeded"` inferred from the publish alone.
         """
         details = dict(result.details)
-        details["cleanup_stop_attempted"] = True
-        details["cleanup_stop_error"] = cleanup_error
+        details["cleanup_stop_attempted"] = cleanup.attempted
+        details["cleanup_stop_error"] = cleanup.error
+        details["cleanup_confirmed"] = cleanup.confirmed
+        details["cleanup_observed_state"] = cleanup.observed_state
+        details["cleanup_outcome"] = (
+            "confirmed" if cleanup.confirmed else "attempted_unconfirmed"
+        )
         return dataclasses.replace(result, details=details)
 
     @staticmethod

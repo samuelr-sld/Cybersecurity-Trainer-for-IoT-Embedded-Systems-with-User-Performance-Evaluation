@@ -5,6 +5,7 @@ import ProfessorAccess from './screens/ProfessorAccess'
 import MainMenu from './screens/MainMenu'
 import HackMode from './screens/HackMode'
 import BuildMode from './screens/BuildMode'
+import ModePreparation from './screens/ModePreparation'
 import Dashboard from './screens/Dashboard'
 import { STUDENTS } from './data'
 import './App.css'
@@ -21,6 +22,10 @@ export default function App() {
   const [error, setError] = useState('')
   const [overlay, setOverlay] = useState(null)
   const [menuOpen, setMenuOpen] = useState(false)
+  // Which mode is being prepared, and which attempt this is. The attempt is
+  // the preparation screen's `key`: RETRY remounts it, so every attempt gets
+  // a fresh `/ws/prepare` connection and a fresh checklist.
+  const [preparation, setPreparation] = useState(null)
 
   function goRole() {
     setScreen('role')
@@ -30,6 +35,15 @@ export default function App() {
     setEvalStudent(null)
     setError('')
     setMenuOpen(false)
+  }
+
+  // Every entry into Hack Mode or Build Mode goes through the preparation
+  // screen, which restores the panel's vulnerable baseline firmware
+  // (backend/app/mode_preparation.py). The 'hack' / 'build' screens are only
+  // ever set by its `onReady`, so a failed preparation cannot open a mode.
+  function prepareMode(mode) {
+    setPreparation((current) => ({ mode, attempt: (current?.attempt ?? 0) + 1 }))
+    setScreen('prepare')
   }
 
   function studentRecord(user) {
@@ -121,8 +135,8 @@ export default function App() {
         <MainMenu
           student={student}
           onMenu={() => setMenuOpen(true)}
-          onHack={() => setScreen('hack')}
-          onBuild={() => setScreen('build')}
+          onHack={() => prepareMode('hack')}
+          onBuild={() => prepareMode('build')}
           onEval={() => {
             setEvalStudent(studentRecord(student))
             setScreen('dashboard')
@@ -134,12 +148,24 @@ export default function App() {
         />
       )
     }
+    if (screen === 'prepare' && preparation) {
+      return (
+        <ModePreparation
+          key={preparation.attempt}
+          mode={preparation.mode}
+          onMenu={() => setMenuOpen(true)}
+          onReady={() => setScreen(preparation.mode)}
+          onRetry={() => prepareMode(preparation.mode)}
+          onBack={() => setScreen('menu')}
+        />
+      )
+    }
     if (screen === 'hack') {
       return (
         <HackMode
           onMenu={() => setMenuOpen(true)}
           onBack={() => setScreen('menu')}
-          onBuild={() => setScreen('build')}
+          onBuild={() => prepareMode('build')}
         />
       )
     }

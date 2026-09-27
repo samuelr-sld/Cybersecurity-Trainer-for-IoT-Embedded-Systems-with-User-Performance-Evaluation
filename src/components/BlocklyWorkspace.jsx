@@ -80,14 +80,20 @@ function buildBlocklyTheme() {
  * keeps one section's edits from ever leaking into another's canvas.
  *
  * `onWorkspaceChange(stateJSON)` fires with the CURRENT full serialized
- * workspace state — the authoritative payload `edit_section_blocks` sends —
- * every time the block structure actually changes (created/deleted/moved/
- * field edited), never on pure UI events (selection, scroll, a drag still in
- * progress). `onCodeChange(code)`, kept for the legacy whole-file flow
+ * workspace state — the authoritative payload `edit_section_blocks` sends
+ * when the student compiles — every time the block structure actually
+ * changes (created/deleted/moved/field edited), never on pure UI events
+ * (selection, scroll, a drag still in progress) and never for an event that
+ * leaves the serialization identical (see `lastSerialized` below). `onCodeChange(code)`, kept for the legacy whole-file flow
  * (`BuildMode.jsx`'s Blink/no-sections fallback), fires alongside it with the
  * client-side generated preview; a section-based caller can ignore it.
+ *
+ * `apiRef`, optional, is a ref this component fills with `{flush()}` while
+ * mounted: `flush()` reports the workspace's CURRENT serialization through
+ * `onWorkspaceChange` synchronously if it differs from the last one reported
+ * (see the FLUSH comment below).
  */
-export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceChange, onCodeChange }) {
+export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceChange, onCodeChange, apiRef }) {
   const hostRef = useRef(null)
   const workspaceRef = useRef(null)
   const onCodeChangeRef = useRef(onCodeChange)
@@ -121,12 +127,34 @@ export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceCha
       Blockly.serialization.workspaces.load(initialWorkspaceState, workspace)
     }
 
-    const handleChange = (event) => {
-      if (event.isUiEvent || workspace.isDragging()) return
-      onWorkspaceChangeRef.current?.(Blockly.serialization.workspaces.save(workspace))
+    // Only a change to what the workspace SERIALIZES to is reported. Blockly
+    // delivers events asynchronously, so the creation events of the load
+    // above can still arrive after this listener attaches; without this
+    // comparison, merely opening a section would report an "edit" — and Build
+    // Mode, which keeps a student on a section while it holds uncompiled
+    // edits, would then refuse to let them leave a section they never
+    // touched.
+    let lastSerialized = JSON.stringify(Blockly.serialization.workspaces.save(workspace))
+    const report = () => {
+      const state = Blockly.serialization.workspaces.save(workspace)
+      const serialized = JSON.stringify(state)
+      if (serialized === lastSerialized) return
+      lastSerialized = serialized
+      onWorkspaceChangeRef.current?.(state)
       onCodeChangeRef.current?.(generateArduinoCode(workspace))
     }
+    const handleChange = (event) => {
+      if (event.isUiEvent || workspace.isDragging()) return
+      report()
+    }
     workspace.addChangeListener(handleChange)
+    // FLUSH. Blockly delivers change events asynchronously, so an edit is
+    // reported a moment after it happens — normally within a frame, but a
+    // throttled or backgrounded tab can defer it much longer. A caller about
+    // to act on "the current workspace" (Build Mode's COMPILE/FLASH) calls
+    // this first, so what it submits is the canvas as it is right now, never
+    // the last change that happened to have been delivered.
+    if (apiRef) apiRef.current = { flush: report }
 
     const resizeObserver = new ResizeObserver(() => {
       Blockly.svgResize(workspace)
@@ -134,6 +162,7 @@ export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceCha
     resizeObserver.observe(host)
 
     return () => {
+      if (apiRef && apiRef.current?.flush === report) apiRef.current = null
       resizeObserver.disconnect()
       workspace.removeChangeListener(handleChange)
       workspace.dispose()
