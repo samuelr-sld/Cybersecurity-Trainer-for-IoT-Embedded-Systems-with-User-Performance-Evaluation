@@ -54,6 +54,7 @@ board, or the port.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -62,7 +63,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app import config
-from app.build.process import ProcessTimedOut, run_capture
+from app.build.process import ProcessTimedOut, reap_stale_uploaders, run_capture
 
 #: Upload stdout/stderr are capped before they ever reach a `FlashOutcome`
 #: (and therefore a `state` frame), so a pathologically verbose esptool
@@ -518,6 +519,15 @@ class ArduinoCliFlasher:
 
     async def run_flash(self, request: FlashRequest) -> FlashOutcome:
         """Upload one already-built artifact to one already-selected port."""
+        # Clear the serial port before taking it over. A firmware read or an
+        # upload orphaned by an earlier session — its parent WebSocket torn
+        # down, or a long read killed mid-stream — can still hold the port,
+        # and this upload would then fail with esptool's own "No more data to
+        # read from the serial port". Best-effort and off the event loop; the
+        # caller (a Build flash, or mode preparation under its process-wide
+        # lock) already owns the one board by the time it reaches here.
+        await asyncio.to_thread(reap_stale_uploaders)
+
         args = [
             self._executable,
             *self._prefix_args,

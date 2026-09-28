@@ -1,9 +1,22 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import AppHeader from '../components/AppHeader'
 import InfoBanner from '../components/InfoBanner'
-import { STUDENTS } from '../data'
+import { listParticipants } from '../api/trainerApi'
+import { formatTimestamp } from '../evaluation/evaluationModel'
 
 const PAGE_SIZE = 5
+
+// Registered participants from the backend (GET /api/participants), with
+// their recorded session counts — not seeded demo data.
+function toRow(p) {
+  return {
+    id: p.participant_id,
+    name: p.full_name,
+    hackSessions: p.hack_session_count,
+    buildSessions: p.build_session_count,
+    lastActivity: p.last_activity,
+  }
+}
 
 export default function ProfessorAccess({
   signedIn,
@@ -19,26 +32,36 @@ export default function ProfessorAccess({
   const [remember, setRemember] = useState(false)
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
+  const [students, setStudents] = useState([])
+  const [listState, setListState] = useState({ loading: true, error: '' })
+
+  useEffect(() => {
+    let active = true
+    listParticipants()
+      .then((body) => {
+        if (!active) return
+        setStudents(body.participants.map(toRow))
+        setListState({ loading: false, error: '' })
+      })
+      .catch((e) => active && setListState({ loading: false, error: e.message }))
+    return () => {
+      active = false
+    }
+  }, [])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return STUDENTS
-    return STUDENTS.filter(
+    if (!q) return students
+    return students.filter(
       (s) => s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q),
     )
-  }, [query])
+  }, [query, students])
 
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const current = Math.min(page, pages)
   const slice = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE)
   const start = filtered.length === 0 ? 0 : (current - 1) * PAGE_SIZE + 1
   const end = Math.min(current * PAGE_SIZE, filtered.length)
-
-  const statusClass = (status) => {
-    if (status === 'COMPLETE') return 'ok'
-    if (status === 'IN PROGRESS') return 'warn'
-    return 'bad'
-  }
 
   return (
     <div className="page">
@@ -118,26 +141,31 @@ export default function ProfessorAccess({
                 <tr>
                   <th>STUDENT NAME</th>
                   <th>STUDENT ID</th>
-                  <th>CURRENT SCENARIO</th>
-                  <th>STATUS</th>
+                  <th>HACK SESSIONS</th>
+                  <th>BUILD SESSIONS</th>
                   <th>LAST ACTIVITY</th>
                   <th>ACTIONS</th>
                 </tr>
               </thead>
               <tbody>
+                {slice.length === 0 ? (
+                  <tr>
+                    <td colSpan={6}>
+                      {listState.loading
+                        ? 'Loading registered students…'
+                        : listState.error || 'No registered students yet.'}
+                    </td>
+                  </tr>
+                ) : null}
                 {slice.map((s) => (
                   <tr key={s.id}>
                     <td>{s.name}</td>
                     <td>{s.id}</td>
-                    <td>{s.scenario}</td>
+                    <td>{s.hackSessions}</td>
+                    <td>{s.buildSessions}</td>
+                    <td>{s.lastActivity ? formatTimestamp(s.lastActivity) : 'Not started'}</td>
                     <td>
-                      <span className={`status ${statusClass(s.status)}`}>
-                        <span className="dot" /> {s.status}
-                      </span>
-                    </td>
-                    <td>{s.lastActivity}</td>
-                    <td>
-                      <button type="button" className="btn-outline sm" onClick={() => onView(s)}>
+                      <button type="button" className="btn-outline sm" onClick={() => onView(s, filtered)}>
                         VIEW
                       </button>
                     </td>

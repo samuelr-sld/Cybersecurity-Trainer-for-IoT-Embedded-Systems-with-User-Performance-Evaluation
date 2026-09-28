@@ -148,6 +148,53 @@ def _kill_tree(process: subprocess.Popen) -> None:
         pass
 
 
+#: The flash/read tool that talks to the ESP32 over the serial port. A
+#: leftover instance from an earlier session — an upload that was cancelled,
+#: or a firmware read whose parent died before it released the port — keeps
+#: the serial port open, and the next flash then fails with esptool's own
+#: "No more data to read from the serial port". `read-flash` of the whole 4MB
+#: image is the worst offender because it holds the port for a long time.
+#: Windows matches by image name; POSIX matches the command line, which also
+#: catches the `esptool.py`/`esptool` spellings the bundled tool uses there.
+_UPLOADER_IMAGE_WINDOWS = "esptool.exe"
+_UPLOADER_PATTERN_POSIX = "esptool"
+
+
+def reap_stale_uploaders() -> bool:
+    """Best-effort kill of orphaned esptool processes still holding the serial
+    port, run just before a flash so a leftover uploader cannot lock it.
+
+    Never raises. Returns True if a reap command was launched (a missing
+    process is the goal state, so the command's own exit status is ignored),
+    False when the platform's process killer is not installed.
+
+    Safe because the trainer drives ONE board and a preparation holds a
+    process-wide lock while it runs: no *wanted* uploader is running at the
+    moment this is called, since the caller has not yet started its own.
+    """
+    if _WINDOWS:
+        killer = shutil.which("taskkill")
+        argv = [killer, "/IM", _UPLOADER_IMAGE_WINDOWS, "/T", "/F"] if killer else None
+    else:
+        killer = shutil.which("pkill")
+        argv = [killer, "-KILL", "-f", _UPLOADER_PATTERN_POSIX] if killer else None
+    if argv is None:
+        logger.debug("no stale-uploader reaper available on this platform; skipping")
+        return False
+    try:
+        subprocess.run(  # noqa: S603 - fixed argument array, never a shell
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=KILL_GRACE_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.warning("stale-uploader reap failed", exc_info=True)
+    return True
+
+
 class _Running:
     """The one running child, shared by the worker thread and its awaiter.
 

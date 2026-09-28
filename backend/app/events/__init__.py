@@ -43,6 +43,7 @@ from app.events.records import (
     HackCommandRecord,
     HackEventRecord,
     HackSessionRecord,
+    ParticipantRecord,
 )
 from app.events.store import (
     MEMORY_PATH,
@@ -58,6 +59,7 @@ __all__ = [
     "HackEventRecorder",
     "HackSessionRecord",
     "MEMORY_PATH",
+    "ParticipantRecord",
     "SqliteEventStore",
     "StoreError",
     "from_iso",

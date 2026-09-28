@@ -192,7 +192,7 @@ const SWITCH_BLOCKED_NOTICE =
 // auto-scroll into view" — see the activityLogRef/onScroll wiring below.
 const ACTIVITY_LOG_AUTOSCROLL_THRESHOLD_PX = 32
 
-export default function BuildMode({ onBack, onMenu }) {
+export default function BuildMode({ onBack, onMenu, participantId }) {
   const [state, setState] = useState(null)
   const [events, setEvents] = useState([])
   const [activeFile, setActiveFile] = useState(null)
@@ -302,6 +302,7 @@ export default function BuildMode({ onBack, onMenu }) {
     sendHardwareStatus,
     sendValidate,
   } = useBuildSocket({
+    participantId,
     onSession: () => {
       setEvents([])
       setProtocolError('')

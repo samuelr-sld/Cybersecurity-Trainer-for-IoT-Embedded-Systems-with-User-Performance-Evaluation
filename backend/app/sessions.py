@@ -56,10 +56,10 @@ class HackSession:
     #: package selected. The `default_factory` remains the fallback for the
     #: no-panel development flow and for every existing caller.
     scenario: Scenario = field(default_factory=create_default_scenario)
-    #: The Phase 2E.2 EAC seam (see `HackSessionRecord`). No caller in this
-    #: backend supplies a real value today — there is no authentication
-    #: anywhere on this WebSocket — so this stays None end to end, honestly,
-    #: rather than being filled with an invented identity.
+    #: The Phase 2E.2 EAC seam (see `HackSessionRecord`). Since the
+    #: Evaluation phase `/ws/hack` fills it with the registered participant
+    #: the client named on connect (`app/participants.py`); it stays None
+    #: when none was named or the id is not registered — never invented.
     participant_id: str | None = None
     #: This session's own link to the physical ESP32 (Phase 2A). A fresh
     #: transport per session, for the same isolation reason `scenario` is
@@ -120,7 +120,9 @@ class SessionManager:
         self._sessions: dict[str, HackSession] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, scenario: Scenario | None = None) -> HackSession:
+    async def create(
+        self, scenario: Scenario | None = None, participant_id: str | None = None
+    ) -> HackSession:
         """Create and register a session with a fresh unique id.
 
         The event log is opened here, at connect, rather than when the first
@@ -141,10 +143,16 @@ class SessionManager:
         Omitting it keeps the pre-2D.4 behaviour exactly: the session falls
         back to `HackSession`'s own `create_default_scenario` factory, so
         every existing caller and test is unaffected.
+
+        `participant_id` is the Evaluation phase's owner of this session —
+        already resolved to a registered participant (or None) by the
+        connection lifecycle via `app/participants.py`. It is stored, never
+        looked up, here.
         """
         session = HackSession(
             session_id=str(uuid.uuid4()),
             scenario=scenario if scenario is not None else create_default_scenario(),
+            participant_id=participant_id,
         )
         session.recorder.start()
         async with self._lock:
@@ -177,6 +185,14 @@ class SessionManager:
         async sequences atomic, and this is a single step.
         """
         return self._sessions.pop(session_id, None)
+
+    def is_live(self, session_id: str) -> bool:
+        """Whether this process is serving the session now (Evaluation read).
+
+        A single dict membership test with no await point — safe without the
+        lock for the same reason `discard` is.
+        """
+        return session_id in self._sessions
 
     async def count(self) -> int:
         """Number of live sessions (used by /health and by tests)."""

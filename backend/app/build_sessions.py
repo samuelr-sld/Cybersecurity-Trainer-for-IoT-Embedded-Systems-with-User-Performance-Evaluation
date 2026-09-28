@@ -163,6 +163,10 @@ class BuildSession:
     #: `validation_status`, which collapses four outcomes into the wire's
     #: four-member vocabulary and so cannot say NOT_RUN from ERROR.
     validation_result: ValidationResult | None = None
+    #: The registered participant who owns this session (Evaluation phase),
+    #: resolved at connect by `app/participants.py::resolve_participant`.
+    #: None when the connection named no registered participant.
+    participant_id: str | None = None
     #: This session's own attempt recorder (Phase 2E.3) — see the module
     #: docstring. Built in `__post_init__`, not a `default_factory`: unlike
     #: `workspace`, it needs this session's own id/created_at/panel_id.
@@ -173,6 +177,7 @@ class BuildSession:
             session_id=self.session_id,
             started_at=self.created_at,
             panel_id=self.panel_id,
+            participant_id=self.participant_id,
         )
 
     @property
@@ -300,6 +305,7 @@ class BuildSessionManager:
         validation: ValidationPlan | None = None,
         provisioning: ProvisioningPlan | None = None,
         has_active_project: bool = True,
+        participant_id: str | None = None,
     ) -> BuildSession:
         """Create and register a session with a fresh unique id.
 
@@ -343,6 +349,7 @@ class BuildSessionManager:
             session_id=str(uuid.uuid4()),
             panel_id=panel_id,
             has_active_project=has_active_project,
+            participant_id=participant_id,
             **({} if workspace is None else {"workspace": workspace}),
             **({} if validation is None else {"validation": validation}),
             **({} if provisioning is None else {"compile_provisioning": provisioning}),
@@ -361,6 +368,10 @@ class BuildSessionManager:
         """Unregister a session. Safe to call for an already-removed id."""
         async with self._lock:
             return self._sessions.pop(session_id, None)
+
+    def is_live(self, session_id: str) -> bool:
+        """Whether this process is serving the session now (Evaluation read)."""
+        return session_id in self._sessions
 
     async def count(self) -> int:
         """Number of live sessions (used by tests)."""

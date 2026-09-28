@@ -39,7 +39,8 @@ import tokenize
 
 import pytest
 
-from app.build.process import ProcessTimedOut, run_capture
+from app.build import process as process_module
+from app.build.process import ProcessTimedOut, reap_stale_uploaders, run_capture
 
 PROCESS_PATH = (
     pathlib.Path(__file__).resolve().parent.parent / "app" / "build" / "process.py"
@@ -232,6 +233,59 @@ def _code_names(path: pathlib.Path) -> set[str]:
             if token.type == tokenize.NAME:
                 names.add(token.string)
     return names
+
+
+# --- stale-uploader reaping ---------------------------------------------------
+#
+# `reap_stale_uploaders` clears the serial port before a flash by killing any
+# leftover esptool. It shells out to the platform's process killer, so the
+# tests below capture the argv rather than actually kill anything, and pin the
+# two invariants that matter: it is a fixed argument array (never a shell), and
+# it never raises — a failed or absent reaper must not fail the flash.
+
+
+def test_reap_launches_a_fixed_argv_process_killer(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(process_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(process_module.subprocess, "run", fake_run)
+
+    assert reap_stale_uploaders() is True
+    argv = captured["argv"]
+    # A real list of literal arguments, never a shell string.
+    assert isinstance(argv, list)
+    assert all(isinstance(part, str) for part in argv)
+    assert any("esptool" in part for part in argv)
+    # Output is discarded and the killer's own exit status is ignored.
+    assert captured["kwargs"]["check"] is False
+
+
+def test_reap_is_a_noop_when_no_killer_is_installed(monkeypatch) -> None:
+    monkeypatch.setattr(process_module.shutil, "which", lambda name: None)
+
+    def explode(*_args, **_kwargs):  # pragma: no cover - must never run
+        raise AssertionError("subprocess.run called without a killer")
+
+    monkeypatch.setattr(process_module.subprocess, "run", explode)
+
+    assert reap_stale_uploaders() is False
+
+
+def test_reap_never_raises_when_the_killer_fails(monkeypatch) -> None:
+    monkeypatch.setattr(process_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("killer went away")
+
+    monkeypatch.setattr(process_module.subprocess, "run", boom)
+
+    # A reap that itself fails must be swallowed: the flash still proceeds.
+    assert reap_stale_uploaders() is True
 
 
 def test_process_module_stays_safe_except_for_its_one_sanctioned_exception() -> None:

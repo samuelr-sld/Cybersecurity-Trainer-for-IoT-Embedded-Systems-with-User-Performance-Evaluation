@@ -7,17 +7,24 @@ import HackMode from './screens/HackMode'
 import BuildMode from './screens/BuildMode'
 import ModePreparation from './screens/ModePreparation'
 import Dashboard from './screens/Dashboard'
-import { STUDENTS } from './data'
+import { registerParticipant, signInParticipant } from './api/trainerApi'
 import './App.css'
 
-const seedRegistry = [{ name: 'Juan Dela Cruz', id: '2021-04213' }]
+// Students are registered participants held by the backend
+// (backend/app/participants.py). The signed-in student's number is passed to
+// Hack/Build Mode so every recorded session is attributed to them, which is
+// what the Evaluation page reads back.
+function toStudent(participant) {
+  return { id: participant.participant_id, name: participant.full_name }
+}
 
 export default function App() {
   const [screen, setScreen] = useState('role')
   const [role, setRole] = useState(null)
-  const [registry, setRegistry] = useState(seedRegistry)
   const [student, setStudent] = useState(null)
   const [evalStudent, setEvalStudent] = useState(null)
+  // The professor's list the current evaluation was opened from, for NEXT.
+  const [evalList, setEvalList] = useState([])
   const [professor, setProfessor] = useState(null)
   const [error, setError] = useState('')
   const [overlay, setOverlay] = useState(null)
@@ -46,8 +53,10 @@ export default function App() {
     setScreen('prepare')
   }
 
-  function studentRecord(user) {
-    return STUDENTS.find((s) => s.id === user.id) || { ...STUDENTS[0], ...user }
+  function enterAsStudent(participant) {
+    setStudent(toStudent(participant))
+    setError('')
+    setScreen('menu')
   }
 
   const view = (() => {
@@ -75,31 +84,24 @@ export default function App() {
           onMenu={() => setMenuOpen(true)}
           onBack={goRole}
           onEnter={({ id, name }) => {
-            const found = registry.find(
-              (s) => s.id.trim() === id.trim() && s.name.trim().toLowerCase() === name.trim().toLowerCase(),
-            )
-            if (!found) {
-              setError('No matching student. Register first, or try Juan Dela Cruz / 2021-04213.')
+            if (!id.trim() || !name.trim()) {
+              setError('Student number and full name are required.')
               return
             }
-            setStudent(found)
-            setError('')
-            setScreen('menu')
+            signInParticipant({ id, name })
+              .then(enterAsStudent)
+              .catch((e) =>
+                setError(e.status === 404 && !e.endpointMissing ? 'No matching student. Register first.' : e.message),
+              )
           }}
           onRegister={({ id, name }) => {
             if (!id.trim() || !name.trim()) {
               setError('Full name and student number are required.')
               return
             }
-            if (registry.some((s) => s.id.trim() === id.trim())) {
-              setError('That student number is already registered.')
-              return
-            }
-            const next = { name: name.trim(), id: id.trim() }
-            setRegistry((r) => [...r, next])
-            setStudent(next)
-            setError('')
-            setScreen('menu')
+            registerParticipant({ id, name })
+              .then(enterAsStudent)
+              .catch((e) => setError(e.message))
           }}
         />
       )
@@ -119,11 +121,12 @@ export default function App() {
             setProfessor({ id: id.trim() })
             setError('')
           }}
-          onView={(row) => {
+          onView={(row, list) => {
             if (!professor) {
               setError('Sign in with a Professor ID to view evaluations.')
               return
             }
+            setEvalList(list)
             setEvalStudent(row)
             setScreen('dashboard')
           }}
@@ -138,7 +141,8 @@ export default function App() {
           onHack={() => prepareMode('hack')}
           onBuild={() => prepareMode('build')}
           onEval={() => {
-            setEvalStudent(studentRecord(student))
+            setEvalList([])
+            setEvalStudent(student)
             setScreen('dashboard')
           }}
           onFooter={(key) => {
@@ -163,6 +167,7 @@ export default function App() {
     if (screen === 'hack') {
       return (
         <HackMode
+          participantId={student?.id}
           onMenu={() => setMenuOpen(true)}
           onBack={() => setScreen('menu')}
           onBuild={() => prepareMode('build')}
@@ -170,12 +175,21 @@ export default function App() {
       )
     }
     if (screen === 'build') {
-      return <BuildMode onMenu={() => setMenuOpen(true)} onBack={() => setScreen('menu')} />
+      return (
+        <BuildMode
+          participantId={student?.id}
+          onMenu={() => setMenuOpen(true)}
+          onBack={() => setScreen('menu')}
+        />
+      )
     }
     if (screen === 'dashboard' && evalStudent) {
+      const idx = evalList.findIndex((s) => s.id === evalStudent.id)
       return (
         <Dashboard
+          key={evalStudent.id}
           student={evalStudent}
+          nextStudent={idx >= 0 ? evalList[idx + 1] ?? null : null}
           role={role}
           onMenu={() => setMenuOpen(true)}
           onBack={() => setScreen(role === 'professor' ? 'professor-access' : 'menu')}

@@ -104,6 +104,7 @@ from app.build_project_selection import select_build_project
 from app.build_provisioning_selection import select_build_provisioning
 from app.build_sessions import BuildSession, build_session_manager
 from app.build_validation_selection import select_build_validation
+from app.participants import resolve_participant
 from app.models.build_messages import (
     BUILD_CLIENT_MESSAGE_ADAPTER,
     BuildClientMessage,
@@ -234,6 +235,9 @@ async def build_websocket(websocket: WebSocket) -> None:
         validation=select_build_validation(selection),
         provisioning=select_build_provisioning(selection),
         has_active_project=selection.has_active_project,
+        # Evaluation: the registered participant this session belongs to, or
+        # None — see `app/participants.py`. Never refuses the connection.
+        participant_id=resolve_participant(websocket.query_params.get("participant")),
     )
     logger.info("build session opened: %s [%s]", session.session_id, selection.describe())
 

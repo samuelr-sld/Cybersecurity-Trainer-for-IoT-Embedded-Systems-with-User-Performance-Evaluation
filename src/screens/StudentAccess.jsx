@@ -92,8 +92,8 @@ export default function StudentAccess({ onBack, onEnter, onRegister, error, onMe
         </div>
       </main>
       <InfoBanner>
-        For this prototype, sign-in and registration are simulated and stored locally in your
-        browser. Data will reset on page refresh.
+        Registration is stored by the trainer backend so your Hack and Build sessions are recorded
+        under your student number for evaluation. There is no password: use your own student number.
       </InfoBanner>
     </div>
   )

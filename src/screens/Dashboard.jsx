@@ -1,111 +1,255 @@
+import { useEffect, useState } from 'react'
 import AppHeader from '../components/AppHeader'
-import { STUDENTS } from '../data'
+import InfoBanner from '../components/InfoBanner'
+import { fetchEvaluation } from '../api/trainerApi'
+import {
+  BUILD_METRICS,
+  HACK_METRICS,
+  SECTION_STATE_LABEL,
+  SESSION_STATUS_CLASS,
+  SESSION_STATUS_LABEL,
+  buildSummary,
+  formatDuration,
+  formatMetric,
+  formatTimestamp,
+  hackSummary,
+  hasNoSessions,
+  isMetricAvailable,
+  metricTooltip,
+  panelsOf,
+  sectionState,
+} from '../evaluation/evaluationModel'
 
-function BarChart({ values, labels }) {
-  const max = Math.max(...values, 1)
+// The Evaluation page. Everything shown is the backend's recorded data and
+// the backend's own metric results (GET /api/evaluation/{id},
+// backend/app/evaluation.py) — nothing is computed, seeded or filled in here.
+// There is deliberately no overall score or grade: the platform defines
+// none, and this page reports performance metrics only.
+
+function MetricTile({ code, metric }) {
+  const available = isMetricAvailable(metric)
   return (
-    <div className="chart bar-chart" role="img" aria-label="Hack mode metrics per attempt">
-      {values.map((v, i) => (
-        <div key={labels[i]} className="bar-col">
-          <div className="bar" style={{ height: `${(v / max) * 100}%` }} />
-          <span>{labels[i]}</span>
-        </div>
-      ))}
+    <div className={`kpi${available ? '' : ' kpi-empty'}`} title={metricTooltip(code, metric)}>
+      <strong>{formatMetric(metric)}</strong>
+      <span>
+        {code} — {metric?.name?.toUpperCase() ?? 'NO DATA'}
+      </span>
+      {!available && metric?.detail ? <small className="kpi-detail">{metric.detail}</small> : null}
     </div>
   )
 }
 
-function LineChart({ values }) {
-  const w = 320
-  const h = 140
-  const max = Math.max(...values, 1)
-  const pts = values
-    .map((v, i) => {
-      const x = (i / (values.length - 1)) * (w - 20) + 10
-      const y = h - 16 - (v / max) * (h - 28)
-      return `${x},${y}`
-    })
-    .join(' ')
+function StatusBadge({ status }) {
   return (
-    <svg className="chart line-chart" viewBox={`0 0 ${w} ${h}`} aria-label="Time-to-resolution trend">
-      <polyline fill="none" stroke="#111" strokeWidth="2" points={pts} />
-      {values.map((v, i) => {
-        const x = (i / (values.length - 1)) * (w - 20) + 10
-        const y = h - 16 - (v / max) * (h - 28)
-        return <circle key={i} cx={x} cy={y} r="3" fill="#111" />
-      })}
-    </svg>
+    <span className={`badge ${SESSION_STATUS_CLASS[status] || ''}`}>
+      {SESSION_STATUS_LABEL[status] || status}
+    </span>
   )
 }
 
-function RadarChart({ values }) {
-  const labels = ['Attempt Density', 'Debug Eff.', 'Resolution', 'Validation', 'Completion']
-  const cx = 110
-  const cy = 110
-  const r = 78
-  const pts = values.map((v, i) => {
-    const a = -Math.PI / 2 + (i * 2 * Math.PI) / 5
-    return [cx + Math.cos(a) * r * v, cy + Math.sin(a) * r * v]
-  })
-  const poly = pts.map((p) => p.join(',')).join(' ')
-  const axes = labels.map((label, i) => {
-    const a = -Math.PI / 2 + (i * 2 * Math.PI) / 5
-    const x = cx + Math.cos(a) * r
-    const y = cy + Math.sin(a) * r
-    const lx = cx + Math.cos(a) * (r + 18)
-    const ly = cy + Math.sin(a) * (r + 16)
-    return { label, x, y, lx, ly }
-  })
+function MetricCell({ code, metric }) {
+  return <td title={metricTooltip(code, metric)}>{formatMetric(metric)}</td>
+}
+
+function SectionHead({ title, sessions }) {
+  const state = sectionState(sessions)
   return (
-    <svg className="chart radar" viewBox="0 0 220 220" aria-label="Remediation metrics radar">
-      {axes.map((ax) => (
-        <line key={ax.label} x1={cx} y1={cy} x2={ax.x} y2={ax.y} stroke="#bbb" />
-      ))}
-      <polygon points={axes.map((a) => `${a.x},${a.y}`).join(' ')} fill="none" stroke="#999" />
-      <polygon points={poly} fill="rgba(80,80,80,0.35)" stroke="#111" />
-      {axes.map((ax) => (
-        <text key={ax.label} x={ax.lx} y={ax.ly} textAnchor="middle" fontSize="8">
-          {ax.label}
-        </text>
-      ))}
-    </svg>
+    <div className="eval-section-head">
+      <h3>{title}</h3>
+      <span className={`badge ${SESSION_STATUS_CLASS[state] || ''}`}>{SECTION_STATE_LABEL[state] || state}</span>
+    </div>
   )
 }
 
-const RESULT_CLASS = {
-  OK: 'ok',
-  SUCCESS: 'ok',
-  SECURED: 'ok',
-  ERROR: 'bad',
+function HackSection({ report }) {
+  const sessions = report.hack.sessions
+  const summary = hackSummary(report)
+  return (
+    <section className="panel eval-section">
+      <SectionHead title="HACK MODE" sessions={sessions} />
+      {!summary ? (
+        <p className="eval-empty">No Hack Mode session has been recorded for this student yet.</p>
+      ) : (
+        <>
+          <p className="hint">
+            Most recent session ({formatTimestamp(summary.session.started_at)}) —{' '}
+            {summary.session.panel_name || summary.session.scenario_id}
+          </p>
+          <div className="kpi-row eval-kpis">
+            {HACK_METRICS.map((code) => (
+              <MetricTile key={code} code={code} metric={summary.metrics[code]} />
+            ))}
+          </div>
+          <div className="table-wrap">
+            <table className="log-table">
+              <thead>
+                <tr>
+                  <th>STARTED</th>
+                  <th>PANEL</th>
+                  <th>STATUS</th>
+                  <th>DURATION</th>
+                  <th>COMMANDS</th>
+                  <th>ACR</th>
+                  <th>RE</th>
+                  <th>TTE</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessions.map((s) => (
+                  <tr key={s.session_id} title={`Session ${s.session_id}`}>
+                    <td>{formatTimestamp(s.started_at)}</td>
+                    <td>{s.panel_name || s.scenario_id}</td>
+                    <td>
+                      <StatusBadge status={s.status} />
+                    </td>
+                    <td>{formatDuration(s.duration_seconds) ?? '—'}</td>
+                    <td>{s.command_count}</td>
+                    <MetricCell code="ACR" metric={s.metrics.ACR} />
+                    <MetricCell code="RE" metric={s.metrics.RE} />
+                    <MetricCell code="TTE" metric={s.metrics.TTE} />
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {report.hack.activities.length > 1 ? (
+            <p className="hint">
+              EAC per activity:{' '}
+              {report.hack.activities
+                .map((a) => `${a.panel_name || a.scenario_id}: ${formatMetric(a.metrics.EAC)}`)
+                .join(' · ')}
+            </p>
+          ) : null}
+        </>
+      )}
+    </section>
+  )
 }
 
-export default function Dashboard({ student, role, onBack, onNext, onMenu }) {
-  const m = student.metrics
-  const labels = ['Recon Eff.', 'Attempt 1', 'Attempt 2', 'Attempt 3', 'Attempt 4']
+function attemptText(bucket) {
+  return bucket ? `${bucket.succeeded}/${bucket.total}` : '—'
+}
+
+function BuildSection({ report }) {
+  const sessions = report.build.sessions
+  const summary = buildSummary(report)
+  return (
+    <section className="panel eval-section">
+      <SectionHead title="BUILD MODE" sessions={sessions} />
+      {!summary ? (
+        <p className="eval-empty">No Build Mode session has been recorded for this student yet.</p>
+      ) : (
+        <>
+          <p className="hint">
+            Most recent session ({formatTimestamp(summary.session.started_at)}) —{' '}
+            {summary.session.panel_name || summary.session.panel_id || 'no panel resolved'}
+          </p>
+          <div className="kpi-row eval-kpis">
+            {BUILD_METRICS.map((code) => (
+              <MetricTile key={code} code={code} metric={summary.metrics[code]} />
+            ))}
+          </div>
+          <div className="table-wrap">
+            <table className="log-table">
+              <thead>
+                <tr>
+                  <th>STARTED</th>
+                  <th>PANEL</th>
+                  <th>STATUS</th>
+                  <th>DURATION</th>
+                  <th title="succeeded / total">COMPILE</th>
+                  <th title="succeeded / total">FLASH</th>
+                  <th title="succeeded / total">VALIDATION</th>
+                  <th>TTR</th>
+                  <th>AID</th>
+                  <th>DEI</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessions.map((s) => (
+                  <tr key={s.session_id} title={`Session ${s.session_id}`}>
+                    <td>{formatTimestamp(s.started_at)}</td>
+                    <td>{s.panel_name || s.panel_id || '—'}</td>
+                    <td>
+                      <StatusBadge status={s.status} />
+                    </td>
+                    <td>{formatDuration(s.duration_seconds) ?? '—'}</td>
+                    <td>{attemptText(s.attempts.compile)}</td>
+                    <td>{attemptText(s.attempts.flash)}</td>
+                    <td>{attemptText(s.attempts.validation)}</td>
+                    <MetricCell code="TTR" metric={s.metrics.TTR} />
+                    <MetricCell code="AID" metric={s.metrics.AID} />
+                    <MetricCell code="DEI" metric={s.metrics.DEI} />
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+function ContextPanel({ report }) {
+  const panels = panelsOf(report)
+  const { participant } = report
+  return (
+    <section className="panel eval-context">
+      <h3>STUDENT / SESSION CONTEXT</h3>
+      <dl>
+        <dt>STUDENT</dt>
+        <dd>{participant.full_name}</dd>
+        <dt>STUDENT NUMBER</dt>
+        <dd>{participant.participant_id}</dd>
+        <dt>REGISTERED</dt>
+        <dd>{formatTimestamp(participant.registered_at)}</dd>
+        <dt>PANEL / MODULE</dt>
+        <dd>{panels.length ? panels.join(', ') : '—'}</dd>
+        <dt>SESSIONS</dt>
+        <dd>
+          {report.hack.sessions.length} Hack · {report.build.sessions.length} Build
+        </dd>
+        <dt>REPORT GENERATED</dt>
+        <dd>{formatTimestamp(report.generated_at)}</dd>
+      </dl>
+    </section>
+  )
+}
+
+export default function Dashboard({ student, role, onBack, onNext, nextStudent, onMenu }) {
+  const [state, setState] = useState({ loading: true, error: '', report: null })
+  // Bumped by REFRESH; the effect below re-fetches whenever it changes, so a
+  // session still running can be re-read without leaving the page.
+  const [reloadKey, setReloadKey] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    fetchEvaluation(student.id)
+      .then((report) => active && setState({ loading: false, error: '', report }))
+      .catch((error) => active && setState({ loading: false, error: error.message, report: null }))
+    return () => {
+      active = false
+    }
+  }, [student.id, reloadKey])
+
+  function refresh() {
+    setState((s) => ({ ...s, loading: true, error: '' }))
+    setReloadKey((n) => n + 1)
+  }
+
+  const { loading, error, report } = state
 
   function exportReport() {
-    const body = [
-      `Student: ${student.name}`,
-      `ID: ${student.id}`,
-      `Scenario: ${student.scenario}`,
-      `Attack completion: ${m.attackCompletion}%`,
-      `Time-to-exploitation: ${m.timeToExploit}`,
-      `Time-to-resolution: ${m.timeToResolution}`,
-      `Attempts: ${m.attempts}`,
-      `Debug index: ${m.debugIndex}`,
-    ].join('\n')
-    const blob = new Blob([body], { type: 'text/plain' })
+    if (!report) return
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${student.id}-report.txt`
+    a.download = `${student.id}-evaluation.json`
     a.click()
     URL.revokeObjectURL(url)
   }
-
-  const nextLabel = role === 'professor' ? '[ NEXT STUDENT ]' : '[ NEXT STUDENT ]'
-  const idx = STUDENTS.findIndex((s) => s.id === student.id)
-  const canNext = role === 'professor' && idx >= 0 && idx < STUDENTS.length - 1
 
   return (
     <div className="page">
@@ -113,84 +257,48 @@ export default function Dashboard({ student, role, onBack, onNext, onMenu }) {
         title="STUDENT PERFORMANCE DASHBOARD – EVALUATE STUDENT"
         right={
           <>
-            {student.name} | ID {student.id} | Scenario: {student.scenario}
+            {student.name} | ID {student.id}
           </>
         }
         onMenu={onMenu}
       />
-      <div className="kpi-row">
-        <div className="kpi">
-          <strong>{m.attackCompletion}%</strong>
-          <span>ATTACK COMPLETION RATE</span>
-        </div>
-        <div className="kpi">
-          <strong>{m.timeToExploit}</strong>
-          <span>TIME-TO-EXPLOITATION</span>
-        </div>
-        <div className="kpi">
-          <strong>{m.timeToResolution}</strong>
-          <span>TIME-TO-RESOLUTION</span>
-        </div>
-        <div className="kpi">
-          <strong>{m.attempts}</strong>
-          <span>EXPLOITATION ATTEMPTS</span>
-        </div>
-        <div className="kpi">
-          <strong>{m.debugIndex}</strong>
-          <span>DEBUGGING EFFICIENCY INDEX</span>
-        </div>
-      </div>
-      <div className="dash-row">
-        <section className="panel">
-          <h3>HACK MODE METRICS (PER ATTEMPT)</h3>
-          <BarChart values={m.bars} labels={labels} />
-        </section>
-        <section className="panel">
-          <h3>TIME-TO-RESOLUTION TREND</h3>
-          <LineChart values={m.trend} />
-        </section>
-      </div>
-      <div className="dash-row">
-        <section className="panel">
-          <h3>REMEDIATION METRICS (RADAR)</h3>
-          <RadarChart values={m.radar} />
-        </section>
-        <section className="panel">
-          <h3>ACTIVITY / ATTEMPT LOG</h3>
-          <table className="log-table">
-            <thead>
-              <tr>
-                <th>TIME</th>
-                <th>PHASE</th>
-                <th>ACTION</th>
-                <th>RESULT</th>
-              </tr>
-            </thead>
-            <tbody>
-              {student.log.map((row) => (
-                <tr key={`${row.time}-${row.action}`}>
-                  <td>{row.time}</td>
-                  <td>{row.phase}</td>
-                  <td>{row.action}</td>
-                  <td>
-                    <span className={`badge ${RESULT_CLASS[row.result] || ''}`}>{row.result}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      </div>
+      <main className="eval-body">
+        {loading && !report ? <p className="eval-empty">Loading evaluation…</p> : null}
+        {error ? <p className="form-error">Could not load evaluation: {error}</p> : null}
+        {report ? (
+          <>
+            <ContextPanel report={report} />
+            {hasNoSessions(report) ? (
+              <p className="eval-empty">
+                No evaluation data yet. Metrics appear here once this student completes a Hack Mode or
+                Build Mode session.
+              </p>
+            ) : null}
+            <HackSection report={report} />
+            <BuildSection report={report} />
+          </>
+        ) : null}
+      </main>
+      <InfoBanner>
+        Performance metrics computed by the backend from recorded session activity. N/A means the
+        metric does not apply to that session; Pending means it cannot be computed yet. Hover a value
+        for its definition and source.
+      </InfoBanner>
       <footer className="link-footer">
         <button type="button" onClick={onBack}>
           [ BACK TO MENU ]
         </button>
-        <button type="button" onClick={exportReport}>
+        <button type="button" onClick={refresh} disabled={loading}>
+          [ REFRESH ]
+        </button>
+        <button type="button" onClick={exportReport} disabled={!report}>
           [ EXPORT REPORT ]
         </button>
-        <button type="button" disabled={!canNext} onClick={() => onNext(STUDENTS[idx + 1])}>
-          {nextLabel}
-        </button>
+        {role === 'professor' ? (
+          <button type="button" disabled={!nextStudent} onClick={() => onNext(nextStudent)}>
+            [ NEXT STUDENT ]
+          </button>
+        ) : null}
       </footer>
     </div>
   )

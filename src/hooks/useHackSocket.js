@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { withParticipant } from '../api/trainerApi'
 
 export const CONNECTION_STATUS = {
   CONNECTING: 'connecting',
@@ -55,7 +56,9 @@ export default function useHackSocket(handlers) {
   const [status, setStatus] = useState(CONNECTION_STATUS.CONNECTING)
 
   useEffect(() => {
-    const socket = new WebSocket(resolveWsUrl())
+    // `participantId` (read once, at mount) attributes this session's
+    // recorded activity to the signed-in student for Evaluation.
+    const socket = new WebSocket(withParticipant(resolveWsUrl(), handlersRef.current.participantId))
     socketRef.current = socket
     // No setStatus(CONNECTING) here: the useState above already initializes
     // to CONNECTING, and this effect only ever runs once per mount.

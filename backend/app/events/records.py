@@ -88,7 +88,10 @@ class HackSessionRecord:
 
     `ended_at` is None while the session is live.
 
-    `participant_id` is the Phase 2E.2 EAC seam. Exploitation Attempt Count
+    `participant_id` is the Phase 2E.2 EAC seam, filled since the Evaluation
+    phase with the registered student number the frontend passes on connect
+    (`app/participants.py`), or None when none was supplied or it is not a
+    registered participant. Historical context follows. Exploitation Attempt Count
     (the final manuscript's actual name for the metric the task brief calls
     "EAC" — see `app/metrics/eac.py`) counts SESSIONS by the same participant
     at the same learning activity, and nothing in this backend identifies a
@@ -231,6 +234,30 @@ class HackEventRecord:
             "command": self.command,
             "exit_code": self.exit_code,
             "occurred_at": to_iso(self.occurred_at),
+        }
+
+
+@dataclass(frozen=True)
+class ParticipantRecord:
+    """One registered participant — the identity that owns Hack/Build sessions.
+
+    `participant_id` is the student number the Student Access screen already
+    collects; it is what `HackSessionRecord.participant_id` and
+    `BuildSessionRecord.participant_id` store. There is deliberately no
+    password: the platform's established access model is "student number +
+    full name" on a closed, offline classroom network, and this record makes
+    that identity durable rather than inventing an authentication scheme.
+    """
+
+    participant_id: str
+    full_name: str
+    registered_at: datetime
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "participant_id": self.participant_id,
+            "full_name": self.full_name,
+            "registered_at": to_iso(self.registered_at),
         }
 
 

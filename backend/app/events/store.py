@@ -51,6 +51,7 @@ from app.events.records import (
     HackCommandRecord,
     HackEventRecord,
     HackSessionRecord,
+    ParticipantRecord,
     decode_data,
     encode_data,
 )
@@ -106,10 +107,21 @@ CREATE INDEX IF NOT EXISTS idx_hack_events_type
 -- app/build/records.py for why this lives beside, not merged with, the Hack
 -- Mode tables above.
 CREATE TABLE IF NOT EXISTS build_sessions (
-    session_id TEXT PRIMARY KEY,
-    started_at TEXT NOT NULL,
-    ended_at   TEXT,
-    panel_id   TEXT
+    session_id     TEXT PRIMARY KEY,
+    started_at     TEXT NOT NULL,
+    ended_at       TEXT,
+    panel_id       TEXT,
+    participant_id TEXT
+);
+
+-- Evaluation: the participant registry that owns Hack/Build sessions. See
+-- app/participants.py. `participant_id` is the student number the existing
+-- Student Access screen already asks for; no password, matching that
+-- screen's established prototype model.
+CREATE TABLE IF NOT EXISTS participants (
+    participant_id TEXT PRIMARY KEY,
+    full_name      TEXT NOT NULL,
+    registered_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS build_attempts (
@@ -137,6 +149,24 @@ def _optional_bool_to_int(value: bool | None) -> int | None:
 def _int_to_optional_bool(value: int | None) -> bool | None:
     """Inverse of `_optional_bool_to_int`, tolerating a NULL column."""
     return None if value is None else bool(value)
+
+
+def _build_session_from_row(row: sqlite3.Row) -> BuildSessionRecord:
+    return BuildSessionRecord(
+        session_id=row["session_id"],
+        started_at=from_iso(row["started_at"]),
+        ended_at=None if row["ended_at"] is None else from_iso(row["ended_at"]),
+        panel_id=row["panel_id"],
+        participant_id=row["participant_id"],
+    )
+
+
+def _participant_from_row(row: sqlite3.Row) -> ParticipantRecord:
+    return ParticipantRecord(
+        participant_id=row["participant_id"],
+        full_name=row["full_name"],
+        registered_at=from_iso(row["registered_at"]),
+    )
 
 
 class StoreError(RuntimeError):
@@ -212,6 +242,7 @@ class SqliteEventStore:
         for table, column, coltype in (
             ("hack_sessions", "participant_id", "TEXT"),
             ("hack_commands", "fields_correct", "INTEGER"),
+            ("build_sessions", "participant_id", "TEXT"),
         ):
             existing = {
                 row[1] for row in self._connection.execute(f"PRAGMA table_info({table})")
@@ -428,6 +459,62 @@ class SqliteEventStore:
             for row in rows
         )
 
+    def sessions_for_participant(self, participant_id: str) -> tuple[HackSessionRecord, ...]:
+        """Every Hack Mode session one participant owns, oldest first.
+
+        The Evaluation read path. Scoped in SQL by the owner, so there is
+        still no query that returns another student's rows to a caller.
+        """
+        rows = self._read(
+            "SELECT session_id, scenario_id, started_at, ended_at, participant_id "
+            "FROM hack_sessions WHERE participant_id = ? "
+            "ORDER BY started_at ASC, rowid ASC",
+            (participant_id,),
+        )
+        return tuple(
+            HackSessionRecord(
+                session_id=row["session_id"],
+                scenario_id=row["scenario_id"],
+                started_at=from_iso(row["started_at"]),
+                ended_at=None if row["ended_at"] is None else from_iso(row["ended_at"]),
+                participant_id=row["participant_id"],
+            )
+            for row in rows
+        )
+
+    # -- participants (Evaluation) ------------------------------------------
+
+    def register_participant(self, record: ParticipantRecord) -> bool:
+        """Insert a participant. False (and no change) if the id is taken."""
+        with self._lock:
+            try:
+                cursor = self._connection.execute(
+                    "INSERT OR IGNORE INTO participants "
+                    "(participant_id, full_name, registered_at) VALUES (?, ?, ?)",
+                    (record.participant_id, record.full_name, to_iso(record.registered_at)),
+                )
+                self._connection.commit()
+            except sqlite3.Error as error:
+                raise StoreError(f"event store write failed: {error}") from error
+        return cursor.rowcount == 1
+
+    def participant(self, participant_id: str) -> ParticipantRecord | None:
+        rows = self._read(
+            "SELECT participant_id, full_name, registered_at FROM participants "
+            "WHERE participant_id = ?",
+            (participant_id,),
+        )
+        return _participant_from_row(rows[0]) if rows else None
+
+    def participants(self) -> tuple[ParticipantRecord, ...]:
+        """Every registered participant, in registration order."""
+        rows = self._read(
+            "SELECT participant_id, full_name, registered_at FROM participants "
+            "ORDER BY registered_at ASC, rowid ASC",
+            (),
+        )
+        return tuple(_participant_from_row(row) for row in rows)
+
     # -- Build Mode (Phase 2E.3) --------------------------------------------
     #
     # Same file, same connection, same lock — a parallel pair of tables for
@@ -440,12 +527,14 @@ class SqliteEventStore:
         """Write the Build Mode session header. Re-opening an id is a no-op."""
         self._write(
             "INSERT OR IGNORE INTO build_sessions "
-            "(session_id, started_at, ended_at, panel_id) VALUES (?, ?, ?, ?)",
+            "(session_id, started_at, ended_at, panel_id, participant_id) "
+            "VALUES (?, ?, ?, ?, ?)",
             (
                 record.session_id,
                 to_iso(record.started_at),
                 None if record.ended_at is None else to_iso(record.ended_at),
                 record.panel_id,
+                record.participant_id,
             ),
         )
 
@@ -460,19 +549,23 @@ class SqliteEventStore:
     def build_session(self, session_id: str) -> BuildSessionRecord | None:
         """The Build Mode session header, or None if this id was never opened."""
         rows = self._read(
-            "SELECT session_id, started_at, ended_at, panel_id "
+            "SELECT session_id, started_at, ended_at, panel_id, participant_id "
             "FROM build_sessions WHERE session_id = ?",
             (session_id,),
         )
-        if not rows:
-            return None
-        row = rows[0]
-        return BuildSessionRecord(
-            session_id=row["session_id"],
-            started_at=from_iso(row["started_at"]),
-            ended_at=None if row["ended_at"] is None else from_iso(row["ended_at"]),
-            panel_id=row["panel_id"],
+        return _build_session_from_row(rows[0]) if rows else None
+
+    def build_sessions_for_participant(
+        self, participant_id: str
+    ) -> tuple[BuildSessionRecord, ...]:
+        """Every Build Mode session one participant owns, oldest first."""
+        rows = self._read(
+            "SELECT session_id, started_at, ended_at, panel_id, participant_id "
+            "FROM build_sessions WHERE participant_id = ? "
+            "ORDER BY started_at ASC, rowid ASC",
+            (participant_id,),
         )
+        return tuple(_build_session_from_row(row) for row in rows)
 
     def append_build_attempt(self, record: BuildAttemptRecord) -> None:
         """Append one completed compile/flash/validation attempt."""

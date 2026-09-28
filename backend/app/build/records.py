@@ -67,6 +67,9 @@ class BuildSessionRecord:
     started_at: datetime
     ended_at: datetime | None = None
     panel_id: str | None = None
+    #: The registered participant who owns this session (Evaluation phase —
+    #: see `app/participants.py`), or None when the connection named none.
+    participant_id: str | None = None
 
 
 @dataclass(frozen=True)

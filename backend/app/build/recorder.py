@@ -63,10 +63,12 @@ class BuildEventRecorder:
         started_at: datetime | None = None,
         store: SqliteEventStore | None = None,
         panel_id: str | None = None,
+        participant_id: str | None = None,
     ) -> None:
         self._session_id = session_id
         self._started_at = started_at if started_at is not None else utc_now()
         self._panel_id = panel_id
+        self._participant_id = participant_id
         self._store = store
         self._sequence = 0
         self._attempts: list[BuildAttemptRecord] = []
@@ -88,6 +90,10 @@ class BuildEventRecorder:
     @property
     def panel_id(self) -> str | None:
         return self._panel_id
+
+    @property
+    def participant_id(self) -> str | None:
+        return self._participant_id
 
     @property
     def attempts(self) -> tuple[BuildAttemptRecord, ...]:
@@ -145,6 +151,7 @@ class BuildEventRecorder:
             session_id=self._session_id,
             started_at=self._started_at,
             panel_id=self._panel_id,
+            participant_id=self._participant_id,
         )
         self._persist("open the build session", lambda store: store.open_build_session(record))
 

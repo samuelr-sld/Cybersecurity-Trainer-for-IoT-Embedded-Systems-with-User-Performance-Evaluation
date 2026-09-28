@@ -929,6 +929,87 @@ th {
   color: var(--bad);
 }
 
+.badge.warn {
+  background: rgba(210, 153, 34, 0.16);
+  color: var(--warn);
+}
+
+/* Evaluation page (Dashboard.jsx) */
+.eval-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 24px;
+}
+
+.eval-section,
+.eval-context {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.eval-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.eval-kpis {
+  padding: 0;
+}
+
+.eval-section .eval-kpis:has(> :nth-child(4)) {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.eval-section .eval-kpis:not(:has(> :nth-child(4))) {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.kpi-empty strong {
+  color: var(--muted);
+}
+
+.kpi-detail {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.eval-empty {
+  color: var(--muted);
+  margin: 0;
+}
+
+.eval-context dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.eval-context dt {
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  align-self: center;
+}
+
+.eval-context dd {
+  margin: 0;
+}
+
+@media (max-width: 980px) {
+  .eval-section .eval-kpis:has(> :nth-child(4)),
+  .eval-section .eval-kpis:not(:has(> :nth-child(4))) {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
 .overlay {
   position: fixed;
   inset: 0;

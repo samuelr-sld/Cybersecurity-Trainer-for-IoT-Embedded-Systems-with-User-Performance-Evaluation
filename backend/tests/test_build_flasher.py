@@ -39,6 +39,7 @@ import tokenize
 import pytest
 
 from app import config
+from app.build import flasher as flasher_module
 from app.build.flasher import (
     ArduinoCliFlasher,
     DeviceDetectRequest,
@@ -176,6 +177,38 @@ def test_successful_upload_reports_success(
     assert outcome.exit_code == 0
     assert outcome.port == "COM7"
     assert "Hash of data verified." in outcome.stdout
+
+
+def test_run_flash_reaps_stale_uploaders_before_uploading(
+    fake_cli_script: pathlib.Path, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The serial port is cleared of leftover esptool BEFORE the upload runs.
+
+    Re-installs a recording double over the suite-wide no-op (see
+    `conftest.no_stale_uploader_reaping`) and pins the ordering: the reap
+    must happen before the artifact reaches the process, or a leftover reader
+    from an earlier session could still hold the port when the upload starts.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(
+        "app.build.flasher.reap_stale_uploaders",
+        lambda: order.append("reap") or True,
+    )
+
+    original_run_capture = flasher_module.run_capture
+
+    async def recording_run_capture(*args, **kwargs):
+        order.append("upload")
+        return await original_run_capture(*args, **kwargs)
+
+    monkeypatch.setattr(flasher_module, "run_capture", recording_run_capture)
+
+    instructions = write_instructions(tmp_path / "instructions.json", exit_code=0)
+    flasher = make_flasher(fake_cli_script, instructions)
+
+    run(flasher.run_flash(make_request(tmp_path)))
+
+    assert order == ["reap", "upload"]
 
 
 # --- 2: real exit-code failure ----------------------------------------------

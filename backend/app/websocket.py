@@ -137,6 +137,7 @@ from app.models.messages import (
     StateMessage,
 )
 from app.hack_live_mqtt import configure_live_mqtt
+from app.participants import resolve_participant
 from app.scenario_selection import select_session_scenario
 from app.sessions import HackSession, session_manager
 
@@ -478,7 +479,13 @@ async def hack_websocket(websocket: WebSocket) -> None:
     # no credentials, or the feature disabled, it attaches nothing and the
     # session stays simulated — the ordinary development flow. It never raises.
     configure_live_mqtt(selection)
-    session = await session_manager.create(scenario=selection.scenario)
+    # Evaluation: attribute this session to the registered participant the
+    # client named (`?participant=<student number>`), or to nobody. A lookup
+    # only — it never refuses the connection and sends no frame.
+    participant_id = resolve_participant(websocket.query_params.get("participant"))
+    session = await session_manager.create(
+        scenario=selection.scenario, participant_id=participant_id
+    )
     channel = _Channel(websocket)
     # Started here, but it opens nothing: it parks on an empty queue until a
     # serial command connects the board. See `_pump_serial`.

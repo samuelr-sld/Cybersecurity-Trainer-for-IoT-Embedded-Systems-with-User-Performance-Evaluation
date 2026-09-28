@@ -16,9 +16,15 @@ const TOOLS = [
     id: 'esptool',
     name: 'esptool.py',
     action: 'extract',
-    command: 'esptool.py read_flash 0x0 0x400000 firmware.bin',
+    // 64 KiB from the app-partition offset (0x10000), NOT the full 4 MiB
+    // flash: a whole-flash read is minutes long and dumps the bootloader,
+    // ESP-IDF/Arduino libraries, the second OTA slot and SPIFFS, which is
+    // what buries the handful of config strings this exercise wants. The
+    // app image (where the sketch's own string literals live) starts at
+    // 0x10000; a 64 KiB window there is a fast, readable slice.
+    command: 'esptool.py read_flash 0x10000 0x10000 firmware.bin',
   },
-  { id: 'strings', name: 'strings', action: 'inspect', command: 'strings firmware.bin' },
+  { id: 'strings', name: 'strings', action: 'inspect', command: 'strings -n 8 firmware.bin' },
   { id: 'grep', name: 'grep', action: 'search', command: 'grep mqtt firmware.bin' },
   { id: 'nmap', name: 'nmap', action: 'scan', command: 'nmap' },
   { id: 'sub', name: 'mosquitto_sub', action: 'listen', command: 'mosquitto_sub' },
@@ -126,7 +132,7 @@ function guidedStepsDone(scenarioState) {
 const ANSI_ERR = '\x1b[38;2;220;90;90m'
 const ANSI_RESET = '\x1b[0m'
 
-export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
+export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participantId }) {
   const termRef = useRef(null)
   const inputBufferRef = useRef('')
 
@@ -195,6 +201,7 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu }) {
   }
 
   const { status, sendInput, sendResize, sendHardwareStatus } = useHackSocket({
+    participantId,
     onSession: (message) => {
       setSessionId(message.session_id)
       // A `session` frame only ever arrives once per connection (right after

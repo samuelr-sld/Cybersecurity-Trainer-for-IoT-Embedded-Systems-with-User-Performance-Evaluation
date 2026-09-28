@@ -62,6 +62,26 @@ def no_startup_device_detection(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def no_stale_uploader_reaping(monkeypatch: pytest.MonkeyPatch):
+    """Stop the flasher's pre-flash port cleanup from killing real processes.
+
+    `ArduinoCliFlasher.run_flash` now calls `reap_stale_uploaders`
+    (`app/build/process.py`) before every upload, to clear a serial port a
+    leftover esptool from an earlier session may still be holding. In a
+    deployment that is exactly right; in a test run it would shell out to
+    `taskkill`/`pkill` against whatever esptool is alive on the machine
+    running the suite — including a real flash in progress from a live
+    backend on the same box. Reached indirectly (every real-flasher test
+    drives `run_flash`), so autouse, matching the hardware-isolation fixtures
+    here. The unit tests that are ABOUT the reaper drive
+    `app.build.process.reap_stale_uploaders` directly with the process killer
+    faked, and the one flasher test that asserts the call re-installs its own
+    recording double over this no-op.
+    """
+    monkeypatch.setattr("app.build.flasher.reap_stale_uploaders", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def reset_shared_device_monitor():
     """Reset the process-wide `device_monitor` before AND after every test.
 

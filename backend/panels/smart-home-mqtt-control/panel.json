@@ -45,13 +45,13 @@
       "step_id": "extract-firmware",
       "title": "Read the controller firmware from flash",
       "command": "esptool.py",
-      "description": "Perform an authorized read of the device flash to obtain the firmware image for analysis."
+      "description": "Perform an authorized read of the application image (esptool.py read_flash 0x10000 0x10000 firmware.bin) to obtain the firmware for analysis. Read the 64 KiB app partition rather than the whole 4 MiB flash: a full read takes minutes and buries the configuration under bootloader and SDK strings."
     },
     {
       "step_id": "analyze-strings",
       "title": "Extract and search the firmware strings",
       "command": "strings",
-      "description": "Dump the printable strings from the firmware, then narrow to the broker and topic configuration."
+      "description": "Dump the printable strings from the firmware. A raw ESP32 image is mostly machine code and SDK libraries, so raise the minimum length (strings -n 8 firmware.bin) to cut the noise, then narrow to the broker and topic configuration with grep."
     },
     {
       "step_id": "grep-config",
