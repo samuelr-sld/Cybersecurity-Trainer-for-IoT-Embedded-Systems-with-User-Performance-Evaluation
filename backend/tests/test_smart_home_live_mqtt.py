@@ -32,7 +32,7 @@ BROKER = "192.168.50.1"
 PORT = 1883
 CONTROL_TOPIC = "cybertrainer/smart-home/motor/control"
 STATE_TOPIC = "cybertrainer/smart-home/motor/state"
-LAB_PASSWORD = "SUPER-SECRET-LAB-PW-DO-NOT-LOG"
+TEST_AUTH_VALUE = "unit-test-value"
 
 
 class FakeTransport:
@@ -76,7 +76,7 @@ class FakeTransport:
         self.closed = True
 
 
-def _settings(password: str = LAB_PASSWORD) -> MqttSettings:
+def _settings(password: str = TEST_AUTH_VALUE) -> MqttSettings:
     return MqttSettings(
         host=BROKER,
         port=PORT,
@@ -283,7 +283,7 @@ def test_no_mqtt_password_in_records() -> None:
         + [repr(e) for e in session.recorder.events]
         + list(result.lines)
     )
-    assert LAB_PASSWORD not in haystack
+    assert TEST_AUTH_VALUE not in haystack
 
 
 # --- O: other scenarios are unaffected --------------------------------------
