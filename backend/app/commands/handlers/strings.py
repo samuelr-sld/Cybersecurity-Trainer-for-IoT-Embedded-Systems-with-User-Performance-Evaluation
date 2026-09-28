@@ -25,9 +25,19 @@ simulated string table, exactly as it always has.
 dump most short runs are machine code that merely happens to be printable,
 so `-n 8` is the standard first move for cutting that noise. It only
 affects the real-artifact path; the simulated table is already curated.
+
+PAGED OUTPUT. A real dump can run to hundreds of lines, which is exactly
+what makes it hard to inspect one screenful at a time — so both paths mark
+their `CommandResult` `pageable=True` (see `app/pager.py` and the pager
+section of `app/websocket.py`). This is a property of the command, not of
+which source produced the lines: the simulated table happens to already fit
+one screen, so marking it too costs nothing and keeps the two paths
+behaving identically from the pager's point of view.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from app.commands.base import CommandCategory, CommandContext, CommandResult, CommandSpec
 from app.commands.options import parse_options
@@ -70,7 +80,12 @@ def handle(command: ParsedCommand, context: CommandContext) -> CommandResult:
     if artifact is None:
         # No real capture for this session — the long-standing simulated
         # path, including its own prerequisite-not-met failure text.
-        return to_command_result(scenario_outcome)
+        # `replace(..., pageable=True)` rather than passing it in above:
+        # `to_command_result` is the shared scenario-outcome adapter (see
+        # app/commands/scenario_adapter.py) and stays ignorant of paging,
+        # exactly as it stays ignorant of every other command-specific
+        # concern its callers might have.
+        return replace(to_command_result(scenario_outcome), pageable=True)
 
     real_lines = extract_printable_strings(artifact.data, min_length)
     return CommandResult(
@@ -78,6 +93,7 @@ def handle(command: ParsedCommand, context: CommandContext) -> CommandResult:
         exit_code=_EXIT_OK if real_lines else _EXIT_FAILURE,
         events=scenario_outcome.events,
         fields_correct=scenario_outcome.fields_correct,
+        pageable=True,
     )
 
 

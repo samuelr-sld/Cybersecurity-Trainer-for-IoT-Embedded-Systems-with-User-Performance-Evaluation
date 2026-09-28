@@ -99,7 +99,7 @@ from pydantic import ValidationError
 
 from app import config
 from app.build.events import BuildEvent
-from app.build.service import BuildActionResult, default_service
+from app.build.service import BuildActionResult, default_service, end_session_sync
 from app.build_project_selection import select_build_project
 from app.build_provisioning_selection import select_build_provisioning
 from app.build_sessions import BuildSession, build_session_manager
@@ -317,6 +317,15 @@ async def build_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
-        await default_service.end_session(session)
-        await build_session_manager.remove(session.session_id)
+        # NOTHING HERE MAY AWAIT. Mirrors `app/websocket.py`'s Hack Mode
+        # teardown / `SessionManager.discard`: the server can cancel this
+        # task on a hard disconnect, and this `finally` then runs with a
+        # cancellation already delivered — the *first* `await` is not safe
+        # to depend on completing, even one with nothing to suspend on
+        # today, because that could change without anyone noticing the
+        # teardown had become unsafe. `end_session_sync` and `discard` are
+        # therefore plain synchronous calls, not the awaited
+        # `end_session`/`remove` this used to call.
+        end_session_sync(session)
+        build_session_manager.discard(session.session_id)
         logger.info("build session closed: %s", session.session_id)

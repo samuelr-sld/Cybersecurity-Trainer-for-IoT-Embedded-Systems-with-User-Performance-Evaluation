@@ -75,6 +75,28 @@ const POLICY_LABEL = {
   editable: 'EDITABLE',
 }
 
+// The General Terminal's header suffix for whichever operation it is
+// currently showing (see `currentOp` below) — GENERAL TERMINAL alone when
+// nothing has run yet.
+const GENERAL_TERMINAL_LABEL = { compile: 'COMPILE', flash: 'FLASH', validation: 'VALIDATION' }
+
+// Backend `CompileStatus` -> the General Terminal's banner copy while it is
+// showing a compile, mirroring FLASH_BANNER's shape below.
+const COMPILE_BANNER = {
+  running: 'COMPILING…',
+  succeeded: '✓ COMPILE SUCCESS',
+  failed: '✗ COMPILE FAILED',
+}
+
+// Backend `CompileFailureCategory` (backend/app/build/compiler.py) -> one
+// plain sentence, the same role FLASH_FAILURE_NOTE plays for a failed flash.
+const COMPILE_FAILURE_NOTE = {
+  compiler_error: 'The compiler reported an error — see the output below.',
+  timeout: 'The compile exceeded its time limit and was stopped.',
+  toolchain_unavailable: 'The Arduino CLI toolchain is not available on the backend.',
+  internal_error: 'The backend could not run the compile.',
+}
+
 // Backend `FlashStatus` -> banner copy. NO ESP32 DEVICE DETECTED is
 // deliberately worded as a device fact, not a build or toolchain problem.
 // FLASH SUCCESS claims exactly what the backend verified: `arduino-cli
@@ -199,9 +221,10 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
   const [protocolError, setProtocolError] = useState('')
 
   // SECTION-BASED EDITING (Phase B8 correction). `selectedSectionId` is the
-  // one section currently open in the editor pane — a student clicks a row
-  // in FIRMWARE SECTIONS to open it, whatever its policy. `sectionData` is
-  // the backend's answer to `section_blockly` for an EDITABLE section only
+  // one section currently open in the editor pane — a student clicks its
+  // header directly in the code view to open it, whatever its policy.
+  // `sectionData` is the backend's answer to `section_blockly` for an
+  // EDITABLE section only
   // (`{path, sectionId, representable, workspace, preserved}` — see
   // backend/app/build/section_blockly.py); LOCKED/EXPLORE sections need no
   // round trip, since their current text is already in `state.files`.
@@ -261,6 +284,14 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
   // runs.
   const [validationPending, setValidationPending] = useState(false)
 
+  // Which of compile/flash/validation the General Terminal below is
+  // currently showing — null until the first one runs. Set from the real
+  // backend `*_started` events in `onEvent` below, and kept as the last one
+  // that ran once everything is idle, so the terminal's result stays on
+  // screen until a different operation starts (`currentOp` below folds this
+  // together with the three live "is running" flags).
+  const [activeOp, setActiveOp] = useState(null)
+
   // The moment THIS Build Mode session started, for Activity Log elapsed
   // timestamps (see `formatElapsedSince`) — set in `onSession` below (never
   // during render: `Date.now()` is impure), so a fresh `/ws/build`
@@ -308,6 +339,7 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
       setProtocolError('')
       setChainNotice('')
       setValidationPending(false)
+      setActiveOp(null)
       sessionStartRef.current = sessionClockNow()
       setShowSuccessToast(false)
       setFailureToastDismissed(false)
@@ -391,6 +423,18 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
           clearTimeout(successToastTimeoutRef.current)
           successToastTimeoutRef.current = null
         }
+      }
+      // GENERAL TERMINAL: which of compile/flash/validation it keeps showing
+      // once that operation finishes (see `currentOp` below) — set from the
+      // real backend event that starts each one, the same plain-response-to-
+      // an-occurrence pattern the compile toast above uses, never derived by
+      // watching other state in an effect.
+      if (message.event === 'compile_started') {
+        setActiveOp('compile')
+      } else if (message.event === 'flash_started') {
+        setActiveOp('flash')
+      } else if (message.event === 'validation_started') {
+        setActiveOp('validation')
       }
     },
     onError: (message) => {
@@ -531,6 +575,30 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
     return () => clearInterval(id)
   }, [socketLinked, sendHardwareStatus, driver])
 
+  // The compile half of the General Terminal below — real `arduino-cli
+  // compile` output (`compileOutput.stdout`/`stderr`), never simulated. This
+  // was already sent by the backend in every `state` frame (`compile_output`)
+  // but had nowhere inline to render since the compile toast only ever showed
+  // an icon/title; this is the same data, just finally given a terminal.
+  const compileOutput = state?.compile_output || null
+  const compileTerminalText = submitting
+    ? 'Submitting edits…'
+    : isCompiling
+      ? 'Compiling…'
+      : compileStatus === 'not_started'
+        ? 'Compile output will appear here once you compile the firmware.'
+        : [
+            COMPILE_BANNER[compileStatus],
+            compileOutput && !compileOutput.success
+              ? COMPILE_FAILURE_NOTE[compileOutput.category] || compileOutput.category
+              : null,
+            compileOutput?.stdout,
+            compileOutput?.stderr,
+          ]
+            .filter(Boolean)
+            .join('\n')
+  const compileBannerStatus = submitting || isCompiling ? 'running' : compileStatus
+
   // The Flash Terminal under the code editor — real Arduino CLI/esptool
   // output (`flashOutput.stdout`/`stderr`), never simulated text. Built the
   // same way the old `.flash-result` block was (same banner/device/failure-
@@ -577,6 +645,47 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
         ]
           .filter(Boolean)
           .join('\n')
+
+  // GENERAL TERMINAL. Compile, flash and validation used to each get their
+  // own always-visible terminal block; this merges their presentation into
+  // one, showing whichever of the three is currently running and, once it
+  // finishes, keeping that same operation's result on screen until a
+  // different one starts — exactly the "stays until superseded" behavior the
+  // old Flash/Validation Terminals already had individually. None of the
+  // three text/status builders above changed; this only picks between them.
+  const compileRunning = submitting || isCompiling
+  const validationRunning = validationPending
+  const currentOp = flashing ? 'flash' : compileRunning ? 'compile' : validationRunning ? 'validation' : activeOp
+  const generalTerminalText =
+    currentOp === 'compile'
+      ? compileTerminalText
+      : currentOp === 'flash'
+        ? flashTerminalText
+        : currentOp === 'validation'
+          ? validationTerminalText
+          : 'Output will appear here once you compile, flash, or validate.'
+  const generalTerminalBannerStatus =
+    currentOp === 'compile'
+      ? compileBannerStatus
+      : currentOp === 'flash'
+        ? flashBannerStatus
+        : currentOp === 'validation'
+          ? validationBannerStatus
+          : 'not_started'
+  const generalTerminalStatusText =
+    currentOp === 'compile'
+      ? compileRunning
+        ? 'COMPILING…'
+        : BUILD_STATUS_LABEL[compileStatus] || compileStatus
+      : currentOp === 'flash'
+        ? flashing
+          ? 'UPLOADING…'
+          : BUILD_STATUS_LABEL[flashStatus] || flashStatus
+        : currentOp === 'validation'
+          ? validationPending
+            ? 'VALIDATING…'
+            : BUILD_STATUS_LABEL[validationStatus] || validationStatus
+          : BUILD_STATUS_LABEL.not_started
 
   // Smart auto-scroll for the Activity Log: a new entry scrolls into view
   // only if the reader was already at/near the bottom. `isNearBottomRef` is
@@ -823,48 +932,14 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
                   </>
                 )}
               </section>
-              <section className="panel">
-                <h3>FIRMWARE SECTIONS</h3>
-                {fileNames.length > 0 && (
-                  <ul className="file-list">
-                    {fileNames.map((name) => (
-                      <li key={name}>
-                        <button
-                          type="button"
-                          className={name === resolvedActiveFile ? 'active' : ''}
-                          onClick={() => switchFile(name)}
-                        >
-                          {name}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {/* THE SECTION IS THE INTERACTION SURFACE (Phase B8
-                    correction). Every discovered section of the active file,
-                    each individually clickable, with its own policy badge —
-                    no separate "open editor" control. */}
-                {activeSegments.length === 0 ? (
-                  <p className="muted-note">Loading firmware…</p>
-                ) : (
-                  <ul className="section-list">
-                    {activeSegments.map((segment) => (
-                      <li key={segment.region_id}>
-                        <button
-                          type="button"
-                          className={segment.region_id === selectedSectionId ? 'active' : ''}
-                          onClick={() => openSection(segment.region_id)}
-                        >
-                          <span className={`policy-badge ${segment.policy}`}>
-                            {POLICY_LABEL[segment.policy] || segment.policy}
-                          </span>
-                          {segment.region_id}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </section>
+              {/* The old FIRMWARE SECTIONS panel (region names + LOCKED/
+                  EDITABLE badges) was removed as student-facing UI — the
+                  underlying model is untouched, and every section is still
+                  directly clickable in place below via the same
+                  `openSection`/POLICY_LABEL (Phase B8's "the section IS the
+                  interaction surface" still holds, it just has one surface
+                  now instead of two). The file switcher that used to share
+                  this panel moved into the editor pane below. */}
               <section className="panel">
                 <h3>BUILD STATUS</h3>
                 <ul className="checks">
@@ -929,6 +1004,25 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
         </aside>
         <section className="editor">
           <div className="code-view">
+            {/* The file switcher, relocated here from the removed FIRMWARE
+                SECTIONS panel — same `switchFile` call and `.file-list`
+                markup, unchanged, just no longer sharing a panel with the
+                section/policy list below. */}
+            {fileNames.length > 0 && (
+              <ul className="file-list">
+                {fileNames.map((name) => (
+                  <li key={name}>
+                    <button
+                      type="button"
+                      className={name === resolvedActiveFile ? 'active' : ''}
+                      onClick={() => switchFile(name)}
+                    >
+                      {name}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
             {/* THE COMPLETE .ino IS THE PRIMARY WORKSPACE. Every discovered
                 section renders here, in document order, all the time — a
                 student reads the whole firmware for context and clicks a
@@ -937,8 +1031,7 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
                 is always the plain, current text from `state.files`; only
                 the OPEN EDITABLE section swaps its own body for the editing
                 surface below, so the rest of the file never disappears
-                around it. FIRMWARE SECTIONS in the left column still calls
-                the same `openSection`, so it stays a valid quick-jump list. */}
+                around it. */}
             <p className="file-active">{resolvedActiveFile || 'connecting…'}</p>
             {activeSegments.length === 0 ? (
               <p className="muted-note">Loading firmware…</p>
@@ -1062,37 +1155,23 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
             </div>
             {chainNotice && <div className="console-out warn">{chainNotice}</div>}
           </div>
-          {/* Flash output stays inline (real Arduino CLI/esptool upload
-              text matters to a student watching hardware upload) — see
-              CLAUDE.md: it lives in a compact, bounded, scrollable terminal
-              under the editor rather than the old unbounded console block.
-              Compile feedback moved out entirely to the bottom-right toast
-              below; `state.compile_output` (stdout/stderr) is untouched and
-              still fully populated for a future detailed view — it just
-              isn't rendered inline any more. */}
-          <div className={`flash-terminal ${flashBannerStatus}`}>
+          {/* GENERAL TERMINAL — the former separate Flash Terminal and
+              Validation Terminal (plus compile output, which previously had
+              no inline home at all) merged into one compact, bounded,
+              scrollable terminal under the editor. It shows whichever of
+              compile/flash/validation is currently running, and keeps that
+              operation's result on screen afterwards until a different one
+              starts — see the `activeOp`/`currentOp` derivation above. Real
+              backend output only, never simulated; still reuses the exact
+              same `.flash-terminal` styling and the untouched
+              compile/flash/validation text builders — only the presentation
+              is combined. */}
+          <div className={`flash-terminal ${generalTerminalBannerStatus}`}>
             <div className="flash-terminal-header">
-              <span>FLASH TERMINAL</span>
-              <span className="status-pill">
-                {flashing ? 'UPLOADING…' : BUILD_STATUS_LABEL[flashStatus] || flashStatus}
-              </span>
+              <span>GENERAL TERMINAL{currentOp ? ` — ${GENERAL_TERMINAL_LABEL[currentOp]}` : ''}</span>
+              <span className="status-pill">{generalTerminalStatusText}</span>
             </div>
-            <pre className="flash-terminal-body">{flashTerminalText}</pre>
-          </div>
-          {/* Validation Terminal — same block as the Flash Terminal above,
-              reusing its `.flash-terminal` styling verbatim (Phase B7): real
-              backend validator output, never simulated, in the same compact
-              bounded scrollable shape. `ValidationStatus` only ever carries
-              running/succeeded/failed, which is exactly the subset of
-              `.flash-terminal`'s status modifiers this needs. */}
-          <div className={`flash-terminal ${validationBannerStatus}`}>
-            <div className="flash-terminal-header">
-              <span>VALIDATION TERMINAL</span>
-              <span className="status-pill">
-                {validationPending ? 'VALIDATING…' : BUILD_STATUS_LABEL[validationStatus] || validationStatus}
-              </span>
-            </div>
-            <pre className="flash-terminal-body">{validationTerminalText}</pre>
+            <pre className="flash-terminal-body">{generalTerminalText}</pre>
           </div>
         </section>
         <aside className="side-col">

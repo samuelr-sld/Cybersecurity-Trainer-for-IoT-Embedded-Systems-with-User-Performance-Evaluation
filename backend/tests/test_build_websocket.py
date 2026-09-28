@@ -686,14 +686,14 @@ def test_compile_started_is_not_delivered_twice(
 # disconnects while the server task is genuinely suspended elsewhere (inside
 # the still-running compile's `asyncio.to_thread`), which is what gives an
 # abrupt disconnect the chance to land a cancellation on the connection's
-# task at all. It pins that `app/build_websocket.py`'s teardown — one await
-# on `BuildService.end_session`, one on `BuildSessionManager.remove` —
-# survives that: today neither call has an internal suspension point of its
-# own (see both docstrings), so a cancellation delivered elsewhere in the
-# task cannot land inside this `finally` and abandon it partway through, the
-# same class of bug `app/sessions.py::SessionManager.discard` exists to
-# prevent for Hack Mode. If either call ever gains a genuine `await` (a slow
-# store write, a contended lock, ...), this test starts failing.
+# task at all. It pins that `app/build_websocket.py`'s teardown survives
+# that: `finally` calls only `end_session_sync` and
+# `BuildSessionManager.discard`, plain synchronous functions with no
+# `await` of their own, the same class of fix `app/sessions.py`'s
+# `SessionManager.discard` already applies for Hack Mode — so there is no
+# suspension point left inside `finally` for a cancellation to land on and
+# abandon cleanup partway through, regardless of what the task was doing
+# when it got cancelled.
 
 
 def test_session_is_removed_after_an_abrupt_disconnect_mid_compile(

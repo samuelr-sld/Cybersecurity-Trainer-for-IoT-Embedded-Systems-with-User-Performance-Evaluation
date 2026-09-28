@@ -20,6 +20,13 @@ Backspace, Ctrl+C, and the cursor, and sends one completed command line per
 `input` frame. This endpoint does not echo keystrokes, does not maintain a
 line buffer, and must not grow one.
 
+The one deliberate exception is while a pager is active (see "GENERIC OUTPUT
+PAGER" below): there the frontend forwards one raw keystroke per `input`
+frame instead of a buffered line, because a pager must react to Space/q the
+instant they're pressed, not after Enter. Even then this endpoint does not
+maintain a line buffer of its own — a keystroke is classified and consumed
+immediately by `_advance_pager`/`_exit_pager`, never accumulated.
+
 Phase 2B behaviour: accept the connection, create an isolated session,
 announce the session id, route each completed `input` line through the
 command router and render the structured result back as `output`/`action`
@@ -100,6 +107,47 @@ this endpoint gained one call and one argument and nothing else:
    unregistered board, a panel without courseware, a broken package, or a
    package naming an unimplemented scenario id all yield the long-standing
    default scenario. The reason goes to the log, never to the student.
+
+GENERIC OUTPUT PAGER (protocol v6, `app/pager.py`). A command whose
+`CommandResult.pageable` is set (today, only `strings` — see
+`app/commands/handlers/strings.py`) has its `lines` paged when they don't
+fit the student's terminal in one screen, instead of dumping the whole
+result in a single `output` frame. Three things about this are load-bearing:
+
+1. IT IS A TRANSPORT CONCERN, NOT A COMMAND-ROUTER ONE. Whether paging
+   happens at all depends on the session's terminal height, which only this
+   module and `app/sessions.py` know about — `CommandRouter.dispatch` still
+   returns every line of a command's real output, unpaginated, exactly as
+   before (`tests/test_strings_min_length.py` calls it directly and asserts
+   that). `_render`, below, is the one place that decides whether a pageable
+   result needs more than one page and, if so, builds the first page and
+   parks a `Pager` on `session.pager` instead of sending the rest.
+
+2. AN ACTIVE PAGER OWNS THE SESSION'S NEXT `input` FRAMES. While
+   `session.pager` is set, `_handle_message` routes every `InputMessage` to
+   `_advance_pager`/`_exit_pager` instead of `default_router.dispatch` — a
+   keystroke typed to page through `strings` output can never be mistaken
+   for a command line, and the command router never sees one. This is why
+   paging cannot weaken the "not a shell" boundary: nothing new reaches
+   `default_router`, and the pager itself runs no command and touches no
+   scenario.
+
+3. THE PAGE SIZE TRACKS THE REAL TERMINAL. `session.rows` already came from
+   the existing `resize` message (see `HackSession.resize`) — no new client
+   message was needed for terminal geometry. A `resize` that arrives while a
+   pager is active updates that pager's height too, so a page taken after a
+   resize reflects the new size; a page already sent is not reflowed.
+
+4. STARTING A PAGER IS ANNOUNCED BEFORE ITS FIRST PAGE. `_render` sends the
+   `pager_start` action *before* the `output` frame carrying the first page,
+   not after — see that function's docstring for why the order matters to
+   the frontend's own (unsent) shell prompt. `_advance_pager`/`_exit_pager`
+   keep the opposite order (output, then `pager_end`) on purpose: by the
+   time either of those runs, the frontend has already decided not to prompt
+   after that output (`session.pager` was still set when it arrived), so
+   `pager_end` alone is what tells it to prompt again — sending `pager_end`
+   first would make both that action *and* the output's own "not paging
+   anymore" check fire the prompt, drawing it twice.
 """
 
 from __future__ import annotations
@@ -107,14 +155,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from fastapi import APIRouter, WebSocket
 from fastapi.websockets import WebSocketDisconnect
 from pydantic import ValidationError
 
 from app import config
-from app.commands import CommandContext, CommandResult, default_router
+from app.commands import CommandContext, CommandResult, TerminalAction, default_router
 from app.events import to_iso
 from app.hardware import (
     SerialEventKind,
@@ -137,6 +185,7 @@ from app.models.messages import (
     StateMessage,
 )
 from app.hack_live_mqtt import configure_live_mqtt
+from app.pager import PAGER_PROMPT, Pager, PagerAction
 from app.participants import resolve_participant
 from app.scenario_selection import select_session_scenario
 from app.sessions import HackSession, session_manager
@@ -195,7 +244,14 @@ def _parse(raw: str) -> ClientMessage:
         raise ValueError("message does not match the protocol schema") from exc
 
 
-def _render(result: CommandResult, scenario: "Scenario") -> list[ServerMessage]:
+def _join_lines(lines: "Sequence[str]") -> str:
+    """Join terminal lines the one way this module ever writes them."""
+    return "".join(line + LINE_ENDING for line in lines)
+
+
+def _render(
+    result: CommandResult, scenario: "Scenario", session: HackSession
+) -> list[ServerMessage]:
     """Turn a CommandResult into the frames that express it.
 
     This is the only place that knows both the command vocabulary and the
@@ -216,14 +272,46 @@ def _render(result: CommandResult, scenario: "Scenario") -> list[ServerMessage]:
     (see app/scenarios/environmental.py), so an empty `events` tuple means
     the snapshot the client already has is still current and resending it
     would be pure noise.
+
+    PAGING. `result.pageable` results are only actually paged when they
+    don't fit the session's current terminal in one page — see the module
+    docstring's "GENERIC OUTPUT PAGER" section. When they don't, this
+    function sends a `pager_start` action *before* the first page's `output`
+    frame — the one exception to "actions before output" being about
+    `result.actions` specifically — and parks a fresh `Pager` on
+    `session.pager` (the one side effect this function has beyond building
+    frames) so the next `input` frame reaches it instead of the command
+    router. A pageable result that already fits one page takes the plain
+    branch below and produces a frame byte-for-byte identical to what a
+    non-pageable result would.
+
+    That action-before-output order is load-bearing, not cosmetic: the
+    terminal's own shell prompt (drawn by the frontend, never sent over the
+    wire — see src/screens/HackMode.jsx) is shown after any `output` frame
+    unless a pager is active. Frames from one WebSocket message are handled
+    one at a time, in order, so sending `pager_start` first is what lets the
+    frontend learn "a pager just started" *before* it decides whether that
+    first page's `output` frame should be followed by a prompt — no client
+    timing guess needed. Sending it after, as this used to, left a window
+    where the frontend couldn't yet tell the two cases apart.
     """
     frames: list[ServerMessage] = [
         ActionMessage(action=action.value) for action in result.actions
     ]
     if result.lines:
-        frames.append(
-            OutputMessage(data="".join(line + LINE_ENDING for line in result.lines))
-        )
+        if result.pageable:
+            pager = Pager(lines=result.lines, terminal_rows=session.rows)
+            first_page = pager.next_page()
+            if pager.has_more:
+                session.pager = pager
+                frames.append(ActionMessage(action=TerminalAction.PAGER_START.value))
+                frames.append(OutputMessage(data=_join_lines(first_page) + PAGER_PROMPT))
+            else:
+                # Fits one page: identical to the non-pageable branch below —
+                # `first_page` is every line, taken in one slice.
+                frames.append(OutputMessage(data=_join_lines(first_page)))
+        else:
+            frames.append(OutputMessage(data=_join_lines(result.lines)))
     # PHASE 2B: built from `result.records` — the rows the recorder just
     # wrote — rather than from the raw `result.events`. Same events in the
     # same order, but each now carries the server timestamp and sequence
@@ -342,11 +430,63 @@ async def _pump_serial(channel: _Channel, session: HackSession) -> None:
                 return
 
 
+async def _advance_pager(channel: _Channel, session: HackSession) -> None:
+    """Handle an Enter/Space keystroke that reached an active pager.
+
+    Sends the next page. A leading `LINE_ENDING` moves the cursor off the
+    previous prompt line (which was deliberately sent with no trailing
+    newline of its own — see `_render`), so page transitions read as the
+    terminal scrolling forward rather than text piling up mid-line. When
+    that page is the last one, the pager is cleared here (before the frame
+    is even sent) and a `pager_end` action follows, which is what lets a
+    student who has just paged to the end land straight back in normal
+    command-entry mode with no extra keystroke.
+    """
+    pager = session.pager
+    assert pager is not None
+    page = pager.next_page()
+    if pager.has_more:
+        await channel.send(
+            OutputMessage(data=LINE_ENDING + _join_lines(page) + PAGER_PROMPT)
+        )
+        return
+    session.pager = None
+    await channel.send(OutputMessage(data=LINE_ENDING + _join_lines(page)))
+    await channel.send(ActionMessage(action=TerminalAction.PAGER_END.value))
+
+
+async def _exit_pager(channel: _Channel, session: HackSession) -> None:
+    """Handle a q/Ctrl+C keystroke that ended an active pager early.
+
+    No further page text is sent — real `less`/`more` print nothing extra on
+    quit either. Only a line ending, to move the cursor off the prompt
+    line, and the `pager_end` action that restores normal input handling.
+    """
+    session.pager = None
+    await channel.send(OutputMessage(data=LINE_ENDING))
+    await channel.send(ActionMessage(action=TerminalAction.PAGER_END.value))
+
+
 async def _handle_message(
     channel: _Channel, session: HackSession, message: ClientMessage
 ) -> None:
     """Dispatch one validated client message."""
     if isinstance(message, InputMessage):
+        if session.pager is not None:
+            # A pager is holding this session's terminal input hostage (see
+            # the module docstring's "GENERIC OUTPUT PAGER" section): this
+            # frame is one raw keystroke the frontend forwarded instead of a
+            # buffered command line, and it must never reach
+            # `default_router.dispatch` — that is the whole point of routing
+            # it here first. An unrecognised keystroke (PagerAction.IGNORE)
+            # produces no frame at all: the pager keeps waiting.
+            pager_action = PagerAction.from_input(message.data)
+            if pager_action is PagerAction.ADVANCE:
+                await _advance_pager(channel, session)
+            elif pager_action is PagerAction.EXIT:
+                await _exit_pager(channel, session)
+            return
+
         # One completed command line. The router resolves it against a closed
         # command table and returns a structured result; it never touches
         # this socket, and nothing in it is executed.
@@ -356,7 +496,7 @@ async def _handle_message(
         # drop the student's session.
         context = CommandContext(session=session)
         result = await default_router.dispatch(message.data, context)
-        for frame in _render(result, context.scenario):
+        for frame in _render(result, context.scenario, session):
             await channel.send(frame)
         return
 
@@ -364,6 +504,9 @@ async def _handle_message(
         # Bounds already enforced by the model; record and acknowledge.
         # No PTY exists yet, so there is nothing further to resize.
         session.resize(message.cols, message.rows)
+        if session.pager is not None:
+            # Only future pages are affected — see `Pager.resize`.
+            session.pager.resize(message.rows)
         await channel.send(
             OutputMessage(
                 data=f"[backend] resize accepted ({message.cols}x{message.rows})\r\n"

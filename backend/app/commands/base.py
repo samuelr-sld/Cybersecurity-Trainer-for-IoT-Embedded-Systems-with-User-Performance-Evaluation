@@ -40,9 +40,17 @@ class TerminalAction(str, Enum):
     So the backend says *what* it wants; the front end decides *how*. The
     transport carries this as its own frame type (see `ActionMessage` in
     app/models/messages.py) — the value strings must stay in step.
+
+    `PAGER_START`/`PAGER_END` are the pager's own pair: they tell the
+    terminal to switch its input handling into (and back out of) pager mode
+    — see `app/pager.py` and the pager section of `app/websocket.py`. Like
+    `CLEAR`, they carry no content of their own; the page text and prompt
+    still arrive as ordinary `output` frames.
     """
 
     CLEAR = "clear"
+    PAGER_START = "pager_start"
+    PAGER_END = "pager_end"
 
 
 class CommandCategory(str, Enum):
@@ -107,6 +115,17 @@ class CommandResult:
     `HackEventRecorder.record_command`, which is how "were this recognized
     command's required fields correct" reaches the durable log the metric
     layer reads, alongside `exit_code` and `handled`.
+
+    `pageable` is a handler's opt-in to `app/pager.py`'s generic output
+    pager: it means "these lines are long-form command output, safe to split
+    across pages if they don't fit the student's terminal" — never "page
+    this unconditionally". `app/websocket.py` is the only reader: it pages
+    when `pageable` is true and `lines` exceeds one page for the session's
+    current terminal height, and sends everything in a single `output` frame
+    exactly as before otherwise (so a pageable result that happens to fit one
+    page is byte-for-byte the same frame a non-pageable one would produce).
+    Defaults to False, so every existing handler's behaviour is unchanged
+    without touching it; only `app/commands/handlers/strings.py` sets it.
     """
 
     lines: tuple[str, ...] = ()
@@ -115,6 +134,7 @@ class CommandResult:
     events: tuple["ScenarioEvent", ...] = ()
     records: tuple["HackEventRecord", ...] = ()
     fields_correct: bool | None = None
+    pageable: bool = False
 
     @classmethod
     def text(cls, *lines: str, exit_code: int = 0) -> CommandResult:

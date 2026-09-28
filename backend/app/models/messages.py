@@ -14,6 +14,7 @@ Server -> client
     {"type": "session",  "session_id": "..."}
     {"type": "output",   "data": "..."}
     {"type": "action",   "action": "clear"}
+    {"type": "action",   "action": "pager_start" | "pager_end"}
     {"type": "error",    "message": "..."}
     {"type": "event",    "event": "...", "data": {}}
     {"type": "state",    "data": {}}
@@ -60,7 +61,16 @@ from app import config
 #   than smuggled in, because a version-4 client necessarily shows a
 #   *client-generated* time for each event, and the two are not the same
 #   claim. No frame was removed and no field changed meaning.
-PROTOCOL_VERSION = 5
+# 6 (generic output pager): `action` gains two new values, `pager_start` and
+#   `pager_end` (see `app/pager.py` and the pager section of
+#   `app/websocket.py`). A version-5 client's `action` handler only knows
+#   `clear` and would silently ignore either value, which is exactly the
+#   failure this project bumps for rather than smuggles past (see version 5,
+#   above): it would keep sending buffered, locally-echoed command lines
+#   while a pager is waiting for a single raw keystroke, and a long `strings`
+#   dump would still arrive as one unpaged block. No frame or field was
+#   removed and no existing value changed meaning.
+PROTOCOL_VERSION = 6
 
 
 class _Frame(BaseModel):
@@ -158,17 +168,24 @@ class OutputMessage(_Frame):
 class ActionMessage(_Frame):
     """An instruction to the terminal itself, rather than text to display.
 
-    `clear` is the current member: the backend says the screen should be
+    `clear` is the original member: the backend says the screen should be
     reset and the front end decides how, which keeps terminal-control
     knowledge in the terminal (see `TerminalAction` in app/commands/base.py —
     the value strings must stay in step with this Literal).
 
-    Emitted only in response to a command that asks for it. Phase 2D is what
-    makes the React terminal act on it; no client consumes it yet.
+    `pager_start`/`pager_end` (protocol v6) are the generic output pager's
+    pair (see `app/pager.py`): they tell the terminal to switch its `input`
+    handling into, and back out of, raw single-keystroke pager mode. Like
+    `clear`, they carry no content — the page text and the `-- More --`
+    prompt still arrive as ordinary `output` frames, exactly as any other
+    terminal text does.
+
+    Emitted only in response to a command (or, for the pager pair, a
+    keystroke) that asks for it.
     """
 
     type: Literal["action"] = "action"
-    action: Literal["clear"]
+    action: Literal["clear", "pager_start", "pager_end"]
 
 
 class ErrorMessage(_Frame):

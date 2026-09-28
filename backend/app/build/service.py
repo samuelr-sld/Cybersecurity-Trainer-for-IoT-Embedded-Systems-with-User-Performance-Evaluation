@@ -200,6 +200,30 @@ def discard_artifact(session: "BuildSession") -> None:
     shutil.rmtree(artifact.root, ignore_errors=True)
 
 
+def end_session_sync(session: "BuildSession") -> BuildEvent:
+    """Synchronous core of `BuildService.end_session`.
+
+    Split out so `app/build_websocket.py`'s teardown can call it directly
+    instead of through `await end_session(...)`. That teardown's `finally`
+    can run with this task already mid-cancellation, where — per
+    `app/sessions.py::SessionManager.discard`'s reasoning for the identical
+    Hack Mode constraint — no `await` is safe to rely on staying suspension-
+    free forever, even one with nothing to suspend on today. Every call this
+    makes (`discard_artifact`, `BuildEventRecorder.finish`, a dict append) is
+    already plain synchronous code, so exposing it without the `async def`
+    wrapper changes nothing about what runs, only removes the `await`.
+    """
+    discard_artifact(session)
+    session.recorder.finish()
+    event = BuildEvent.create(
+        BuildEventType.BUILD_SESSION_ENDED,
+        "build session ended",
+        session_id=session.session_id,
+    )
+    session.events.append(event)
+    return event
+
+
 def _mirror_device_state(session: "BuildSession", state: DeviceState) -> None:
     """Copy the shared device state onto the session's hardware fields.
 
@@ -1026,16 +1050,13 @@ class BuildService:
         session object is about to be dropped from the registry, and its
         temp directory would otherwise outlive everything that knows the
         path to it.
+
+        `async def` is kept here for direct callers (tests, any other future
+        caller that wants to `await` it like the rest of this service) — the
+        WebSocket teardown itself calls `end_session_sync` below instead, not
+        this method.
         """
-        discard_artifact(session)
-        session.recorder.finish()
-        event = BuildEvent.create(
-            BuildEventType.BUILD_SESSION_ENDED,
-            "build session ended",
-            session_id=session.session_id,
-        )
-        session.events.append(event)
-        return BuildActionResult.ok(event)
+        return BuildActionResult.ok(end_session_sync(session))
 
 
 #: Service used by the Build Mode WebSocket endpoint.

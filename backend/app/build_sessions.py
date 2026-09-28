@@ -369,6 +369,18 @@ class BuildSessionManager:
         async with self._lock:
             return self._sessions.pop(session_id, None)
 
+    def discard(self, session_id: str) -> BuildSession | None:
+        """Unregister without awaiting. The WebSocket teardown path.
+
+        Mirrors `app/sessions.py::SessionManager.discard` for the identical
+        constraint: that `finally` block can run on a task the server has
+        already cancelled, where an `await` — including acquiring `_lock` —
+        is not safe to depend on completing. Dropping the lock is safe here
+        rather than merely expedient: a dict `pop` contains no await point,
+        so under asyncio it cannot interleave with `create`/`get`/`remove`.
+        """
+        return self._sessions.pop(session_id, None)
+
     def is_live(self, session_id: str) -> bool:
         """Whether this process is serving the session now (Evaluation read)."""
         return session_id in self._sessions

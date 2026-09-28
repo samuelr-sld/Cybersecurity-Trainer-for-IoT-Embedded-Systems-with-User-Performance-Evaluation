@@ -1368,12 +1368,15 @@ button.section-header.active {
   margin-left: 6px;
 }
 
-/* Build Mode — Flash Terminal (lower part of the code editor area). Real
-   Arduino CLI/esptool upload output only, never simulated — see
-   `flashTerminalText` in BuildMode.jsx. Compact and bounded on purpose: the
-   code editor above it must stay the dominant workspace, and Flash output
-   must never grow the page. Replaces the old unbounded `.flash-result`
-   block that used to sit inline in the console area. */
+/* Build Mode — General Terminal (lower part of the code editor area), one
+   shared block for compile/flash/validation output. Real backend output
+   only, never simulated — see `generalTerminalText`/`compileTerminalText`/
+   `flashTerminalText`/`validationTerminalText` in BuildMode.jsx. The class
+   name predates the merge (it used to back two separate Flash/Validation
+   Terminal blocks) and is kept as-is since it's still exactly the right
+   compact, bounded, single-terminal shape. Compact on purpose: the code
+   editor above it must stay the dominant workspace, and terminal output
+   must never grow the page. */
 .flash-terminal {
   display: flex;
   flex-direction: column;
@@ -1427,9 +1430,9 @@ button.section-header.active {
 /* Build Mode — small bottom-right Compile notification (see CLAUDE.md).
    Fixed/floating so it never takes editor workspace or blocks the page;
    deliberately small and unanimated, matching this app's flat, bordered
-   aesthetic elsewhere. Replaces the old large inline compile terminal —
-   the full compiler stdout/stderr this used to show inline still lives in
-   `state.compile_output`, just isn't rendered here any more. */
+   aesthetic elsewhere. The full compiler stdout/stderr (`state.compile_output`)
+   is not rendered here — it appears in the General Terminal (`.flash-terminal`
+   below) while a compile is running or was the last operation. */
 .compile-toast {
   position: fixed;
   right: 20px;

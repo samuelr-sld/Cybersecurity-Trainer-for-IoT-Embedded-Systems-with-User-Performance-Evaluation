@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from app import config
 from app.events import HackEventRecorder
 from app.hardware import FirmwareArtifact, SerialTransport
+from app.pager import Pager
 from app.scenarios import Scenario, create_default_scenario
 
 
@@ -90,6 +91,16 @@ class HackSession:
     #: simulation (see `app/scenarios/base.py`), and real hardware bytes are
     #: exactly the kind of fact it must never hold or reason about.
     firmware_artifact: FirmwareArtifact | None = None
+    #: The output pager currently holding this session's terminal input
+    #: hostage, or None the rest of the time (which is most of the time: a
+    #: pager exists only between a pageable command that needed more than
+    #: one page and the page/exit keystroke that finishes it). While this is
+    #: set, `app/websocket.py` routes every `input` frame to the pager
+    #: instead of `default_router.dispatch` — see the pager section of that
+    #: module. Per-session for the same reason `scenario` and `serial` are:
+    #: one student paging `strings` output must be invisible to another's
+    #: session entirely.
+    pager: Pager | None = None
 
     def __post_init__(self) -> None:
         self.recorder = HackEventRecorder(
