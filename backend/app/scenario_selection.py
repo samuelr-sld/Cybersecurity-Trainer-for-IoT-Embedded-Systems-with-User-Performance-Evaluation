@@ -63,12 +63,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from app.panels.service import (
     PanelResources,
     PanelResourceService,
     PanelResourceStatus,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - type-only
+    from app.panels.models import PanelPackage
 from app.scenarios import (
     DEFAULT_SCENARIO_ID,
     Scenario,
@@ -120,6 +124,13 @@ class ScenarioSelection:
     #: The identified panel, when there was one. Diagnostics only — nothing
     #: downstream branches on it, and it never reaches `HackSession`.
     panel_id: str | None = None
+    #: The loaded package this selection came from, when it was a panel's.
+    #: Carried purely as DATA (`resolve()` already had it in hand) so a
+    #: separate composition step — `app/hack_live_mqtt.py` — can read the
+    #: package's declared broker/topics/lab-identity without re-resolving the
+    #: panel. None for a DEFAULT selection. This adds no behaviour here:
+    #: selection stays a lookup, and this module still connects to nothing.
+    package: "PanelPackage | None" = None
     #: Why the selection is not a panel package's, when there is something to
     #: say. Empty for a clean PANEL_PACKAGE selection.
     detail: str = ""
@@ -217,6 +228,7 @@ class SessionScenarioSelector:
             scenario_id=package.scenario_id,
             panel_status=resources.status,
             panel_id=panel_id,
+            package=package,
         )
 
     def _fallback(

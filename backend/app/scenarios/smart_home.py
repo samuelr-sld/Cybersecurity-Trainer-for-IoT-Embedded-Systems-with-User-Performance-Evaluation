@@ -20,30 +20,43 @@ forge a control command the device obeys. The lesson is precise:
     discovery of an AUTHENTICATED MQTT service
         does not establish AUTHORIZATION to issue its commands.
 
-WHY THIS IS ALL SIMULATED. There is no real ESP32, serial port, `esptool`,
-network scan, MQTT client, or broker anywhere in this module. Every method
-computes a deterministic result from `SmartHomeState` in memory — a student's
-command must never become a real operating-system, network, or hardware
-action, and the determinism is what makes the whole scenario testable without
-hardware. This class fits the *existing* `Scenario` interface unchanged: the
-generic Hack Engine (command registry, parser, router, session, events)
-dispatches the same six operations to it that it dispatches to every
-scenario, and knows nothing about motors, START/STOP, or Panel 1.
+SIMULATION IS THE DEFAULT; A REAL BROKER IS AN OPTIONAL INJECTION. Constructed
+with no argument (as the scenario registry does, and as every test does), this
+class is a pure in-memory simulation: no real ESP32, serial port, `esptool`,
+network scan, MQTT client, or broker is touched, every method computes a
+deterministic result from `SmartHomeState`, and the whole scenario is testable
+without hardware. That path is unchanged.
 
-PHYSICAL EXECUTION IS A LATER PHASE. "Motor running" here is a logical state
-transition and a line of terminal text. Nothing in this module opens a serial
-port, flashes firmware, invokes arduino-cli, or connects to a broker — the
-Raspberry-Pi/Mosquitto/ESP32 integration and the real relay actuation belong
-to a later phase, behind this same interface.
+When a `LiveMqttLink` is injected (`use_live_mqtt`, wired at connect by
+`app/hack_live_mqtt.py` only when Panel 1 is attached and the lab credentials
+are provisioned), `publish` and `observe` instead act over a REAL authenticated
+connection to the training broker, and physical impact is decided by the
+device's OWN state publication — never by the fact that a publish succeeded.
+The firmware-analysis (`extract_firmware`/`analyze_firmware`) and `scan` steps
+remain simulated in both modes: they teach offline reverse-engineering and
+recon, not live actuation.
+
+Either way this class fits the *existing* `Scenario` interface unchanged: the
+generic Hack Engine (command registry, parser, router, session, events)
+dispatches the same six operations to it that it dispatches to every scenario,
+and knows nothing about motors, START/STOP, Panel 1, or MQTT.
+
+THE VULNERABILITY IS NEVER "FIXED" BY THE LIVE PATH. The real attack connects
+as an authenticated-but-unauthorized lab client and publishes a bare
+START/STOP; a vulnerable device obeys it, and that is the whole demonstration.
+The broker stays authenticated; what is absent is per-command authorization.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.scenarios.base import Scenario, ScenarioOutcome
 from app.scenarios.events import ScenarioEvent, ScenarioEventType
 from app.scenarios.smart_home_state import SmartHomeState
+
+if TYPE_CHECKING:  # pragma: no cover - type-only; no runtime MQTT dependency
+    from app.scenarios.smart_home_live import LiveMqttLink
 
 # Length cap on any student-supplied value echoed back into output. The
 # command parser already strips control characters, so echoing cannot inject
@@ -56,6 +69,12 @@ _MAX_ECHO = 64
 _START = "START"
 _STOP = "STOP"
 _VALID_COMMANDS = frozenset({_START, _STOP})
+
+# The state the device's own state topic reports once a command has actuated.
+# Used only on the live path, to know which state publication CONFIRMS that a
+# forged command physically took effect. START/STOP is the scenario's own
+# vocabulary; RUNNING/STOPPED is the device's — this is the one place they meet.
+_STATE_FOR_COMMAND = {_START: "RUNNING", _STOP: "STOPPED"}
 
 
 def _short(value: str) -> str:
@@ -79,9 +98,25 @@ class SmartHomeMQTTScenario(Scenario):
 
     scenario_id = "smart-home-mqtt-control"
 
-    def __init__(self) -> None:
+    def __init__(self, live: "LiveMqttLink | None" = None) -> None:
         self._state = SmartHomeState()
         self._events: list[ScenarioEvent] = []
+        #: When set, `publish`/`observe` act over a real broker instead of the
+        #: in-memory simulation. None is the default and the only thing the
+        #: scenario registry ever constructs, so every existing caller and
+        #: test stays a pure simulation. Injected post-construction via
+        #: `use_live_mqtt`, because the registry builds scenarios with no args.
+        self._live: "LiveMqttLink | None" = live
+
+    def use_live_mqtt(self, link: "LiveMqttLink") -> None:
+        """Go live against a real broker (see `LiveMqttCapable`).
+
+        Called once, at connect, by `app/hack_live_mqtt.py` when the attached
+        panel is Panel 1 and the lab credentials are provisioned. Idempotent
+        in effect: the last link injected wins, and passing nothing keeps the
+        simulation.
+        """
+        self._live = link
 
     # -- interface: introspection -----------------------------------------
 
@@ -357,6 +392,20 @@ class SmartHomeMQTTScenario(Scenario):
     def observe(
         self, host: str | None, port: int | None, topic: str | None
     ) -> ScenarioOutcome:
+        """Subscribe to a broker topic — simulated, or over the real broker.
+
+        Argument validation and target-fact checking are identical in both
+        modes; only what happens once the arguments are known differs. With no
+        live link this is the long-standing in-memory simulation; with one it
+        subscribes to the real broker and shows what actually arrives.
+        """
+        if self._live is not None:
+            return self._observe_live(host, port, topic)
+        return self._observe_simulated(host, port, topic)
+
+    def _observe_simulated(
+        self, host: str | None, port: int | None, topic: str | None
+    ) -> ScenarioOutcome:
         bucket: list[ScenarioEvent] = []
         target = self._state.target
 
@@ -427,6 +476,25 @@ class SmartHomeMQTTScenario(Scenario):
     # -- interface: stages 5-6, spoofing and physical impact ---------------
 
     def publish(
+        self,
+        host: str | None,
+        port: int | None,
+        topic: str | None,
+        message: str | None,
+    ) -> ScenarioOutcome:
+        """The forged-command attack — simulated, or over the real broker.
+
+        With no live link this computes the outcome from in-memory state
+        (unchanged). With one, it publishes the student's payload to the real
+        broker as an authenticated-but-unauthorized lab client and confirms
+        physical impact from the device's own state topic — claiming success
+        only when that evidence arrives.
+        """
+        if self._live is not None:
+            return self._publish_live(host, port, topic, message)
+        return self._publish_simulated(host, port, topic, message)
+
+    def _publish_simulated(
         self,
         host: str | None,
         port: int | None,
@@ -541,6 +609,235 @@ class SmartHomeMQTTScenario(Scenario):
             events=tuple(bucket),
             fields_correct=True,
         )
+
+    # -- live path: real broker + real device evidence ---------------------
+
+    def _observe_live(
+        self, host: str | None, port: int | None, topic: str | None
+    ) -> ScenarioOutcome:
+        """Subscribe to the REAL broker and report what actually arrives.
+
+        The connection is bounded and self-closing (see `LiveMqttLink`). No
+        traffic within the window is reported honestly as "nothing observed",
+        never as invented messages, and `mqtt_observed` is emitted only when
+        real control traffic was actually seen on the command topic.
+        """
+        assert self._live is not None
+        bucket: list[ScenarioEvent] = []
+        target = self._state.target
+
+        if host is None:
+            return ScenarioOutcome.usage(
+                "mosquitto_sub: a broker host is required.",
+                "Usage: mosquitto_sub -h <host> [-p <port>] -t <topic>",
+            )
+        if topic is None:
+            return ScenarioOutcome.usage(
+                "mosquitto_sub: a topic is required (-t <topic>)."
+            )
+        if not self._reaches_broker(host, port):
+            shown_port = port if port is not None else target.broker_port
+            return ScenarioOutcome.failed(
+                f"[mqtt] target {_short(host)}:{shown_port} does not match the "
+                f"discovered broker; aim at {target.broker_host}:{target.broker_port}.",
+                fields_correct=False,
+            )
+
+        outcome = self._live.observe(topic)
+        lines = [f"[mqtt] connecting to {target.broker_host}:{target.broker_port}..."]
+        if not outcome.connected:
+            lines.append(f"[mqtt] connection failed: {outcome.error}")
+            return ScenarioOutcome.failed(*lines, fields_correct=True)
+
+        lines.append("[mqtt] authenticated")
+        lines.append(f"[mqtt] subscribed to {_short(topic)}")
+        for message in outcome.messages:
+            lines.append(f"{message.topic} {message.payload}")
+
+        # The state topic carries retained status, not the control protocol —
+        # a valid subscription, but not "observing control traffic".
+        if topic == target.state_topic:
+            lines.append(
+                "(retained device state; no control traffic here)"
+                if outcome.messages
+                else "[mqtt] the device published no state within the window."
+            )
+            return ScenarioOutcome.ok(*lines, fields_correct=False)
+
+        if topic != target.command_topic:
+            if not outcome.messages:
+                lines.append("[mqtt] no messages received on this topic within the window.")
+                return ScenarioOutcome.failed(*lines, fields_correct=False)
+            return ScenarioOutcome.ok(*lines, fields_correct=False)
+
+        # The command topic. Only REAL observed traffic counts as observed.
+        if not outcome.messages:
+            lines.append(
+                "[mqtt] no control traffic observed within the window "
+                "(trigger a command, or wait for the device to publish)."
+            )
+            return ScenarioOutcome.ok(*lines, fields_correct=True)
+
+        first_time = not self._state.discovery.mqtt_observed
+        self._state.discovery.mqtt_observed = True
+        if first_time:
+            self._emit(
+                bucket,
+                ScenarioEventType.MQTT_OBSERVED,
+                "legitimate MQTT control traffic observed",
+                command_topic=target.command_topic,
+            )
+        self._recompute_completion(bucket)
+        return ScenarioOutcome.ok(*lines, events=tuple(bucket), fields_correct=True)
+
+    def _publish_live(
+        self,
+        host: str | None,
+        port: int | None,
+        topic: str | None,
+        message: str | None,
+    ) -> ScenarioOutcome:
+        """Forge a command over the REAL broker; confirm impact from evidence.
+
+        Publishes the student's payload as the injected authenticated lab
+        client, then reads the device's own state topic. `spoof_succeeded` /
+        `target_impacted` are emitted ONLY when the device reports the state a
+        real actuation would produce — a broker-accepted publish alone never
+        claims physical impact.
+        """
+        assert self._live is not None
+        bucket: list[ScenarioEvent] = []
+        target = self._state.target
+        attack = self._state.attack
+
+        if host is None:
+            return ScenarioOutcome.usage(
+                "mosquitto_pub: a broker host is required.",
+                "Usage: mosquitto_pub -h <host> [-p <port>] -t <topic> -m <payload>",
+            )
+        if topic is None:
+            return ScenarioOutcome.usage(
+                "mosquitto_pub: a topic is required (-t <topic>)."
+            )
+        if message is None:
+            return ScenarioOutcome.usage(
+                "mosquitto_pub: a message payload is required (-m <payload>)."
+            )
+
+        # Any publish carrying a payload is a forged-command attempt.
+        if not attack.spoof_attempted:
+            attack.spoof_attempted = True
+            self._emit(
+                bucket,
+                ScenarioEventType.SPOOF_ATTEMPTED,
+                "student attempted to publish a forged control command",
+            )
+
+        # The student must aim at the discovered broker. The link only ever
+        # connects to that one broker; refusing a mismatch keeps the
+        # target-fact lesson honest and never has the backend reach out to a
+        # host the student merely typed.
+        if not self._reaches_broker(host, port):
+            shown_port = port if port is not None else target.broker_port
+            return ScenarioOutcome.failed(
+                f"[mqtt] target {_short(host)}:{shown_port} does not match the "
+                f"discovered broker; aim at {target.broker_host}:{target.broker_port}.",
+                events=tuple(bucket),
+                fields_correct=False,
+            )
+
+        command = _normalize_command(message)
+        expected_state = _STATE_FOR_COMMAND.get(command) if command else None
+        outcome = self._live.publish_and_confirm(topic, message, expected_state)
+
+        lines = [f"[mqtt] connecting to {target.broker_host}:{target.broker_port}..."]
+        if not outcome.connected:
+            lines.append(f"[mqtt] connection failed: {outcome.error}")
+            # Target was correct; the broker was unreachable — not a wrong field.
+            return ScenarioOutcome.failed(*lines, events=tuple(bucket), fields_correct=True)
+
+        lines.append("[mqtt] authenticated")
+        if not outcome.published:
+            lines.append(f"[mqtt] publish failed: {outcome.error}")
+            return ScenarioOutcome.failed(*lines, events=tuple(bucket), fields_correct=True)
+
+        lines.append(f"[mqtt] published {_short(message)} to {_short(topic)}")
+
+        # Wrong topic: the broker accepted it, but the device is not subscribed.
+        if topic != target.command_topic:
+            self._emit(
+                bucket,
+                ScenarioEventType.SPOOF_REJECTED,
+                "publish sent to a topic the device does not consume",
+                topic=_short(topic),
+            )
+            lines.append(
+                "[mqtt] the controller is not subscribed to this topic; no effect."
+            )
+            return ScenarioOutcome.failed(*lines, events=tuple(bucket), fields_correct=False)
+
+        # Right topic, unrecognised payload: the firmware drops it.
+        if command is None:
+            self._emit(
+                bucket,
+                ScenarioEventType.SPOOF_REJECTED,
+                "payload was not a recognised START/STOP command",
+                payload=_short(message),
+            )
+            lines.append(
+                "[mqtt] the controller accepts only START or STOP; the payload was ignored."
+            )
+            return ScenarioOutcome.failed(*lines, events=tuple(bucket), fields_correct=False)
+
+        # Right topic, valid command. Physical impact requires the device's
+        # OWN state topic to confirm the expected state — a broker-accepted
+        # publish is NOT that fact.
+        observed = outcome.observed_state
+        confirmed = (
+            observed is not None
+            and expected_state is not None
+            and observed.strip().upper() == expected_state.upper()
+        )
+        if not confirmed:
+            lines.append(
+                f"[mqtt] observed device state: {observed}"
+                if observed
+                else "[mqtt] no device state observed within the confirmation window"
+            )
+            lines.append(
+                "[attack] publish accepted by the broker, but the device did not confirm "
+                "the expected state — physical impact NOT confirmed."
+            )
+            return ScenarioOutcome.failed(*lines, events=tuple(bucket), fields_correct=True)
+
+        # Confirmed. State reflects the device's own report, not the command.
+        self._state.motor.running = observed.strip().upper() == "RUNNING"
+        self._state.motor.last_command = command
+        attack.spoof_successful = True
+        attack.spoof_active = True
+        attack.forged_command = command
+        self._emit(
+            bucket,
+            ScenarioEventType.SPOOF_SUCCEEDED,
+            "device accepted the forged command with no authorization check",
+            forged_command=command,
+        )
+        self._emit(
+            bucket,
+            ScenarioEventType.TARGET_IMPACTED,
+            "controller actuated by the forged command",
+            forged_command=command,
+            motor_running=self._state.motor.running,
+        )
+        self._recompute_completion(bucket)
+
+        lines.append(f"[mqtt] observed device state: {observed}")
+        lines.append(f"[attack] physical target impact confirmed: {self._motor_report()}.")
+        lines.append(
+            "[attack] broker authentication did not prevent this: the command carried no "
+            "authorization."
+        )
+        return ScenarioOutcome.ok(*lines, events=tuple(bucket), fields_correct=True)
 
     # -- interface: state serialisation for Phase 2D -----------------------
 

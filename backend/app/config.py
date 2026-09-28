@@ -344,6 +344,51 @@ def lab_secret(name: str) -> str:
     return os.getenv(name, "")
 
 
+# --- Hack Mode live MQTT attack path --------------------------------------
+#
+# When a Panel that declares a machine-checkable authorization criterion is
+# attached and its lab credentials are provisioned, Hack Mode's `mosquitto_pub`
+# and `mosquitto_sub` act over a REAL authenticated connection to the training
+# broker instead of the in-memory simulation. See `app/hack_live_mqtt.py` (the
+# composition seam), `app/mqtt/transport.py` (the generic transport), and
+# `app/scenarios/smart_home_live.py` (the scenario-side link).
+#
+# This is a kill switch, not the enabling condition. Even set to "1", the live
+# path only activates when a criterion IS declared, paho IS installed, and the
+# credentials ARE provisioned; otherwise the session stays a pure simulation —
+# which is exactly the no-hardware development flow. Set to "0" to force
+# simulation everywhere (for instance during a class where the physical
+# actuator must not move).
+HACK_LIVE_MQTT_ENABLED: bool = os.getenv("TRAINER_HACK_LIVE_MQTT", "1") not in {
+    "0",
+    "false",
+    "False",
+    "no",
+}
+
+# Bounded connect timeout for the Hack Mode live MQTT path, in seconds. Kept
+# in step with the Build validator's own connect bound; a broker that has not
+# answered in this long is unreachable, not slow.
+HACK_MQTT_CONNECT_TIMEOUT_SECONDS: float = float(
+    os.getenv("TRAINER_HACK_MQTT_CONNECT_TIMEOUT_SECONDS", "10")
+)
+
+# Bounded window the live path watches the device's state topic for the
+# actuation a forged command would cause, in seconds. Short: a real ESP32
+# republishes its state within a second of acting, so this only needs headroom
+# for network jitter. It bounds how long one `mosquitto_pub` may take.
+HACK_MQTT_OBSERVE_TIMEOUT_SECONDS: float = float(
+    os.getenv("TRAINER_HACK_MQTT_OBSERVE_TIMEOUT_SECONDS", "5")
+)
+
+# Bounded window a live `mosquitto_sub` listens for traffic before returning,
+# in seconds. It caps how long one observation command runs; no live MQTT
+# operation blocks the session indefinitely.
+HACK_MQTT_LISTEN_TIMEOUT_SECONDS: float = float(
+    os.getenv("TRAINER_HACK_MQTT_LISTEN_TIMEOUT_SECONDS", "5")
+)
+
+
 # Bounded upload timeout, in seconds. An ESP32 upload over a 921600-baud
 # USB-UART link commonly takes 15-40s for a sketch this size; this leaves
 # generous headroom for a slower bridge without ever being unbounded. An

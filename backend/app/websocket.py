@@ -136,6 +136,7 @@ from app.models.messages import (
     SessionMessage,
     StateMessage,
 )
+from app.hack_live_mqtt import configure_live_mqtt
 from app.scenario_selection import select_session_scenario
 from app.sessions import HackSession, session_manager
 
@@ -468,6 +469,15 @@ async def hack_websocket(websocket: WebSocket) -> None:
     # resolved, the selection is the long-standing default scenario, and the
     # reason is logged rather than shown to the student.
     selection = select_session_scenario()
+    # If the attached panel declares a machine-checkable authorization
+    # criterion and the lab credentials are provisioned, the session's
+    # `mosquitto_pub`/`mosquitto_sub` act over the REAL training broker instead
+    # of the in-memory simulation. This is still a lookup + in-memory wiring:
+    # it attaches connection settings to the scenario and opens NOTHING here
+    # (the link connects per command, on a worker thread). With no such panel,
+    # no credentials, or the feature disabled, it attaches nothing and the
+    # session stays simulated — the ordinary development flow. It never raises.
+    configure_live_mqtt(selection)
     session = await session_manager.create(scenario=selection.scenario)
     channel = _Channel(websocket)
     # Started here, but it opens nothing: it parks on an empty queue until a
