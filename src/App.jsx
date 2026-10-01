@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import RoleSelect from './screens/RoleSelect'
 import StudentAccess from './screens/StudentAccess'
 import ProfessorAccess from './screens/ProfessorAccess'
@@ -7,7 +7,14 @@ import HackMode from './screens/HackMode'
 import BuildMode from './screens/BuildMode'
 import ModePreparation from './screens/ModePreparation'
 import Dashboard from './screens/Dashboard'
-import { registerParticipant, signInParticipant } from './api/trainerApi'
+import { endSession, fetchSessionLive, registerParticipant, signInParticipant } from './api/trainerApi'
+import {
+  forgetActiveMode,
+  forgetSession,
+  recallActiveMode,
+  recallSession,
+  rememberActiveMode,
+} from './session/activeSession'
 import './App.css'
 
 // Students are registered participants held by the backend
@@ -18,10 +25,27 @@ function toStudent(participant) {
   return { id: participant.participant_id, name: participant.full_name }
 }
 
+// A reload destroys every component but not the backend's Hack/Build session.
+// If this tab was inside a mode, it comes back through the 'resuming' screen,
+// which asks the backend whether that session is still running before opening
+// the mode again (see the effects in App below).
+function restoredMode() {
+  return recallActiveMode()
+}
+
+// Leaving a mode on purpose ends its backend session. Closing the socket never
+// does (a reload must be able to come back), so this is the explicit request.
+function endRememberedSession(mode) {
+  const sessionId = recallSession(mode)
+  forgetSession(mode)
+  if (sessionId) endSession(mode, sessionId)
+}
+
 export default function App() {
-  const [screen, setScreen] = useState('role')
-  const [role, setRole] = useState(null)
-  const [student, setStudent] = useState(null)
+  const [restored] = useState(restoredMode)
+  const [screen, setScreen] = useState(restored ? 'resuming' : 'role')
+  const [role, setRole] = useState(restored ? 'student' : null)
+  const [student, setStudent] = useState(restored ? restored.student : null)
   const [evalStudent, setEvalStudent] = useState(null)
   // The professor's list the current evaluation was opened from, for NEXT.
   const [evalList, setEvalList] = useState([])
@@ -33,6 +57,50 @@ export default function App() {
   // the preparation screen's `key`: RETRY remounts it, so every attempt gets
   // a fresh `/ws/prepare` connection and a fresh checklist.
   const [preparation, setPreparation] = useState(null)
+
+  // Resume after a reload: only if the backend still has the session. Anything
+  // else (no remembered id, session expired or ended, backend unreachable)
+  // lands on the student's menu, never on a mode that would silently start a
+  // new session without its baseline preparation.
+  useEffect(() => {
+    if (!restored) return undefined
+    let cancelled = false
+    const sessionId = recallSession(restored.mode)
+    const live = sessionId
+      ? fetchSessionLive(restored.mode, sessionId).catch(() => false)
+      : Promise.resolve(false)
+    live.then((isLive) => {
+      if (cancelled) return
+      if (isLive) {
+        setScreen(restored.mode)
+      } else {
+        forgetSession(restored.mode)
+        setScreen('menu')
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [restored])
+
+  // Keep the reload pointer in step with the screen, and end the backend
+  // session when the student leaves a mode on purpose (any screen change away
+  // from hack/build: BACK, the menu overlay, the Hack -> Build link, sign-out).
+  // A reload runs none of this — the page is simply gone — which is exactly
+  // why it does not end the session.
+  const previousScreen = useRef(screen)
+  useEffect(() => {
+    const previous = previousScreen.current
+    previousScreen.current = screen
+    if (previous !== screen && (previous === 'hack' || previous === 'build')) {
+      endRememberedSession(previous)
+    }
+    if ((screen === 'hack' || screen === 'build') && student) {
+      rememberActiveMode(screen, student)
+    } else if (screen !== 'resuming') {
+      forgetActiveMode()
+    }
+  }, [screen, student])
 
   function goRole() {
     setScreen('role')
@@ -60,6 +128,15 @@ export default function App() {
   }
 
   const view = (() => {
+    if (screen === 'resuming') {
+      return (
+        <div className="page">
+          <main className="page-body">
+            <p aria-live="polite">Restoring your session…</p>
+          </main>
+        </div>
+      )
+    }
     if (screen === 'role') {
       return (
         <RoleSelect

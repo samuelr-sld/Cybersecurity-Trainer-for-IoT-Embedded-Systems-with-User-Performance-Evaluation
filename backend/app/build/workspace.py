@@ -137,9 +137,11 @@ class SecurityRegionOwnershipError(BuildWorkspaceError):
 def _opaque_preserved_texts(section: BlocklySection) -> tuple[str, ...]:
     """The section's preserved fragments the semantic layer never understood.
 
-    `BlocklySection.records` already locates every preserved item wherever it
-    sits — inside a container's body or, for an unrepresentable section,
-    beside it — so this needs no knowledge of which shape `section` is in.
+    `BlocklySection.records` locates every preserved item wherever it sits -
+    in the container's body, inside a nested block's body at any depth (an
+    `if`, a `for`, an `else`), or, for an unrepresentable section, beside it -
+    so this needs no knowledge of which shape `section` is in, and a statement
+    cannot hide from this rule by being one block deep.
     `understood_by_the_ir` is the one distinction that matters here (see
     `SecurityRegionOwnershipError`): False means B3 itself never parsed the
     fragment, so nothing downstream knows what it does.
@@ -147,8 +149,47 @@ def _opaque_preserved_texts(section: BlocklySection) -> tuple[str, ...]:
     return tuple(
         record.source.text
         for record in section.records
-        if not record.source.understood_by_the_ir
+        if not record.source.understood_by_the_ir and not _is_comment_only(record.source.text)
     )
+
+
+def _is_comment_only(text: str) -> bool:
+    """True when `text` holds nothing but comments and whitespace.
+
+    A comment is preserved source like any other the IR never read, but it is
+    not C++: it has no behavior to hide. Counting it as opaque would make a
+    security region containing ANY explanatory comment un-editable as blocks
+    (a firmware's guard function often ends with one), which protects nothing - the rule
+    exists to stop a statement the student cannot see from surviving beside
+    their blocks. Only comments are removed before looking (a bare string
+    literal is not a comment and stays opaque).
+    """
+    return _without_comments(text).strip() == ""
+
+
+def _without_comments(text: str) -> str:
+    """`text` with `//` and `/* */` comments removed, strings left intact."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text.startswith("//", i):
+            newline = text.find(chr(10), i)
+            i = n if newline == -1 else newline
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        elif text[i] in "\"'":
+            quote = text[i]
+            j = i + 1
+            while j < n and text[j] != quote:
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i : j + 1])
+            i = j + 1
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
 
 
 def _require_full_ownership(path: str, submitted: BlocklySection) -> None:

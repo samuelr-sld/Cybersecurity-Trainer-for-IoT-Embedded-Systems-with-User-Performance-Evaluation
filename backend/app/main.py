@@ -16,6 +16,7 @@ from app import (
     config,
     evaluation_api,
     preparation_websocket,
+    session_api,
     websocket,
 )
 from app.hardware import device_monitor
@@ -102,6 +103,7 @@ app.include_router(websocket.router)
 app.include_router(build_websocket.router)
 app.include_router(preparation_websocket.router)
 app.include_router(evaluation_api.router)
+app.include_router(session_api.router)
 
 
 @app.get("/health")

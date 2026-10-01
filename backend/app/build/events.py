@@ -44,9 +44,12 @@ anything about whether the uploaded firmware works or is secure;
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping
+
+from app.events.clock import utc_now
 
 
 class BuildEventType(str, Enum):
@@ -96,6 +99,11 @@ class BuildEvent:
     type: BuildEventType
     message: str = ""
     data: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    #: When it happened (aware UTC, `app/events/clock.py`), stamped at
+    #: creation. Display metadata only — excluded from equality so it can
+    #: never make two otherwise-identical events differ; it lets a resumed
+    #: page show the log with the times the events really had.
+    occurred_at: datetime = field(default_factory=utc_now, compare=False)
 
     @classmethod
     def create(

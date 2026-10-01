@@ -341,12 +341,16 @@ def test_two_connections_have_isolated_build_sessions(client: TestClient) -> Non
             )
 
 
-# --- disconnect removes the build session -----------------------------------
+# --- disconnect detaches the build session; ending it removes it -----------------------------------
 
 
-def test_disconnect_removes_build_session(client: TestClient) -> None:
+def test_disconnect_detaches_and_explicit_end_removes_build_session(client: TestClient) -> None:
     with client.websocket_connect("/ws/build") as ws:
         session_id, _ = _open_session(ws)
+    # A closing socket detaches (the session stays resumable for its grace
+    # period — tests/test_session_resume.py); only an explicit end removes it.
+    assert build_session_manager._sessions.get(session_id) is not None
+    build_session_manager.end(session_id)
     assert build_session_manager._sessions.get(session_id) is None
 
 
@@ -374,6 +378,8 @@ def test_build_mode_does_not_touch_hack_mode_sessions(client: TestClient) -> Non
 
         assert hack_session_manager._sessions.get(hack_id) is not None
 
+    assert hack_session_manager._sessions.get(hack_id) is not None  # detached
+    hack_session_manager.end(hack_id)
     assert hack_session_manager._sessions.get(hack_id) is None
 
 
@@ -706,6 +712,9 @@ def test_session_is_removed_after_an_abrupt_disconnect_mid_compile(
         # Deliberately never released: the client vanishes with the compile
         # still genuinely in flight, rather than idle at `websocket.receive`.
 
+    # Detached, not gone (resumable); explicitly ending it removes it.
+    assert build_session_manager._sessions.get(session_id) is not None
+    build_session_manager.end(session_id)
     assert build_session_manager._sessions.get(session_id) is None
 
 

@@ -232,9 +232,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_true",
+      "generatorId": "arduino_cpp:logic_true"
     },
     {
       "id": "logic.false",
@@ -247,9 +247,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_false",
+      "generatorId": "arduino_cpp:logic_false"
     },
     {
       "id": "logic.not",
@@ -268,9 +268,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_not",
+      "generatorId": "arduino_cpp:logic_not"
     },
     {
       "id": "logic.and",
@@ -294,9 +294,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_and",
+      "generatorId": "arduino_cpp:logic_and"
     },
     {
       "id": "logic.or",
@@ -320,9 +320,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_or",
+      "generatorId": "arduino_cpp:logic_or"
     },
     {
       "id": "logic.equal",
@@ -398,9 +398,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_greater",
+      "generatorId": "arduino_cpp:logic_greater"
     },
     {
       "id": "logic.less",
@@ -424,9 +424,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_less",
+      "generatorId": "arduino_cpp:logic_less"
     },
     {
       "id": "logic.greater_equal",
@@ -450,9 +450,9 @@ export const MASTER_CATALOG = {
       "output": "boolean",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_greater_equal",
+      "generatorId": "arduino_cpp:logic_greater_equal"
     },
     {
       "id": "logic.less_equal",
@@ -484,7 +484,7 @@ export const MASTER_CATALOG = {
       "id": "logic.if",
       "categoryId": "logic",
       "displayName": "if",
-      "description": "Runs a body when a condition is true.",
+      "description": "Runs a body when a condition is true, optionally followed by else-if / else.",
       "kind": "statement",
       "semanticOperation": "logic.if",
       "inputs": [
@@ -495,6 +495,16 @@ export const MASTER_CATALOG = {
         },
         {
           "name": "DO",
+          "valueType": "statements",
+          "description": ""
+        },
+        {
+          "name": "ELSE_IF",
+          "valueType": "statements",
+          "description": ""
+        },
+        {
+          "name": "ELSE",
           "valueType": "statements",
           "description": ""
         }
@@ -605,9 +615,9 @@ export const MASTER_CATALOG = {
       "output": "any",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "logic_ternary",
+      "generatorId": "arduino_cpp:logic_ternary"
     },
     {
       "id": "logic.if_equals",
@@ -727,32 +737,27 @@ export const MASTER_CATALOG = {
       "id": "loops.for",
       "categoryId": "loops",
       "displayName": "for",
-      "description": "Counts a variable from a start to an end value by a step.",
+      "description": "Runs an initialization once, then repeats a body and a step while a condition holds.",
       "kind": "statement",
       "semanticOperation": "loops.for",
       "inputs": [
         {
-          "name": "VARIABLE",
-          "valueType": "text",
+          "name": "DO",
+          "valueType": "statements",
           "description": ""
         },
         {
-          "name": "FROM",
-          "valueType": "number",
+          "name": "INIT",
+          "valueType": "statements",
           "description": ""
         },
         {
-          "name": "TO",
-          "valueType": "number",
+          "name": "CONDITION",
+          "valueType": "boolean",
           "description": ""
         },
         {
           "name": "STEP",
-          "valueType": "number",
-          "description": ""
-        },
-        {
-          "name": "DO",
           "valueType": "statements",
           "description": ""
         }
@@ -760,9 +765,9 @@ export const MASTER_CATALOG = {
       "output": null,
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "for_loop",
+      "generatorId": "arduino_cpp:for_loop"
     },
     {
       "id": "loops.for_each",
@@ -1512,10 +1517,15 @@ export const MASTER_CATALOG = {
       "id": "variables.declare",
       "categoryId": "variables",
       "displayName": "declare variable",
-      "description": "Declares a local variable of a type, with an initial value.",
+      "description": "Declares a variable of a type, optionally static/const and optionally with an initial value.",
       "kind": "statement",
       "semanticOperation": "variables.declare",
       "inputs": [
+        {
+          "name": "QUALIFIER",
+          "valueType": "text",
+          "description": ""
+        },
         {
           "name": "TYPE",
           "valueType": "text",
@@ -1564,12 +1574,17 @@ export const MASTER_CATALOG = {
       "id": "variables.set",
       "categoryId": "variables",
       "displayName": "set variable",
-      "description": "Assigns a value to a variable.",
+      "description": "Assigns a value to a variable, or adds to / subtracts from it.",
       "kind": "statement",
       "semanticOperation": "variables.set",
       "inputs": [
         {
           "name": "NAME",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "OPERATOR",
           "valueType": "text",
           "description": ""
         },
@@ -1582,9 +1597,35 @@ export const MASTER_CATALOG = {
       "output": null,
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "variables_set",
+      "generatorId": "arduino_cpp:variables_set"
+    },
+    {
+      "id": "variables.update",
+      "categoryId": "variables",
+      "displayName": "step variable",
+      "description": "Adds one to (++) or subtracts one from (--) a variable.",
+      "kind": "statement",
+      "semanticOperation": "variables.update",
+      "inputs": [
+        {
+          "name": "NAME",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "OPERATOR",
+          "valueType": "text",
+          "description": ""
+        }
+      ],
+      "output": null,
+      "dependencies": [],
+      "capabilities": [],
+      "status": "implemented",
+      "blocklyType": "variables_update",
+      "generatorId": "arduino_cpp:variables_update"
     },
     {
       "id": "variables.increment",
@@ -1709,17 +1750,32 @@ export const MASTER_CATALOG = {
           "description": ""
         },
         {
-          "name": "ARGUMENTS",
-          "valueType": "list",
+          "name": "ARG0",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG1",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG2",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG3",
+          "valueType": "any",
           "description": ""
         }
       ],
       "output": "any",
       "dependencies": [],
       "capabilities": [],
-      "status": "cataloged",
-      "blocklyType": null,
-      "generatorId": null
+      "status": "implemented",
+      "blocklyType": "call_function_value",
+      "generatorId": "arduino_cpp:call_function_value"
     },
     {
       "id": "functions.parameter",
@@ -1803,13 +1859,33 @@ export const MASTER_CATALOG = {
       "id": "functions.call_existing",
       "categoryId": "functions",
       "displayName": "call function",
-      "description": "Calls an existing, already-defined function with no arguments, for its effect.",
+      "description": "Calls an existing, already-defined function, with any arguments, for its effect.",
       "kind": "statement",
       "semanticOperation": "functions.call_existing",
       "inputs": [
         {
           "name": "NAME",
           "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "ARG0",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG1",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG2",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG3",
+          "valueType": "any",
           "description": ""
         }
       ],
@@ -1819,6 +1895,52 @@ export const MASTER_CATALOG = {
       "status": "implemented",
       "blocklyType": "call_existing_function",
       "generatorId": "arduino_cpp:call_existing_function"
+    },
+    {
+      "id": "functions.call_method",
+      "categoryId": "functions",
+      "displayName": "call method",
+      "description": "Calls a method on an object, with any arguments, for its effect.",
+      "kind": "statement",
+      "semanticOperation": "functions.call_method",
+      "inputs": [
+        {
+          "name": "RECEIVER",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "METHOD",
+          "valueType": "text",
+          "description": ""
+        },
+        {
+          "name": "ARG0",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG1",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG2",
+          "valueType": "any",
+          "description": ""
+        },
+        {
+          "name": "ARG3",
+          "valueType": "any",
+          "description": ""
+        }
+      ],
+      "output": null,
+      "dependencies": [],
+      "capabilities": [],
+      "status": "implemented",
+      "blocklyType": "call_method",
+      "generatorId": "arduino_cpp:call_method"
     },
     {
       "id": "lists.create",
@@ -5491,11 +5613,43 @@ export const FULL_TOOLBOX = {
       "contents": [
         {
           "kind": "block",
+          "type": "logic_true"
+        },
+        {
+          "kind": "block",
+          "type": "logic_false"
+        },
+        {
+          "kind": "block",
+          "type": "logic_not"
+        },
+        {
+          "kind": "block",
+          "type": "logic_and"
+        },
+        {
+          "kind": "block",
+          "type": "logic_or"
+        },
+        {
+          "kind": "block",
           "type": "logic_equal"
         },
         {
           "kind": "block",
           "type": "logic_not_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_greater"
+        },
+        {
+          "kind": "block",
+          "type": "logic_less"
+        },
+        {
+          "kind": "block",
+          "type": "logic_greater_equal"
         },
         {
           "kind": "block",
@@ -5507,6 +5661,10 @@ export const FULL_TOOLBOX = {
         },
         {
           "kind": "block",
+          "type": "logic_ternary"
+        },
+        {
+          "kind": "block",
           "type": "if_equals"
         }
       ]
@@ -5515,7 +5673,12 @@ export const FULL_TOOLBOX = {
       "kind": "category",
       "name": "Loops",
       "colour": "120",
-      "contents": []
+      "contents": [
+        {
+          "kind": "block",
+          "type": "for_loop"
+        }
+      ]
     },
     {
       "kind": "category",
@@ -5567,6 +5730,14 @@ export const FULL_TOOLBOX = {
         {
           "kind": "block",
           "type": "variables_get"
+        },
+        {
+          "kind": "block",
+          "type": "variables_set"
+        },
+        {
+          "kind": "block",
+          "type": "variables_update"
         }
       ]
     },
@@ -5575,6 +5746,10 @@ export const FULL_TOOLBOX = {
       "name": "Functions",
       "colour": "290",
       "contents": [
+        {
+          "kind": "block",
+          "type": "call_function_value"
+        },
         {
           "kind": "block",
           "type": "return_void"
@@ -5586,6 +5761,10 @@ export const FULL_TOOLBOX = {
         {
           "kind": "block",
           "type": "call_existing_function"
+        },
+        {
+          "kind": "block",
+          "type": "call_method"
         }
       ]
     },
@@ -5764,11 +5943,43 @@ export const POPULATED_TOOLBOX = {
       "contents": [
         {
           "kind": "block",
+          "type": "logic_true"
+        },
+        {
+          "kind": "block",
+          "type": "logic_false"
+        },
+        {
+          "kind": "block",
+          "type": "logic_not"
+        },
+        {
+          "kind": "block",
+          "type": "logic_and"
+        },
+        {
+          "kind": "block",
+          "type": "logic_or"
+        },
+        {
+          "kind": "block",
           "type": "logic_equal"
         },
         {
           "kind": "block",
           "type": "logic_not_equal"
+        },
+        {
+          "kind": "block",
+          "type": "logic_greater"
+        },
+        {
+          "kind": "block",
+          "type": "logic_less"
+        },
+        {
+          "kind": "block",
+          "type": "logic_greater_equal"
         },
         {
           "kind": "block",
@@ -5780,7 +5991,22 @@ export const POPULATED_TOOLBOX = {
         },
         {
           "kind": "block",
+          "type": "logic_ternary"
+        },
+        {
+          "kind": "block",
           "type": "if_equals"
+        }
+      ]
+    },
+    {
+      "kind": "category",
+      "name": "Loops",
+      "colour": "120",
+      "contents": [
+        {
+          "kind": "block",
+          "type": "for_loop"
         }
       ]
     },
@@ -5834,6 +6060,14 @@ export const POPULATED_TOOLBOX = {
         {
           "kind": "block",
           "type": "variables_get"
+        },
+        {
+          "kind": "block",
+          "type": "variables_set"
+        },
+        {
+          "kind": "block",
+          "type": "variables_update"
         }
       ]
     },
@@ -5842,6 +6076,10 @@ export const POPULATED_TOOLBOX = {
       "name": "Functions",
       "colour": "290",
       "contents": [
+        {
+          "kind": "block",
+          "type": "call_function_value"
+        },
         {
           "kind": "block",
           "type": "return_void"
@@ -5853,6 +6091,10 @@ export const POPULATED_TOOLBOX = {
         {
           "kind": "block",
           "type": "call_existing_function"
+        },
+        {
+          "kind": "block",
+          "type": "call_method"
         }
       ]
     },

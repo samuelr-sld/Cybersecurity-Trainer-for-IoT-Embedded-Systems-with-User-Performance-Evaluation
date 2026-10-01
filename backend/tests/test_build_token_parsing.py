@@ -325,7 +325,15 @@ def test_the_analyzer_reads_an_initialized_local_and_nothing_wider() -> None:
         initializer=text("K7"),
         text='String AUTH_TOKEN = "K7";',
     )
-    for carried in ("String message;", "static int n = 0;", "int a = 1, b = 2;", 'int n = "x";'):
+    # P2 reads `String message;` and `static int n = 0;` too (see
+    # `test_build_p2_statements.py`); these stay carried verbatim.
+    for carried in (
+        "int a = 1, b = 2;",
+        'int n = "x";',
+        "volatile int n;",
+        "const int n;",
+        "static const char *name = \"x\";",
+    ):
         (statement,) = analyze_body(f"  {carried}")
         assert isinstance(statement, UnsupportedStatement), carried
         assert statement.source_text == carried
@@ -420,12 +428,17 @@ def test_the_analyzer_reads_string_methods_only_from_its_table() -> None:
         "int n = message.toInt();",
         "int n = message.indexOf();",
         "String s = message.substring(0);",
-        "int n = indexOf(message);",
         "int n = message.indexOf(' ');",
         "int n = message.indexOf(\" \") /* c */;",
     ):
         (statement,) = analyze_body(f"  {carried}")
         assert isinstance(statement, UnsupportedStatement), carried
+
+    # A BARE function that happens to be named like a String method is an
+    # ordinary call (P2's `CallValue`), never the `text.index_of` operation.
+    (statement,) = analyze_body("  int n = indexOf(message);")
+    assert not isinstance(statement.initializer, OperationValue)
+    assert statement.initializer.function_name == "indexOf"
 
 
 # =============================================================================
@@ -444,13 +457,19 @@ def test_less_or_equal_is_a_comparison_the_ir_states() -> None:
     assert isinstance(read_back.body[0], ReturnStatement)
 
 
-def test_only_the_three_stated_operators_exist() -> None:
-    for operator in ("<", ">", ">=", "&&"):
-        with pytest.raises(SemanticModelError):
-            ComparisonValue(SymbolValue("a"), operator, number(0))
-    for condition in ("a < 0", "a > 0", "a >= 0", "a == 1 == 2"):
-        (statement,) = analyze_body(f"  if ({condition}) {{\n    return;\n  }}")
-        assert isinstance(statement, UnsupportedStatement), condition
+def test_only_the_stated_operators_exist() -> None:
+    # `=` is assignment, not a comparison; ordering operators compare NUMBERS.
+    with pytest.raises(SemanticModelError):
+        ComparisonValue(SymbolValue("a"), "=", number(0))
+    with pytest.raises(SemanticModelError):
+        ComparisonValue(text("x"), "<", number(0))
+    for stated in ("a < 0", "a > 0", "a >= 0", "a <= 0", "a == 1", "a && b", "a || b", "!a"):
+        (statement,) = analyze_body(f"  if ({stated}) {{\n    return;\n  }}")
+        assert isinstance(statement, ConditionalStatement), stated
+    # Anything past the stated grammar is source, whole - never half-read.
+    for unstated in ("a == 1 == 2", "a < b < c", "a - 1 < 0", "a * 2 > 0", "a & b", "a << 1 > 0"):
+        (statement,) = analyze_body(f"  if ({unstated}) {{\n    return;\n  }}")
+        assert isinstance(statement, UnsupportedStatement), unstated
 
 
 def test_nested_values_are_parenthesized_to_keep_their_tree() -> None:
@@ -571,8 +590,16 @@ def test_the_remediation_plus_the_old_stop_branch_is_refused() -> None:
     new blocks — as an unmodified frontend round-trip would — is refused."""
     live = security_workspace()
     current = live.section_blockly(SKETCH_NAME, SECURITY_SECTION)
-    (old_branch,) = [record for record in current["preserved"] if "STOP" in record["text"]]
-    stale = dict(old_branch, index=8)  # after the eight new statements
+    # P3 draws the old `else if` as blocks, so it is no longer an opaque
+    # fragment. A STALE opaque fragment (an old client resubmitting text the
+    # toolbox never drew) is what this rule still has to refuse.
+    assert all(record["text"].lstrip().startswith("//") for record in current["preserved"])
+    stale = {
+        "index": 8,  # after the eight new statements
+        "text": 'else if (message == "STOP") {\n    motorStop();\n  }',
+        "reason": "not_a_call",
+        "understoodByTheIr": False,
+    }
 
     with pytest.raises(SecurityRegionOwnershipError):
         live.apply_section_blockly(SKETCH_NAME, SECURITY_SECTION, remediation_workspace(), [stale])
@@ -636,18 +663,42 @@ def test_a_value_block_cannot_stand_alone_as_a_statement() -> None:
         security_workspace().apply_section_blockly(SKETCH_NAME, SECURITY_SECTION, workspace, [])
 
 
-def test_an_if_condition_must_be_a_comparison_block() -> None:
+def test_an_if_condition_must_be_able_to_be_a_boolean() -> None:
+    # Any value that can stand as a boolean is a condition (a name, a call, a
+    # comparison, `and`/`or`/`not`) - the analyzer reads exactly those back.
     workspace = remediation_workspace()
     workspace["blocks"]["blocks"][0]["inputs"]["BODY"]["block"] = b_if(b_var("ready"), b_return())
+    section = blockly_section_from_state(SECURITY_SECTION, workspace)
+    (conditional,) = blockly_to_semantic(BlocklyProgram(sections=(section,))).sections[0].statements
+    assert isinstance(conditional, ConditionalStatement)
+    # ... but a text literal is not one.
+    workspace["blocks"]["blocks"][0]["inputs"]["BODY"]["block"] = b_if(b_text("x"), b_return())
     section = blockly_section_from_state(SECURITY_SECTION, workspace)
     with pytest.raises(InvalidBlocklyFieldValueError):
         blockly_to_semantic(BlocklyProgram(sections=(section,)))
 
 
 def test_an_empty_socket_is_reported_not_guessed() -> None:
-    workspace = remediation_workspace()
-    body = workspace["blocks"]["blocks"][0]["inputs"]["BODY"]["block"]
-    del body["inputs"]
+    # A declaration's INITIAL socket is optional since P2 (`String message;`);
+    # an assignment's VALUE socket is not, and an empty one is reported.
+    workspace = {
+        "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+                {
+                    "type": "function_implementation",
+                    "inputs": {
+                        "BODY": {
+                            "block": {
+                                "type": "variables_set",
+                                "fields": {"NAME": "count", "OPERATOR": "="},
+                            }
+                        }
+                    },
+                }
+            ],
+        }
+    }
     section = blockly_section_from_state(SECURITY_SECTION, workspace)
     with pytest.raises(MissingBlocklyFieldError):
         blockly_to_semantic(BlocklyProgram(sections=(section,)))
@@ -669,7 +720,8 @@ def test_a_string_argument_is_no_longer_mistaken_for_no_arguments() -> None:
     # `print("hi");` used to read as the zero-argument call `print()` and
     # regenerate WITHOUT its operand.
     (statement,) = analyze_body('  print("hi");')
-    assert isinstance(statement, UnsupportedStatement)
+    assert isinstance(statement, CallStatement)
+    assert statement.arguments == (text("hi"),)
     program = analyze_document(analyze_source('void loop() {\n  print("hi");\n}\n'))
     assert '"hi"' in generate_cpp(program)
 

@@ -156,6 +156,10 @@ class SessionMessage(_Frame):
     type: Literal["session"] = "session"
     session_id: str
     protocol_version: int = PROTOCOL_VERSION
+    #: True when this connection re-attached to a session that was already
+    #: running (the client asked with `?session=<id>` after a reload). False
+    #: for a brand-new session, including when the requested one was gone.
+    resumed: bool = False
 
 
 class OutputMessage(_Frame):

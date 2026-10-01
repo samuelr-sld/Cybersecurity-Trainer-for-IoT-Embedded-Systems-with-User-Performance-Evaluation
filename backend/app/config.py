@@ -344,6 +344,77 @@ def lab_secret(name: str) -> str:
     return os.getenv(name, "")
 
 
+# --- lab environment file bootstrap -----------------------------------------
+#
+# `backend/lab.env.local` (gitignored) is read ONCE, when this module is first
+# imported, so a plain `uvicorn app.main:app` needs no manual export.
+#
+#   * Located relative to this file (backend/), never the working directory.
+#   * Optional: absent or unreadable => silently nothing happens.
+#   * Only `KEY=value` lines whose KEY starts with LAB_SECRET_PREFIX are
+#     imported; everything else in the file is ignored, so this is not a
+#     general .env loader.
+#   * PRECEDENCE: a variable already in the process environment always wins;
+#     the file only fills names that are not set at all.
+#   * Nothing is logged or printed, and values never leave os.environ.
+#   * TRAINER_LAB_ENV_PATH (a path, read from the process environment only)
+#     points at a different file; set it to "" to disable loading (the test
+#     suite does this so it never depends on a developer's real credentials).
+LAB_ENV_PATH_VARIABLE = "TRAINER_LAB_ENV_PATH"
+DEFAULT_LAB_ENV_FILE = pathlib.Path(__file__).resolve().parent.parent / "lab.env.local"
+
+
+def _parse_lab_env_line(line: str) -> tuple[str, str] | None:
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return None
+    if text.startswith("export "):
+        text = text[len("export "):].lstrip()
+    key, separator, value = text.partition("=")
+    key = key.strip()
+    if not separator or not key.startswith(LAB_SECRET_PREFIX):
+        return None
+    if not all(ch.isalnum() or ch == "_" for ch in key) or not key.isascii():
+        return None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return key, value
+
+
+def load_lab_env_file(
+    path: pathlib.Path | str | None = None,
+    environ: "os._Environ[str] | dict[str, str] | None" = None,
+) -> int:
+    """Import TRAINER_LAB_* entries from the lab env file; return how many were set.
+
+    Never raises and never overwrites a variable that is already set.
+    """
+    target_environ = os.environ if environ is None else environ
+    if path is None:
+        override = target_environ.get(LAB_ENV_PATH_VARIABLE)
+        if override is not None and not override.strip():
+            return 0
+        path = override.strip() if override else DEFAULT_LAB_ENV_FILE
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return 0
+    loaded = 0
+    for line in text.splitlines():
+        parsed = _parse_lab_env_line(line)
+        if parsed is None:
+            continue
+        key, value = parsed
+        if key not in target_environ:
+            target_environ[key] = value
+            loaded += 1
+    return loaded
+
+
+load_lab_env_file()
+
+
 # --- Hack Mode live MQTT attack path --------------------------------------
 #
 # When a Panel that declares a machine-checkable authorization criterion is
@@ -398,4 +469,16 @@ HACK_MQTT_LISTEN_TIMEOUT_SECONDS: float = float(
 # has not finished in two minutes is stuck, not busy.
 BUILD_FLASH_TIMEOUT_SECONDS: float = float(
     os.getenv("TRAINER_BUILD_FLASH_TIMEOUT_SECONDS", "120")
+)
+
+
+# How long a Hack/Build session outlives the WebSocket that was serving it.
+# A browser reload (or a dropped connection) is a UI reconnection, not the end
+# of a student's work: the session is detached and waits this long for the
+# same client to resume it (`?session=<id>`). Only an explicit end
+# (`POST /api/sessions/{mode}/{id}/end`) or this timeout finishes it. Bounded
+# on purpose — an abandoned tab must not hold a session (and, for Build, its
+# retained compiled artifact) for the life of the process.
+SESSION_RESUME_GRACE_SECONDS: float = float(
+    os.getenv("TRAINER_SESSION_RESUME_GRACE_SECONDS", "600")
 )

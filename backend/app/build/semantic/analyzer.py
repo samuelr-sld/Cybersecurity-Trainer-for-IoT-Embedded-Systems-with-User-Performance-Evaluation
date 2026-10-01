@@ -25,17 +25,19 @@ WHAT IS RECOGNIZED, AND NOTHING ELSE:
   * inside such a body, a statement of the exact shape
     `name(argument, ...);` where `name` is a BARE identifier in the call
     table below and every argument is a literal or a named constant;
-  * a zero-argument call to any other bare name (`motorStart();`), a plain
-    `if (COMPARISON) { ... }` head, a void `return;`, and a single initialized
-    local `String|int|bool NAME = VALUE;` — where a condition or initializer
-    may use the value layer's small expression grammar (`_ExpressionReader`:
-    `==`/`!=`/`<=`, `+`, and the `String` methods `indexOf`/`substring`/
-    `length`);
-  * anything else in the body — other control flow, an uninitialized or
-    qualified declaration, an assignment, a statement-level method call
-    (`client.publish(...)`), a call with an expression argument
-    (`digitalWrite(PIN, run ? HIGH : LOW)`) — keeps its exact source text and
-    a reason.
+  * a call to any other bare name (`motorStart();`, `applyMotorState(true);`),
+    a method call on an object (`message.trim();`, `client.publish(A, B);`), an
+    assignment (`x = v;`, `x += v;`), a plain `if (COMPARISON) { ... }` head, a
+    void `return;`, and a declaration `[static] [const] TYPE NAME [= VALUE];`
+    (P2) - where a condition, initializer, assigned value or argument may use
+    the value layer's small expression grammar (`_ExpressionReader`:
+    `==`/`!=`/`<=`, `+`, a function-call value, and the `String` methods
+    `indexOf`/`substring`/`length`);
+  * anything else in the body — other control flow, a ternary, a cast, an
+    indexed access, a pointer declaration, a statement whose expression the
+    grammar cannot state (`message += static_cast<char>(payload[i]);`) — keeps
+    its exact source text and a reason. A statement is understood COMPLETELY or
+    not at all: a recognized head with an unreadable expression is carried whole.
 
 ALL OR NOTHING PER STATEMENT. If any argument of a recognized call is not
 representable, the WHOLE statement becomes unsupported. A half-understood
@@ -71,12 +73,22 @@ import re
 from app.build.discovery import BuildDocument, CodeSection, SectionKind, code_mask
 from app.build.semantic.errors import SemanticAnalysisError, SemanticModelError
 from app.build.semantic.models import (
+    ASSIGNMENT_OPERATORS,
     COMPARISON_OPERATORS,
+    DECLARATION_QUALIFIERS,
+    DECLARATION_TYPE_NAMES,
+    DEFAULT_TYPE_NAMES,
     ArithmeticValue,
+    AssignmentStatement,
     CallStatement,
+    CallValue,
     ComparisonValue,
     ConditionalStatement,
+    ForStatement,
     LiteralValue,
+    LogicalValue,
+    MethodCallStatement,
+    NotValue,
     OperationStatement,
     OperationValue,
     ReturnStatement,
@@ -86,8 +98,10 @@ from app.build.semantic.models import (
     SemanticStatement,
     SemanticValue,
     SymbolValue,
+    TernaryValue,
     UnsupportedReason,
     UnsupportedStatement,
+    UpdateStatement,
     VariableDeclaration,
 )
 from app.build.semantic.operations import (
@@ -146,13 +160,27 @@ _METHOD_OPERATIONS = {
     "length": TEXT_LENGTH,
 }
 
-#: The C++ type names a local declaration is recognized with. The inverse of
-#: `emissions.py`'s `CPP_DECLARATION_TYPES`, pinned by the test suite.
-_DECLARATION_TYPES = {
-    "String": SemanticType.TEXT,
-    "int": SemanticType.NUMBER,
-    "bool": SemanticType.BOOLEAN,
-}
+#: The C++ type names a declaration is recognized with: `models.py`'s closed
+#: spelling table, longest spelling first so `unsigned long` is never read as
+#: `long`. The default spellings are the inverse of `emissions.py`'s
+#: `CPP_DECLARATION_TYPES`, pinned by the test suite.
+_DECLARATION_TYPES = DECLARATION_TYPE_NAMES
+_TYPE_ALTERNATION = "|".join(
+    part.replace(" ", r"\s+")
+    for part in sorted(DECLARATION_TYPE_NAMES, key=len, reverse=True)
+)
+_DECLARATION_PATTERN = (
+    r"((?:(?:static|const)\s+)*)(" + _TYPE_ALTERNATION + r")\s+([A-Za-z_]\w*)\s*(?:=([^;]*))?;"
+)
+
+#: `name = v;`, `name += v;`, `name -= v;` - never `name == v;`.
+_ASSIGNMENT_PATTERN = r"([A-Za-z_]\w*)\s*(\+=|-=|=(?!=))([^;]*);"
+
+#: `name++;` / `name--;` (postfix only).
+_UPDATE_PATTERN = r"([A-Za-z_]\w*)\s*(\+\+|--);"
+
+#: `receiver.method(` at the start of a statement.
+_METHOD_HEAD_PATTERN = r"([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\("
 
 #: C++'s own fixed control-flow vocabulary. Excluding these by name is not
 #: panel knowledge — it is the language's reserved words, the same guard and
@@ -340,7 +368,7 @@ def _statement_spans(mask: str, start: int, end: int) -> list[tuple[int, int]]:
             close = _matching_brace(mask, i, end)
             if close is None:
                 raise SemanticAnalysisError(f"nested block at {i} never closes")
-            stop = close + 1
+            stop = _extend_else_chain(mask, close + 1, end)
             following = _next_code(mask, stop, end)
             if following is not None and mask[following] == ";":
                 stop = following + 1
@@ -358,6 +386,70 @@ def _statement_spans(mask: str, start: int, end: int) -> list[tuple[int, int]]:
     if begin is not None:
         spans.append((begin, end))
     return spans
+
+
+def _is_word(mask: str, index: int, word: str) -> bool:
+    """`word` starts at `index` as a whole word (not a prefix of a longer name)."""
+    stop = index + len(word)
+    if not mask.startswith(word, index):
+        return False
+    return stop >= len(mask) or not (mask[stop].isalnum() or mask[stop] == "_")
+
+
+def _extend_else_chain(mask: str, stop: int, end: int) -> int:
+    """Extend a block's span over the `else` / `else if` continuation after it.
+
+    `if (a) { ... } else if (b) { ... } else { ... }` is ONE statement: the
+    `else` has no meaning apart from the `if` it continues, so splitting it off
+    (as the first version of this analyzer did) could only ever leave half a
+    statement understood. A continuation whose body has no braces is consumed up
+    to its `;` so it can never be mistaken for a statement of its own; whether
+    the whole chain is then understood is `_try_conditional`'s question.
+    """
+    while True:
+        keyword = _next_code(mask, stop, end)
+        if keyword is None or not _is_word(mask, keyword, "else"):
+            return stop
+        after = _next_code(mask, keyword + 4, end)
+        if after is None:
+            return stop
+        if mask[after] == "{":
+            close = _matching_brace(mask, after, end)
+            if close is None:
+                raise SemanticAnalysisError(f"else block at {after} never closes")
+            stop = close + 1
+            continue
+        if _is_word(mask, after, "if"):
+            paren = _next_code(mask, after + 2, end)
+            close_paren = None if paren is None or mask[paren] != "(" else _matching_paren(
+                mask, paren, end
+            )
+            if close_paren is None:
+                return stop
+            brace = _next_code(mask, close_paren + 1, end)
+            if brace is not None and mask[brace] == "{":
+                close = _matching_brace(mask, brace, end)
+                if close is None:
+                    raise SemanticAnalysisError(f"else-if block at {brace} never closes")
+                stop = close + 1
+                continue
+            after = close_paren + 1
+        semicolon = _statement_end(mask, after, end)
+        return semicolon
+
+
+def _statement_end(mask: str, start: int, end: int) -> int:
+    """The index just past the `;` ending a brace-less statement starting here."""
+    depth = 0
+    for i in range(start, end):
+        char = mask[i]
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == ";" and depth == 0:
+            return i + 1
+    return end
 
 
 def _matching_brace(mask: str, start: int, limit: int) -> int | None:
@@ -405,12 +497,28 @@ def _statement(
     if conditional is not None:
         return conditional
 
+    loop = _try_for(source, mask, start, end, operations)
+    if loop is not None:
+        return loop
+
     if re.fullmatch(r"return\s*;", mask[start:end].strip()):
         return ReturnStatement(text=text)
 
     declaration = _try_declaration(source, mask, start, end, operations)
     if declaration is not None:
         return declaration
+
+    update = _try_update(source, mask, start, end)
+    if update is not None:
+        return update
+
+    assignment = _try_assignment(source, mask, start, end, operations)
+    if assignment is not None:
+        return assignment
+
+    method_call = _try_method_call(source, mask, start, end, operations)
+    if method_call is not None:
+        return method_call
 
     call = _match_call(mask, start, end)
     if call is None:
@@ -428,10 +536,17 @@ def _statement(
         if not argument_texts:
             # A call to a function this table does not name, given no
             # arguments — `motorStart();`, `chirpBuzzer();`, `pollButtons();`.
-            # See `CallStatement`: deliberately zero-arg only, so a call WITH
-            # arguments still falls through to UNKNOWN_CALL below, unchanged.
             return CallStatement(function_name=name, text=text)
-        return UnsupportedStatement(text=text, reason=UnsupportedReason.UNKNOWN_CALL)
+        # ... or given arguments (P2): `applyMotorState(true);`. Every argument
+        # must be a value the IR can state, or the WHOLE call is carried
+        # verbatim as before.
+        values = _argument_values(argument_texts, operations)
+        if values is None:
+            return UnsupportedStatement(text=text, reason=UnsupportedReason.UNKNOWN_CALL)
+        try:
+            return CallStatement(function_name=name, text=text, arguments=values)
+        except SemanticModelError:
+            return UnsupportedStatement(text=text, reason=UnsupportedReason.UNKNOWN_CALL)
 
     argument_texts = _argument_texts(source, mask, args_start, args_end)
     if len(argument_texts) != len(operation.parameters):
@@ -441,6 +556,17 @@ def _statement(
     for parameter, argument_text in zip(operation.parameters, argument_texts):
         value = _value(argument_text)
         if value is None:
+            # An operation's fixed fields draw only a literal or a name. An
+            # argument that is a fuller value (`run ? HIGH : LOW`) makes this an
+            # ordinary CALL with every argument kept, which a call block draws
+            # and the generator writes back identically. One argument nothing
+            # can state keeps the whole statement as source, as before.
+            values = _argument_values(argument_texts, operations)
+            if values is not None:
+                try:
+                    return CallStatement(function_name=name, text=text, arguments=values)
+                except SemanticModelError:
+                    pass
             return UnsupportedStatement(text=text, reason=UnsupportedReason.UNSUPPORTED_ARGUMENT)
         if not value.fits(parameter.value_type):
             return UnsupportedStatement(text=text, reason=UnsupportedReason.ARGUMENT_TYPE)
@@ -461,20 +587,35 @@ def _try_conditional(
     end: int,
     operations: SemanticOperationRegistry,
 ) -> ConditionalStatement | None:
-    """This span as a plain `if (COND) { BODY }`, or None if it is not that shape.
+    """This span as `if (COND) { BODY }` plus its `else if` / `else` chain, or None.
 
-    See `ConditionalStatement`'s docstring for why there is no `else` here: a
-    span that IS an `if` followed by `else ...` never reaches this function in
-    the first place, because `_statement_spans` already splits the `else` (or
-    `else if`) off into its own following span — this function only ever sees
-    the `if (...) { ... }` head. A condition or body this function cannot
-    parse — anything beyond one top-level `==`/`!=` comparison of a literal or
-    a symbol — returns None, and the caller's ordinary NOT_A_CALL fallback
-    (`if` is a control keyword) carries the whole span verbatim instead.
+    The WHOLE span must be that chain: a condition the value layer cannot state,
+    a body without braces, or anything after the last branch makes the entire
+    span None, and the caller carries it verbatim. A chain is never half
+    understood - an `if` whose `else if` cannot be read is source, not a block
+    with a hole where the rest went.
     """
-    if end - start < 2 or mask[start : start + 2] != "if":
+    parsed = _parse_if(source, mask, start, end, operations)
+    if parsed is None:
         return None
-    if start + 2 < end and (mask[start + 2].isalnum() or mask[start + 2] == "_"):
+    conditional, stop = parsed
+    if _next_code(mask, stop, end) is not None:
+        return None
+    return conditional
+
+
+def _parse_if(
+    source: str,
+    mask: str,
+    start: int,
+    end: int,
+    operations: SemanticOperationRegistry,
+) -> tuple[ConditionalStatement, int] | None:
+    """One `if ... { ... }` at `start` with whatever `else` follows it.
+
+    Returns the conditional and the index just past the last branch consumed.
+    """
+    if not _is_word(mask, start, "if"):
         return None
     open_paren = _next_code(mask, start + 2, end)
     if open_paren is None or mask[open_paren] != "(":
@@ -483,9 +624,7 @@ def _try_conditional(
     if close_paren is None:
         return None
     condition = _expression(source[open_paren + 1 : close_paren], operations)
-    if not isinstance(condition, ComparisonValue):
-        # Only a comparison is a condition here, as before: `if (ready)` stays
-        # carried verbatim rather than silently becoming a block.
+    if condition is None or not condition.fits(SemanticType.BOOLEAN):
         return None
     brace_open = _next_code(mask, close_paren + 1, end)
     if brace_open is None or mask[brace_open] != "{":
@@ -493,16 +632,171 @@ def _try_conditional(
     brace_close = _matching_brace(mask, brace_open, end)
     if brace_close is None:
         return None
-    if _next_code(mask, brace_close + 1, end) is not None:
-        # Something follows the closing brace within THIS span. Given how
-        # `_statement_spans` builds spans (a `;` immediately after a `}` is
-        # folded into the same span, everything else is not), this is not a
-        # shape a plain `if` can produce — refuse rather than guess at it.
-        return None
     body = _body_statements(source, mask, brace_open + 1, brace_close, operations)
+
+    stop = brace_close + 1
+    keyword = _next_code(mask, stop, end)
+    if keyword is None or not _is_word(mask, keyword, "else"):
+        return _conditional(source, start, stop, condition, body), stop
+    after = _next_code(mask, keyword + 4, end)
+    if after is None:
+        return None
+    try:
+        if mask[after] == "{":
+            else_close = _matching_brace(mask, after, end)
+            if else_close is None:
+                return None
+            else_body = _body_statements(source, mask, after + 1, else_close, operations)
+            stop = else_close + 1
+            return _conditional(source, start, stop, condition, body, else_body=else_body), stop
+        if _is_word(mask, after, "if"):
+            chained = _parse_if(source, mask, after, end, operations)
+            if chained is None:
+                return None
+            nested, stop = chained
+            return _conditional(source, start, stop, condition, body, else_if=nested), stop
+    except SemanticModelError:
+        return None
+    return None
+
+
+def _conditional(
+    source: str,
+    start: int,
+    stop: int,
+    condition: SemanticValue,
+    body: tuple[SemanticStatement, ...],
+    *,
+    else_if: ConditionalStatement | None = None,
+    else_body: tuple[SemanticStatement, ...] | None = None,
+) -> ConditionalStatement:
     return ConditionalStatement(
-        condition=condition, body=body, text=source[start:end].strip()
+        condition=condition,
+        body=body,
+        text=source[start:stop].strip(),
+        else_if=else_if,
+        else_body=else_body,
     )
+
+
+# --- `for (INIT; CONDITION; STEP) { BODY }` -----------------------------------
+
+
+def _try_for(
+    source: str,
+    mask: str,
+    start: int,
+    end: int,
+    operations: SemanticOperationRegistry,
+) -> ForStatement | None:
+    """This span as a `for` loop, or None if ANY part of it is not understood.
+
+    The header is split into its three parts on `;` (parentheses and brackets
+    respected, strings and comments already blanked in the mask). Each part must
+    be stated in full - one unqualified declaration or assignment, one boolean
+    value, one assignment or `++`/`--` - or the whole loop stays source. Empty
+    parts are legal C++ and stay empty.
+    """
+    if not _is_word(mask, start, "for"):
+        return None
+    open_paren = _next_code(mask, start + 3, end)
+    if open_paren is None or mask[open_paren] != "(":
+        return None
+    close_paren = _matching_paren(mask, open_paren, end)
+    if close_paren is None:
+        return None
+    parts = _split_header(mask, open_paren + 1, close_paren)
+    if parts is None:
+        return None
+    brace_open = _next_code(mask, close_paren + 1, end)
+    if brace_open is None or mask[brace_open] != "{":
+        return None
+    brace_close = _matching_brace(mask, brace_open, end)
+    if brace_close is None or _next_code(mask, brace_close + 1, end) is not None:
+        return None
+
+    init_text, condition_text, step_text = (source[a:b] for a, b in parts)
+    init = None
+    if init_text.strip():
+        init = _header_statement(init_text, operations, declaration=True)
+        if init is None:
+            return None
+    condition = None
+    if condition_text.strip():
+        condition = _expression(condition_text, operations)
+        if condition is None or not condition.fits(SemanticType.BOOLEAN):
+            return None
+    step = None
+    if step_text.strip():
+        step = _header_statement(step_text, operations, declaration=False)
+        if step is None:
+            return None
+    body = _body_statements(source, mask, brace_open + 1, brace_close, operations)
+    try:
+        return ForStatement(
+            init=init,
+            condition=condition,
+            step=step,
+            body=body,
+            text=source[start:end].strip(),
+        )
+    except SemanticModelError:
+        return None
+
+
+def _split_header(mask: str, start: int, end: int) -> list[tuple[int, int]] | None:
+    """The three `;`-separated spans of a `for` header, or None if it is not one."""
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    begin = start
+    for i in range(start, end):
+        char = mask[i]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == ";" and depth == 0:
+            spans.append((begin, i))
+            begin = i + 1
+    spans.append((begin, end))
+    return spans if len(spans) == 3 else None
+
+
+def _header_statement(
+    text: str, operations: SemanticOperationRegistry, *, declaration: bool
+) -> VariableDeclaration | AssignmentStatement | UpdateStatement | None:
+    """One `for`-header part read as the statement it is, by the ordinary readers.
+
+    The part is closed with `;` and handed to the same recognizers a statement
+    in a body goes through, so a header and a body never disagree about what
+    `i = 0` or `i++` means. An init may also be a declaration; a step may not.
+    """
+    synthetic = text.strip() + ";"
+    synthetic_mask = code_mask(synthetic)
+    end = len(synthetic)
+    if declaration:
+        found = _try_declaration(synthetic, synthetic_mask, 0, end, operations)
+        if found is not None:
+            return found if not found.qualifiers else None
+        found = _try_assignment(synthetic, synthetic_mask, 0, end, operations)
+        return found
+    found = _try_update(synthetic, synthetic_mask, 0, end)
+    if found is not None:
+        return found
+    return _try_assignment(synthetic, synthetic_mask, 0, end, operations)
+
+
+def _try_update(source: str, mask: str, start: int, end: int) -> UpdateStatement | None:
+    """`name++;` / `name--;` as an update, or None."""
+    match = re.fullmatch(_UPDATE_PATTERN, mask[start:end].strip())
+    if match is None:
+        return None
+    try:
+        return UpdateStatement(
+            target=match.group(1), operator=match.group(2), text=source[start:end].strip()
+        )
+    except SemanticModelError:
+        return None
 
 
 def _try_declaration(
@@ -512,18 +806,64 @@ def _try_declaration(
     end: int,
     operations: SemanticOperationRegistry,
 ) -> VariableDeclaration | None:
-    """`TYPE NAME = VALUE;` as a local declaration, or None if it is not one.
+    """`[static] [const] TYPE NAME [= VALUE];` as a declaration, or None.
 
-    Exactly one declarator of one of `_DECLARATION_TYPES`, always initialized,
-    no qualifier — see `VariableDeclaration`. Matched on the MASK so a `=`
-    inside a string can never be the initializer's `=`; the initializer itself
-    is then read from the SOURCE by `_expression`. Anything else — `String
-    message;`, `static int n = 0;`, `int a = 1, b = 2;`, an initializer the
-    value layer cannot state — is None, and the caller carries it verbatim.
+    Exactly one declarator of one of `_DECLARATION_TYPES`, optionally
+    initialized, with the qualifiers `static`/`const` kept in the order they
+    are stored (`const static` is NOT reordered - it stays source). Matched on
+    the MASK so a `=` inside a string can never be the initializer's `=`; the
+    initializer itself is then read from the SOURCE by `_expression`. Anything
+    else - `int a = 1, b = 2;`, `volatile int n;`, a pointer, an initializer
+    the value layer cannot state - is None, and the caller carries it verbatim.
     """
-    match = re.fullmatch(
-        r"(String|int|bool)\s+([A-Za-z_]\w*)\s*=([^;]*);", mask[start:end].strip()
-    )
+    match = re.fullmatch(_DECLARATION_PATTERN, mask[start:end].strip())
+    if match is None:
+        return None
+    offset = start + (len(mask[start:end]) - len(mask[start:end].lstrip()))
+    qualifiers = tuple(match.group(1).split())
+    if qualifiers != tuple(q for q in DECLARATION_QUALIFIERS if q in qualifiers):
+        return None
+    type_name = " ".join(match.group(2).split())
+    value_type = _DECLARATION_TYPES[type_name]
+    initializer = None
+    if match.group(4) is not None:
+        initializer = _expression(
+            source[offset + match.start(4) : offset + match.end(4)], operations
+        )
+        if initializer is None:
+            return None
+    try:
+        return VariableDeclaration(
+            value_type=value_type,
+            name=match.group(3),
+            initializer=initializer,
+            text=source[start:end].strip(),
+            qualifiers=qualifiers,
+            type_name=None if type_name == DEFAULT_TYPE_NAMES[value_type] else type_name,
+        )
+    except SemanticModelError:
+        # A reserved name, a `const` with no initializer, or an initializer that
+        # does not fit the declared type (`int n = "x";`): source the IR must
+        # not claim to understand.
+        return None
+
+
+def _try_assignment(
+    source: str,
+    mask: str,
+    start: int,
+    end: int,
+    operations: SemanticOperationRegistry,
+) -> AssignmentStatement | None:
+    """`NAME = VALUE;` / `NAME += VALUE;` / `NAME -= VALUE;`, or None.
+
+    The operator is read as written and kept. A VALUE the value layer cannot
+    state (`static_cast<char>(payload[i])`, a ternary) makes the WHOLE statement
+    None, so it is carried verbatim - the target and operator are never kept
+    while the expression is dropped.
+    """
+    span = mask[start:end].strip()
+    match = re.fullmatch(_ASSIGNMENT_PATTERN, span)
     if match is None:
         return None
     offset = start + (len(mask[start:end]) - len(mask[start:end].lstrip()))
@@ -531,16 +871,64 @@ def _try_declaration(
     if value is None:
         return None
     try:
-        return VariableDeclaration(
-            value_type=_DECLARATION_TYPES[match.group(1)],
-            name=match.group(2),
-            initializer=value,
+        return AssignmentStatement(
+            target=match.group(1),
+            operator=match.group(2),
+            value=value,
             text=source[start:end].strip(),
         )
     except SemanticModelError:
-        # A reserved name, or an initializer that does not fit the declared
-        # type (`int n = "x";`): source the IR must not claim to understand.
         return None
+
+
+def _try_method_call(
+    source: str,
+    mask: str,
+    start: int,
+    end: int,
+    operations: SemanticOperationRegistry,
+) -> MethodCallStatement | None:
+    """`receiver.method(ARGUMENTS);` as a method call, or None.
+
+    Exactly one call and nothing after it. Every argument must be a value the
+    IR can state, otherwise the whole statement is carried verbatim.
+    """
+    terminator = _last_code(mask, start, end)
+    if terminator is None or mask[terminator] != ";":
+        return None
+    head = re.match(_METHOD_HEAD_PATTERN, mask[start:terminator])
+    if head is None:
+        return None
+    open_paren = start + head.end() - 1
+    close_paren = _matching_paren(mask, open_paren, terminator)
+    if close_paren is None or _next_code(mask, close_paren + 1, terminator) is not None:
+        return None
+    argument_texts = _argument_texts(source, mask, open_paren + 1, close_paren)
+    values = _argument_values(argument_texts, operations)
+    if values is None:
+        return None
+    try:
+        return MethodCallStatement(
+            receiver=head.group(1),
+            method_name=head.group(2),
+            arguments=values,
+            text=source[start:end].strip(),
+        )
+    except SemanticModelError:
+        return None
+
+
+def _argument_values(
+    argument_texts: list[str], operations: SemanticOperationRegistry
+) -> tuple[SemanticValue, ...] | None:
+    """Each argument's source as a value, in order - or None if any is not one."""
+    values: list[SemanticValue] = []
+    for argument_text in argument_texts:
+        value = _expression(argument_text, operations)
+        if value is None:
+            return None
+        values.append(value)
+    return tuple(values)
 
 
 # --- expressions: the value layer, read from source -------------------------
@@ -548,10 +936,18 @@ def _try_declaration(
 # A deliberately tiny recursive-descent reader over ONE expression's source
 # text — the grammar the value layer can state and nothing more:
 #
-#     comparison := sum [ ("==" | "!=" | "<=") sum ]
-#     sum        := postfix ( "+" postfix )*
+#     expression := or [ "?" expression ":" expression ]
+#     or         := and ( "||" and )*
+#     and        := comparison ( "&&" comparison )*
+#     comparison := sum [ ("==" | "!=" | "<=" | "<" | ">" | ">=") sum ]
+#     sum        := unary ( "+" unary )*
+#     unary      := "!" unary | postfix
 #     postfix    := primary ( "." METHOD "(" arguments ")" )*
-#     primary    := literal | NAME | String(TEXT) | "(" comparison ")"
+#     primary    := literal | NAME | NAME "(" arguments ")" | String(TEXT)
+#                   | "(" expression ")"
+#
+# Precedence follows C++ (`!` > `+` > comparison > `&&` > `||` > `?:`), with ONE
+# comparison per level: `a < b == c` is not stated, so it is not read.
 #
 # It lexes its own text rather than consulting `code_mask`, because the mask
 # blanks string literals and comments alike and an expression needs to tell
@@ -567,7 +963,7 @@ _TOKEN_PATTERN = (
     r'|(?P<string>"(?:[^"\\\n]|\\.)*")'
     r"|(?P<number>(?:\d+\.\d*|\.\d+|\d+))"
     r"|(?P<name>[A-Za-z_]\w*)"
-    r"|(?P<punct>==|!=|<=|[-+().,])"
+    r"|(?P<punct>==|!=|<=|>=|&&|\|\||[-+().,?:!<>])"
 )
 
 
@@ -592,7 +988,7 @@ def _expression(text: str, operations: SemanticOperationRegistry) -> SemanticVal
         return None
     reader = _ExpressionReader(tokens, operations)
     try:
-        value = reader.comparison()
+        value = reader.expression()
     except (_NotAnExpression, SemanticModelError):
         return None
     return value if reader.done else None
@@ -627,6 +1023,26 @@ class _ExpressionReader:
         if not self._take(token):
             raise _NotAnExpression(token)
 
+    def expression(self) -> SemanticValue:
+        condition = self.logical_or()
+        if self._take("?"):
+            if_true = self.expression()
+            self._expect(":")
+            return TernaryValue(condition=condition, if_true=if_true, if_false=self.expression())
+        return condition
+
+    def logical_or(self) -> SemanticValue:
+        value = self.logical_and()
+        while self._take("||"):
+            value = LogicalValue(left=value, operator="||", right=self.logical_and())
+        return value
+
+    def logical_and(self) -> SemanticValue:
+        value = self.comparison()
+        while self._take("&&"):
+            value = LogicalValue(left=value, operator="&&", right=self.comparison())
+        return value
+
     def comparison(self) -> SemanticValue:
         left = self.sum()
         current = self._peek()
@@ -636,10 +1052,15 @@ class _ExpressionReader:
         return left
 
     def sum(self) -> SemanticValue:
-        value = self.postfix()
+        value = self.unary()
         while self._take("+"):
-            value = ArithmeticValue(left=value, operator="+", right=self.postfix())
+            value = ArithmeticValue(left=value, operator="+", right=self.unary())
         return value
+
+    def unary(self) -> SemanticValue:
+        if self._take("!"):
+            return NotValue(operand=self.unary())
+        return self.postfix()
 
     def postfix(self) -> SemanticValue:
         value = self.primary()
@@ -666,9 +1087,9 @@ class _ExpressionReader:
     def _arguments(self) -> list[SemanticValue]:
         if self._take(")"):
             return []
-        values = [self.comparison()]
+        values = [self.expression()]
         while self._take(","):
-            values.append(self.comparison())
+            values.append(self.expression())
         self._expect(")")
         return values
 
@@ -678,7 +1099,7 @@ class _ExpressionReader:
             raise _NotAnExpression("end")
         kind, token = current
         if self._take("("):
-            value = self.comparison()
+            value = self.expression()
             self._expect(")")
             return value
         if self._take("-"):
@@ -704,7 +1125,11 @@ class _ExpressionReader:
                 return LiteralValue(value=_unescape(literal[1][1:-1]), value_type=SemanticType.TEXT)
             following = self._peek()
             if following is not None and following == ("punct", "("):
-                raise _NotAnExpression(token)  # a bare function call
+                # A function call used as a value (`millis()`); its arguments
+                # are values themselves. Control-flow words are refused by
+                # `CallValue`, which `_expression` reports as "not an expression".
+                self._position += 1
+                return CallValue(function_name=token, arguments=tuple(self._arguments()))
             value = _value(token)
             if value is None:
                 raise _NotAnExpression(token)

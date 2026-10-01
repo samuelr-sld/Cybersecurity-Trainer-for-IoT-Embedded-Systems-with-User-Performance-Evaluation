@@ -54,6 +54,29 @@ Host, port, and allowed origins can be overridden with the `TRAINER_HOST`,
 `TRAINER_PORT`, and `TRAINER_ALLOWED_ORIGINS` environment variables (see
 `app/config.py`).
 
+### Lab environment (Panel 1 live MQTT / Build validation)
+
+Hack Mode's live attack path and Build Mode's remediation validation read their
+credentials from the **process environment** (`TRAINER_LAB_*`, see
+`app/config.py::lab_secret`). On import, `app/config.py` loads the optional,
+gitignored `backend/lab.env.local` (located relative to `config.py`, not the
+working directory) into the process environment, so a plain
+`uvicorn app.main:app --reload --host 127.0.0.1 --port 8000` just works. Copy
+`lab.env.example` to `lab.env.local` and fill it in. The required names are
+`TRAINER_LAB_PANEL1_GUEST_PASSWORD`, `TRAINER_LAB_PANEL1_VALIDATOR_PASSWORD`
+and `TRAINER_LAB_PANEL1_COMMAND_TOKEN`. If any is missing, validation stops
+with "this deployment has not provisioned the training-lab credentials" rather
+than running.
+
+Loader rules: `KEY=value` lines only (blank lines and `#` comments ignored);
+**only `TRAINER_LAB_*` keys are imported** (anything else in the file, such as
+`TRAINER_HACK_LIVE_MQTT`, is ignored - set those in the real environment); a
+variable already set in the process environment **wins** over the file; a
+missing file is fine; nothing is logged. `TRAINER_LAB_ENV_PATH` points at a
+different file, or `""` disables loading (the test suite does this).
+
+Never commit real values; the token is deliberately not in any tracked file.
+
 ## Health endpoint
 
 `GET http://127.0.0.1:8000/health`

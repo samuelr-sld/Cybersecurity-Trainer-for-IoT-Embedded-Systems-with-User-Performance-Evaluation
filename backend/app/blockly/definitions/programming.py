@@ -16,12 +16,28 @@ _AB_BOOL = (("A", BOOLEAN), ("B", BOOLEAN))
 _AB_ANY = (("A", ANY), ("B", ANY))
 _AB_NUM = (("A", NUMBER), ("B", NUMBER))
 
+#: A call block's argument sockets, in order. Fixed rather than a mutator: a
+#: Blockly value input is either there or not, so a call with N arguments fills
+#: `ARG0..ARG{N-1}` and leaves the rest empty. A call with more arguments than
+#: this cannot be drawn and stays visible, preserved source (P2). The bridge's
+#: `structural.CALL_ARGUMENT_INPUTS` restates the same names - pinned by a test.
+_CALL_ARGS = (("ARG0", ANY), ("ARG1", ANY), ("ARG2", ANY), ("ARG3", ANY))
+
 LOGIC = (
-    _logic.value("logic.true", "true", "The boolean literal true.", BOOLEAN),
-    _logic.value("logic.false", "false", "The boolean literal false.", BOOLEAN),
-    _logic.expression("logic.not", "not", "Logical negation.", BOOLEAN, (("VALUE", BOOLEAN),)),
-    _logic.expression("logic.and", "and", "True when both operands are true.", BOOLEAN, _AB_BOOL),
-    _logic.expression("logic.or", "or", "True when either operand is true.", BOOLEAN, _AB_BOOL),
+    _logic.value("logic.true", "true", "The boolean literal true.", BOOLEAN, implemented_as="logic_true"),
+    _logic.value("logic.false", "false", "The boolean literal false.", BOOLEAN, implemented_as="logic_false"),
+    _logic.expression(
+        "logic.not", "not", "Logical negation.", BOOLEAN, (("VALUE", BOOLEAN),),
+        implemented_as="logic_not",
+    ),
+    _logic.expression(
+        "logic.and", "and", "True when both operands are true.", BOOLEAN, _AB_BOOL,
+        implemented_as="logic_and",
+    ),
+    _logic.expression(
+        "logic.or", "or", "True when either operand is true.", BOOLEAN, _AB_BOOL,
+        implemented_as="logic_or",
+    ),
     # --- Panel 1 token-parsing vocabulary ------------------------------------
     # The generic comparison/`if` blocks below are IMPLEMENTED (not new
     # dedicated ones) because the Blockly bridge now models nested VALUE
@@ -37,17 +53,31 @@ LOGIC = (
         "logic.not_equal", "not equal", "True when the operands differ.", BOOLEAN, _AB_ANY,
         implemented_as="logic_not_equal",
     ),
-    _logic.expression("logic.greater", "greater than", "True when A is greater than B.", BOOLEAN, _AB_NUM),
-    _logic.expression("logic.less", "less than", "True when A is less than B.", BOOLEAN, _AB_NUM),
     _logic.expression(
-        "logic.greater_equal", "greater or equal", "True when A is greater than or equal to B.", BOOLEAN, _AB_NUM
+        "logic.greater", "greater than", "True when A is greater than B.", BOOLEAN, _AB_NUM,
+        implemented_as="logic_greater",
+    ),
+    _logic.expression(
+        "logic.less", "less than", "True when A is less than B.", BOOLEAN, _AB_NUM,
+        implemented_as="logic_less",
+    ),
+    _logic.expression(
+        "logic.greater_equal", "greater or equal", "True when A is greater than or equal to B.", BOOLEAN, _AB_NUM,
+        implemented_as="logic_greater_equal",
     ),
     _logic.expression(
         "logic.less_equal", "less or equal", "True when A is less than or equal to B.", BOOLEAN, _AB_NUM,
         implemented_as="logic_less_equal",
     ),
+    # DO is the primary body; ELSE_IF holds ONE nested `if` (the next link of
+    # the chain) and ELSE the final body. A block continues with else-if OR
+    # else, never both. `logic.if_else` / `logic.else_if` below stay CATALOGED:
+    # one block covers every chain, so they are superseded rather than built.
     _logic.statement(
-        "logic.if", "if", "Runs a body when a condition is true.", (("CONDITION", BOOLEAN), ("DO", BODY)),
+        "logic.if",
+        "if",
+        "Runs a body when a condition is true, optionally followed by else-if / else.",
+        (("CONDITION", BOOLEAN), ("DO", BODY), ("ELSE_IF", BODY), ("ELSE", BODY)),
         implemented_as="logic_if",
     ),
     _logic.statement(
@@ -70,6 +100,7 @@ LOGIC = (
         "Chooses between two values based on a condition.",
         ANY,
         (("CONDITION", BOOLEAN), ("THEN", ANY), ("ELSE", ANY)),
+        implemented_as="logic_ternary",
     ),
     # --- no-device/Blockly-integration correction ---------------------------
     # A deliberately narrow, IMPLEMENTED addition, distinct from the generic
@@ -100,11 +131,15 @@ LOOPS = (
         "Runs a body once, then repeats while a condition is true.",
         (("DO", BODY), ("CONDITION", BOOLEAN)),
     ),
+    # A C-style `for`: INIT and STEP each hold ONE statement (a declaration or
+    # assignment; an assignment or ++/--), CONDITION is a boolean value, DO the
+    # body. Any of the three header parts may be empty.
     _loops.statement(
         "loops.for",
         "for",
-        "Counts a variable from a start to an end value by a step.",
-        (("VARIABLE", TEXT), ("FROM", NUMBER), ("TO", NUMBER), ("STEP", NUMBER), ("DO", BODY)),
+        "Runs an initialization once, then repeats a body and a step while a condition holds.",
+        (("DO", BODY), ("INIT", BODY), ("CONDITION", BOOLEAN), ("STEP", BODY)),
+        implemented_as="for_loop",
     ),
     _loops.statement(
         "loops.for_each",
@@ -192,22 +227,36 @@ TEXTS = (
 )
 
 VARIABLES = (
-    # TYPE is the declared type (text / number / boolean); INITIAL is required
-    # by the implemented block, since the IR's `VariableDeclaration` always
-    # initializes. `variables.get` reads a local, a parameter or a constant.
+    # QUALIFIER (none / static / const / static const) and TYPE (a C++ type
+    # spelling token) are dropdown fields; INITIAL is OPTIONAL - an empty
+    # socket declares the variable without a value (`String message;`).
+    # `variables.get` reads a local, a parameter or a constant.
     _variables.statement(
         "variables.declare",
         "declare variable",
-        "Declares a local variable of a type, with an initial value.",
-        (("TYPE", TEXT), ("NAME", TEXT), ("INITIAL", ANY)),
+        "Declares a variable of a type, optionally static/const and optionally with an initial value.",
+        (("QUALIFIER", TEXT), ("TYPE", TEXT), ("NAME", TEXT), ("INITIAL", ANY)),
         implemented_as="variables_declare",
     ),
     _variables.value(
         "variables.get", "get variable", "Reads a variable.", ANY, inputs=(("NAME", TEXT),),
         implemented_as="variables_get",
     ),
+    # OPERATOR is `=`, `+=` or `-=` and is kept as chosen - `x += v` is never `x = v`.
     _variables.statement(
-        "variables.set", "set variable", "Assigns a value to a variable.", (("NAME", TEXT), ("VALUE", ANY))
+        "variables.set",
+        "set variable",
+        "Assigns a value to a variable, or adds to / subtracts from it.",
+        (("NAME", TEXT), ("OPERATOR", TEXT), ("VALUE", ANY)),
+        implemented_as="variables_set",
+    ),
+    # Postfix `x++;` / `x--;` - what a `for` loop's step almost always is.
+    _variables.statement(
+        "variables.update",
+        "step variable",
+        "Adds one to (++) or subtracts one from (--) a variable.",
+        (("NAME", TEXT), ("OPERATOR", TEXT)),
+        implemented_as="variables_update",
     ),
     _variables.statement(
         "variables.increment", "increment", "Adds an amount to a numeric variable.", (("NAME", TEXT), ("BY", NUMBER))
@@ -232,8 +281,9 @@ FUNCTIONS = (
         "call function (value)",
         "Calls a function and uses its return value.",
         ANY,
-        (("NAME", TEXT), ("ARGUMENTS", LIST)),
+        (("NAME", TEXT), *_CALL_ARGS),
         op="functions.call",
+        implemented_as="call_function_value",
     ),
     _functions.value("functions.parameter", "parameter", "Reads a parameter inside a function.", ANY, inputs=(("NAME", TEXT),)),
     _functions.statement("functions.return", "return", "Returns a value from a function.", (("VALUE", ANY),)),
@@ -267,9 +317,19 @@ FUNCTIONS = (
     _functions.statement(
         "functions.call_existing",
         "call function",
-        "Calls an existing, already-defined function with no arguments, for its effect.",
-        (("NAME", TEXT),),
+        "Calls an existing, already-defined function, with any arguments, for its effect.",
+        (("NAME", TEXT), *_CALL_ARGS),
         implemented_as="call_existing_function",
+    ),
+    # P2: a call on an OBJECT - `message.trim();`, `client.publish(A, B);`.
+    # Distinct from `functions.call_existing`, which names a function: the
+    # receiver is part of the meaning and would be lost if the two were merged.
+    _functions.statement(
+        "functions.call_method",
+        "call method",
+        "Calls a method on an object, with any arguments, for its effect.",
+        (("RECEIVER", TEXT), ("METHOD", TEXT), *_CALL_ARGS),
+        implemented_as="call_method",
     ),
 )
 

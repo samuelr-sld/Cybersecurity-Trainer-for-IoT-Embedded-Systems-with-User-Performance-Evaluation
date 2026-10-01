@@ -111,10 +111,14 @@ def test_nonsensical_resize_is_rejected(client: TestClient, payload: dict) -> No
 # --- 8: disconnect removes the session ------------------------------------
 
 
-def test_disconnect_removes_session(client: TestClient) -> None:
+def test_disconnect_detaches_and_explicit_end_removes_session(client: TestClient) -> None:
     with client.websocket_connect("/ws/hack") as ws:
         session_id = _open_session(ws)
-    # The endpoint's finally-block runs as the connection closes.
+    # A closing socket is a reconnection event, not the end of the session
+    # (tests/test_session_resume.py): it stays, detached, for its grace period.
+    assert session_manager._sessions.get(session_id) is not None
+    # Only an explicit end (or the grace period expiring) removes it.
+    session_manager.end(session_id)
     assert session_manager._sessions.get(session_id) is None
 
 

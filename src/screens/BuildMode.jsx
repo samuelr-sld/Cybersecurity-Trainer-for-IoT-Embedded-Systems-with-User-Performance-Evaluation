@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader'
 import BlocklyWorkspace from '../components/BlocklyWorkspace'
+import CppCode from '../components/CppCode'
+import { restoreFromSessionFrame } from '../build/sessionRestore'
 import useBuildSocket, { CONNECTION_STATUS } from '../hooks/useBuildSocket'
 // Shared with Hack Mode rather than kept private here: both screens render
 // the SAME backend device state (one `device_monitor` per process, see
@@ -63,16 +65,6 @@ const BUILD_STATUS_LABEL = {
   no_device: 'NO DEVICE',
   succeeded: 'SUCCEEDED',
   failed: 'FAILED',
-}
-
-// Backend `InteractionPolicy` values (backend/app/build/policy.py) -> the
-// section list's badge copy. LOCKED and EXPLORE are both read-only
-// (`RegionKind.LOCKED` underneath); EDITABLE is the only one a student may
-// write to. A section this map doesn't know falls back to its raw value.
-const POLICY_LABEL = {
-  locked: 'LOCKED',
-  explore: 'EXPLORE',
-  editable: 'EDITABLE',
 }
 
 // The General Terminal's header suffix for whichever operation it is
@@ -231,6 +223,14 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
   const [selectedSectionId, setSelectedSectionId] = useState(null)
   const [sectionData, setSectionData] = useState(null)
   const [sectionLoading, setSectionLoading] = useState(false)
+  // BLOCKLY WORKSPACE TABS — presentation only, layered on top of the state
+  // above. `selectedSectionId` still names the one EDITABLE section actually
+  // open (unchanged); this just remembers which editable sections have been
+  // opened during the current file so their tabs stay in the strip (closable
+  // via ×) after the student switches back to CODE or to a different
+  // section. Reset whenever the active file changes or a new session starts,
+  // since a tab's region id only means something within its own file.
+  const [openWorkspaceTabs, setOpenWorkspaceTabs] = useState([])
   // THE LOCAL DRAFT AND THE EDIT -> COMPILE -> FLASH CHAIN. There is no
   // student-facing save: a section's edits live in the chain driver
   // (src/build/compileChain.js `createChainDriver`) until COMPILE or FLASH
@@ -264,7 +264,7 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
   // no-restore-original requirement calls for — never something this
   // frontend invents on its own, and never done automatically to get a
   // security-region edit past the backend's ownership rule.
-  const [sectionPreserved, setSectionPreserved] = useState([])
+  const [, setSectionPreserved] = useState([])
   const [legacyTextOpen, setLegacyTextOpen] = useState(false)
   const [legacyDraft, setLegacyDraft] = useState(null)
 
@@ -291,6 +291,8 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
   // screen until a different operation starts (`currentOp` below folds this
   // together with the three live "is running" flags).
   const [activeOp, setActiveOp] = useState(null)
+  // The General Terminal is collapsed to its header bar until clicked.
+  const [terminalOpen, setTerminalOpen] = useState(false)
 
   // The moment THIS Build Mode session started, for Activity Log elapsed
   // timestamps (see `formatElapsedSince`) — set in `onSession` below (never
@@ -334,13 +336,16 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
     sendValidate,
   } = useBuildSocket({
     participantId,
-    onSession: () => {
-      setEvents([])
+    onSession: (message) => {
+      // A resumed session brings its own log and age; a new one brings
+      // neither, so it restarts at 00:00:00 exactly as before.
+      const restored = restoreFromSessionFrame(message, sessionClockNow())
+      setEvents(restored.events)
       setProtocolError('')
       setChainNotice('')
       setValidationPending(false)
-      setActiveOp(null)
-      sessionStartRef.current = sessionClockNow()
+      setActiveOp(restored.activeOp)
+      sessionStartRef.current = restored.startMs
       setShowSuccessToast(false)
       setFailureToastDismissed(false)
       if (successToastTimeoutRef.current) {
@@ -354,6 +359,7 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
       setSectionPreserved([])
       setLegacyTextOpen(false)
       setLegacyDraft(null)
+      setOpenWorkspaceTabs([])
     },
     onState: (data) => {
       setState(data)
@@ -461,6 +467,13 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
   const fileNames = Object.keys(files)
   const resolvedActiveFile = activeFile && files[activeFile] ? activeFile : fileNames[0] || null
   const activeSegments = files[resolvedActiveFile]?.segments || []
+  // The workspace tab bar's active pane, derived from the same
+  // `selectedSectionId` the CODE view's in-place highlight already used —
+  // only an EDITABLE section ever swaps the editor over to its own
+  // workspace pane; a selected LOCKED/EXPLORE section stays a plain
+  // highlight inside the stacked CODE view (see `openSection`).
+  const selectedSegment = activeSegments.find((s) => s.region_id === selectedSectionId) || null
+  const workspaceActive = Boolean(selectedSegment) && selectedSegment.policy === 'editable'
   const sectionDirty = draftVersion !== null
   const busy = chainBusy(chain)
   const flashing = chain.phase === CHAIN_PHASE.FLASHING
@@ -718,11 +731,28 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
     return false
   }
 
+  // Shared by every path that leaves whatever section is currently open
+  // (switching files, returning to CODE, closing the active workspace tab) —
+  // clears the section baseline the same way each of those already did
+  // individually. Never called while a dirty/busy section is open; callers
+  // gate that with `canLeaveSection()` first.
+  function resetOpenSection() {
+    setSelectedSectionId(null)
+    setSectionData(null)
+    syncChain(driver.loadBaseline(null))
+    setSectionPreserved([])
+    setLegacyTextOpen(false)
+    setLegacyDraft(null)
+  }
+
   // A section IS the interaction surface (Phase B8 correction) — clicking
   // one opens it, whatever its policy. LOCKED/EXPLORE need no round trip
   // (their current text is already in `state.files`); only EDITABLE asks
   // the backend for a Blockly representation, since that answer also says
-  // whether the toolbox can draw this construct at all.
+  // whether the toolbox can draw this construct at all. An EDITABLE section
+  // also gets a closable tab in the workspace tab strip above the editor
+  // (`openWorkspaceTabs`) — LOCKED/EXPLORE sections stay plain in-place
+  // highlights in the CODE view and never get one.
   function openSection(regionId) {
     if (regionId === selectedSectionId) return
     const segment = activeSegments.find((s) => s.region_id === regionId)
@@ -738,7 +768,31 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
     if (segment.policy === 'editable') {
       setSectionLoading(true)
       sendSectionBlockly(resolvedActiveFile, regionId)
+      setOpenWorkspaceTabs((tabs) => (tabs.includes(regionId) ? tabs : [...tabs, regionId]))
     }
+  }
+
+  // The workspace tab strip's "Code" tab — returns to the full stacked
+  // source view without closing any other open tab.
+  function closeWorkspaceView() {
+    if (!canLeaveSection()) return
+    setChainNotice('')
+    resetOpenSection()
+  }
+
+  // Closing a tab via its × never silently discards an uncompiled edit: if
+  // it is the tab currently open, this goes through the exact same
+  // dirty/busy guard `closeWorkspaceView`/`openSection` do before anything
+  // is reset. Closing a background tab (not the active one) touches only
+  // the tab strip — its section holds no live draft, since only the active
+  // section's edits ever reach the chain driver.
+  function closeWorkspaceTab(regionId) {
+    if (regionId === selectedSectionId) {
+      if (!canLeaveSection()) return
+      setChainNotice('')
+      resetOpenSection()
+    }
+    setOpenWorkspaceTabs((tabs) => tabs.filter((id) => id !== regionId))
   }
 
   function switchFile(name) {
@@ -746,25 +800,14 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
     if (!canLeaveSection()) return
     setChainNotice('')
     setActiveFile(name)
-    setSelectedSectionId(null)
-    setSectionData(null)
-    syncChain(driver.loadBaseline(null))
-    setSectionPreserved([])
-    setLegacyTextOpen(false)
-    setLegacyDraft(null)
+    resetOpenSection()
+    setOpenWorkspaceTabs([])
   }
 
   // Blockly reported a change: the CURRENT serialized workspace becomes the
   // draft COMPILE will submit.
   function onBlocksChange(workspace) {
     syncChain(driver.edit({ workspace }))
-  }
-
-  // CLEAR is an edit like any other — it changes what COMPILE submits — so it
-  // produces a new draft version even when no block moved.
-  function clearPreserved() {
-    setSectionPreserved([])
-    syncChain(driver.edit({ preserved: [] }))
   }
 
   function openLegacyText(segment) {
@@ -939,23 +982,13 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
                   `openSection`/POLICY_LABEL (Phase B8's "the section IS the
                   interaction surface" still holds, it just has one surface
                   now instead of two). The file switcher that used to share
-                  this panel moved into the editor pane below. */}
-              <section className="panel">
-                <h3>BUILD STATUS</h3>
-                <ul className="checks">
-                  <li>
-                    Compile{' '}
-                    <span className="status-pill">{BUILD_STATUS_LABEL[state?.compile_status] || '—'}</span>
-                  </li>
-                  <li>
-                    Flash <span className="status-pill">{BUILD_STATUS_LABEL[state?.flash_status] || '—'}</span>
-                  </li>
-                  <li>
-                    Validation{' '}
-                    <span className="status-pill">{BUILD_STATUS_LABEL[state?.validation_status] || '—'}</span>
-                  </li>
-                </ul>
-              </section>
+                  this panel moved into the editor pane below. The old
+                  BUILD STATUS panel (Compile/Flash/Validation NOT STARTED
+                  pills) was removed the same way: `compile_status`/
+                  `flash_status`/`validation_status` still drive button
+                  enablement and the General Terminal below exactly as
+                  before — only this standing, mostly-empty status readout
+                  is gone. */}
               {/* The Build/Development action controls, in the existing
                   left-hand information column. There is deliberately no
                   SAVE control: COMPILE is the point at which an edit is
@@ -1003,158 +1036,176 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
           )}
         </aside>
         <section className="editor">
-          <div className="code-view">
-            {/* The file switcher, relocated here from the removed FIRMWARE
-                SECTIONS panel — same `switchFile` call and `.file-list`
-                markup, unchanged, just no longer sharing a panel with the
-                section/policy list below. */}
-            {fileNames.length > 0 && (
-              <ul className="file-list">
-                {fileNames.map((name) => (
-                  <li key={name}>
-                    <button
-                      type="button"
-                      className={name === resolvedActiveFile ? 'active' : ''}
-                      onClick={() => switchFile(name)}
-                    >
-                      {name}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {/* THE COMPLETE .ino IS THE PRIMARY WORKSPACE. Every discovered
-                section renders here, in document order, all the time — a
-                student reads the whole firmware for context and clicks a
-                section directly in place to open it. LOCKED/EXPLORE text
-                (and any EDITABLE section that isn't the one currently open)
-                is always the plain, current text from `state.files`; only
-                the OPEN EDITABLE section swaps its own body for the editing
-                surface below, so the rest of the file never disappears
-                around it. */}
-            <p className="file-active">{resolvedActiveFile || 'connecting…'}</p>
-            {activeSegments.length === 0 ? (
-              <p className="muted-note">Loading firmware…</p>
-            ) : (
-              activeSegments.map((segment) => {
-                const isSelected = segment.region_id === selectedSectionId
-                const isOpenEditable = isSelected && segment.policy === 'editable'
-                const noBlocksYet = isOpenEditable && sectionData && !sectionLoading && !sectionData.representable
-                return (
-                  <div
-                    key={segment.region_id}
-                    className={`code-section ${isSelected ? 'selected' : ''}`}
+          {/* The Blockly workspace tab strip — the existing single-open-
+              section model (`selectedSectionId`/`sectionData`, unchanged
+              above) presented as browser-style tabs: CODE is always the
+              first, non-closable tab and returns to the full stacked
+              source view; each EDITABLE section a student has opened gets
+              its own closable tab next to it. Only ever shown once at
+              least one section has been opened, so an untouched file stays
+              exactly as clean as the CODE view alone. */}
+          {openWorkspaceTabs.length > 0 && (
+            <div className="workspace-tabs" role="tablist" aria-label="Editor view">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!workspaceActive}
+                className={!workspaceActive ? 'active' : ''}
+                onClick={closeWorkspaceView}
+              >
+                Code
+              </button>
+              {openWorkspaceTabs.map((id) => (
+                <span
+                  key={id}
+                  className={`workspace-tab ${id === selectedSectionId && workspaceActive ? 'active' : ''}`}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={id === selectedSectionId && workspaceActive}
+                    className="workspace-tab-label"
+                    onClick={() => openSection(id)}
                   >
-                    <button
-                      type="button"
-                      className={`section-header ${isSelected ? 'active' : ''}`}
-                      onClick={() => openSection(segment.region_id)}
-                    >
-                      <span className={`policy-badge ${segment.policy}`}>
-                        {POLICY_LABEL[segment.policy] || segment.policy}
-                      </span>
-                      {segment.region_id}
-                      {noBlocksYet && <em>the toolbox has no blocks for this construct yet</em>}
-                    </button>
-                    {!isOpenEditable ? (
-                      // LOCKED, EXPLORE, or an EDITABLE section that is not
-                      // the one currently open — no round trip needed, this
-                      // text is already current.
-                      <pre className="code-segment locked">{segment.text}</pre>
-                    ) : sectionLoading || !sectionData ? (
-                      <p className="muted-note">Loading section…</p>
-                    ) : sectionData.representable ? (
-                      // THE INTENDED EDITING PATH. Blockly is the source of
-                      // truth for this section — the generated C++ is an
-                      // output of it, never something typed here.
-                      // `key={selectedSectionId}` remounts the canvas (and
-                      // reloads `sectionData.workspace`) whenever the
-                      // student opens a different section; see
-                      // BlocklyWorkspace.jsx.
-                      <>
-                        <div className="blockly-panel">
-                          <BlocklyWorkspace
-                            key={selectedSectionId}
-                            initialWorkspaceState={sectionData.workspace}
-                            onWorkspaceChange={onBlocksChange}
-                            apiRef={blocklyApiRef}
-                          />
-                        </div>
-                        {sectionPreserved.length > 0 && (
-                          <div className="preserved-panel">
-                            <div className="preserved-header">
-                              <h4>NOT YET BLOCK-EDITABLE</h4>
-                              <button
-                                type="button"
-                                className="btn-outline small"
-                                onClick={clearPreserved}
-                              >
-                                CLEAR
-                              </button>
-                            </div>
-                            <p className="muted-note">
-                              The toolbox cannot draw this code as blocks yet. It stays part of
-                              this section — untouched by anything you build above — unless you
-                              clear it.
-                            </p>
-                            {sectionPreserved.map((fragment, i) => (
-                              <pre key={i} className="code-segment locked small">
-                                {fragment.text}
-                              </pre>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      // Understood by the backend as EDITABLE, but the
-                      // toolbox has no vocabulary for this construct yet —
-                      // refused as a block edit, never faked. The legacy
-                      // raw-text path stays available so the section is
-                      // still completable meanwhile; it is not offered for
-                      // any section the toolbox CAN draw.
-                      <>
-                        {!legacyTextOpen ? (
-                          <>
-                            <pre className="code-segment locked">{segment.text}</pre>
-                            <button
-                              type="button"
-                              className="btn-outline"
-                              onClick={() => openLegacyText(segment)}
-                            >
-                              EDIT AS TEXT (LEGACY)
-                            </button>
-                          </>
-                        ) : (
-                          <textarea
-                            className="code-editor-full"
-                            spellCheck={false}
-                            value={legacyDraft ?? ''}
-                            onChange={(e) => onLegacyTextChange(e.target.value)}
-                          />
-                        )}
-                      </>
-                    )}
+                    {id}
+                  </button>
+                  <button
+                    type="button"
+                    className="workspace-tab-close"
+                    aria-label={`Close ${id} workspace`}
+                    onClick={() => closeWorkspaceTab(id)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {workspaceActive ? (
+            // THE OPEN EDITABLE SECTION'S OWN WORKSPACE TAB. Replaces the
+            // stacked source view entirely while open — only the active
+            // tab's workspace is ever mounted — and the CODE tab above
+            // returns to it unchanged.
+            <div className="code-workspace">
+              {sectionLoading || !sectionData ? (
+                <p className="muted-note">Loading section…</p>
+              ) : sectionData.representable ? (
+                // THE INTENDED EDITING PATH. Blockly is the source of
+                // truth for this section — the generated C++ is an output
+                // of it, never something typed here. `key={selectedSectionId}`
+                // remounts the canvas (and reloads `sectionData.workspace`)
+                // whenever the student opens a different section; see
+                // BlocklyWorkspace.jsx.
+                <>
+                  <div className="blockly-panel">
+                    <BlocklyWorkspace
+                      key={selectedSectionId}
+                      initialWorkspaceState={sectionData.workspace}
+                      onWorkspaceChange={onBlocksChange}
+                      apiRef={blocklyApiRef}
+                    />
                   </div>
-                )
-              })
-            )}
-          </div>
+                </>
+              ) : (
+                // Understood by the backend as EDITABLE, but the toolbox
+                // has no vocabulary for this construct yet — refused as a
+                // block edit, never faked. The legacy raw-text path stays
+                // available so the section is still completable meanwhile;
+                // it is not offered for any section the toolbox CAN draw.
+                <>
+                  {!legacyTextOpen ? (
+                    <>
+                      <CppCode code={selectedSegment.text} className="code-segment locked" />
+                      <button type="button" className="btn-outline" onClick={() => openLegacyText(selectedSegment)}>
+                        EDIT AS TEXT (LEGACY)
+                      </button>
+                    </>
+                  ) : (
+                    <textarea
+                      className="code-editor-full"
+                      spellCheck={false}
+                      value={legacyDraft ?? ''}
+                      onChange={(e) => onLegacyTextChange(e.target.value)}
+                    />
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="code-view">
+              {/* The file switcher, relocated here from the removed FIRMWARE
+                  SECTIONS panel — same `switchFile` call and `.file-list`
+                  markup, unchanged, just no longer sharing a panel with the
+                  section/policy list below. */}
+              {fileNames.length > 0 && (
+                <ul className="file-list">
+                  {fileNames.map((name) => (
+                    <li key={name}>
+                      <button
+                        type="button"
+                        className={name === resolvedActiveFile ? 'active' : ''}
+                        onClick={() => switchFile(name)}
+                      >
+                        {name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {/* THE COMPLETE .ino IS THE PRIMARY WORKSPACE. Every discovered
+                  section renders here, in document order, all the time — a
+                  student reads the whole firmware for context and clicks a
+                  section directly in place to open its workspace tab (an
+                  EDITABLE one) or just highlight it in place (LOCKED/
+                  EXPLORE). Text is always the plain, current text from
+                  `state.files` — the open EDITABLE section's live editing
+                  surface now lives in its own tab pane above, not inline
+                  here, so the rest of the file never disappears around
+                  it. */}
+              <p className="file-active">{resolvedActiveFile || 'connecting…'}</p>
+              {activeSegments.length === 0 ? (
+                <p className="muted-note">Loading firmware…</p>
+              ) : (
+                activeSegments.map((segment) => {
+                  const isSelected = segment.region_id === selectedSectionId
+                  return (
+                    <div
+                      key={segment.region_id}
+                      className={`code-section ${segment.policy} ${isSelected ? 'selected' : ''}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open ${segment.region_id}`}
+                      onClick={() => openSection(segment.region_id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          openSection(segment.region_id)
+                        }
+                      }}
+                    >
+                      <CppCode code={segment.text} className="code-segment locked" />
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          )}
           {/* Every action button (COMPILE/FLASH/validation/security test)
               lives in the left-hand BUILD ACTIONS panel — see above. This bar
               is the workspace's submission-state readout, plus why the last
               COMPILE/FLASH chain stopped short, if it did. */}
-          <div className="console">
-            <div className={`console-out ${protocolError ? 'warn' : ''}`}>
-              {protocolError
-                ? `✗ ${protocolError}`
-                : sectionDirty
-                  ? '● edits not compiled yet — COMPILE submits and builds them'
-                  : state?.dirty
-                    ? '● firmware compiled from your edits — differs from the original firmware'
-                    : 'Firmware matches the original firmware.'}
+          {(protocolError || sectionDirty || chainNotice) && (
+            <div className="console">
+              {(protocolError || sectionDirty) && (
+                <div className={`console-out ${protocolError ? 'warn' : ''}`}>
+                  {protocolError
+                    ? `✗ ${protocolError}`
+                    : '● edits not compiled yet — COMPILE submits and builds them'}
+                </div>
+              )}
+              {chainNotice && <div className="console-out warn">{chainNotice}</div>}
             </div>
-            {chainNotice && <div className="console-out warn">{chainNotice}</div>}
-          </div>
+          )}
           {/* GENERAL TERMINAL — the former separate Flash Terminal and
               Validation Terminal (plus compile output, which previously had
               no inline home at all) merged into one compact, bounded,
@@ -1167,11 +1218,18 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
               compile/flash/validation text builders — only the presentation
               is combined. */}
           <div className={`flash-terminal ${generalTerminalBannerStatus}`}>
-            <div className="flash-terminal-header">
-              <span>GENERAL TERMINAL{currentOp ? ` — ${GENERAL_TERMINAL_LABEL[currentOp]}` : ''}</span>
+            <button
+              type="button"
+              className="flash-terminal-header flash-terminal-toggle"
+              aria-expanded={terminalOpen}
+              onClick={() => setTerminalOpen((open) => !open)}
+            >
+              <span>
+                {terminalOpen ? '▼' : '▲'} GENERAL TERMINAL{currentOp ? ` — ${GENERAL_TERMINAL_LABEL[currentOp]}` : ''}
+              </span>
               <span className="status-pill">{generalTerminalStatusText}</span>
-            </div>
-            <pre className="flash-terminal-body">{generalTerminalText}</pre>
+            </button>
+            {terminalOpen && <pre className="flash-terminal-body">{generalTerminalText}</pre>}
           </div>
         </section>
         <aside className="side-col">

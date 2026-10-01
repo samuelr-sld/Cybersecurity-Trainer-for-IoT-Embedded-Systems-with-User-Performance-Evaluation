@@ -344,8 +344,11 @@ def test_generated_b6_source_is_what_reaches_the_compiler() -> None:
         compiled = compiler.primary_source
         assert "delay(4321);" in compiled
         assert compiled == workspace.full_source(path)
-        # And it is genuinely B6's output, not a patched copy of the original.
-        assert compiled == source_for_program(workspace.program(path))
+        # And it says exactly the submitted program: B6-generated, not a patched
+        # copy of the original. (Layout of UNTOUCHED sections is deliberately the
+        # original's, not B6's - see tests/test_build_format_preservation.py - so
+        # equality is checked on the program the text expresses.)
+        assert source_for_program(program_for_source(compiled)) == source_for_program(program)
 
     run(scenario())
 
@@ -1231,6 +1234,7 @@ def test_the_program_source_seam_is_pure() -> None:
             imported.add(node.module)
     assert imported == {
         "__future__",
+        "dataclasses",
         "app.build.discovery",
         "app.build.document_project",
         "app.build.models",

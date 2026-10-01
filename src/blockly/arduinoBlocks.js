@@ -55,7 +55,53 @@ const DECLARATION_TYPES = [
   ['String', 'text'],
   ['int', 'number'],
   ['bool', 'boolean'],
+  ['unsigned long', 'unsigned_long'],
+  ['unsigned int', 'unsigned_int'],
+  ['long', 'long'],
+  ['float', 'float'],
+  ['double', 'double'],
+  ['byte', 'byte'],
+  ['uint8_t', 'uint8_t'],
+  ['uint16_t', 'uint16_t'],
+  ['uint32_t', 'uint32_t'],
 ]
+
+// The QUALIFIER dropdown of `variables_declare`: what precedes the type in C++.
+const DECLARATION_QUALIFIERS = [
+  ['(no qualifier)', 'none'],
+  ['static', 'static'],
+  ['const', 'const'],
+  ['static const', 'static_const'],
+]
+
+// The operator of `variables_set`. Kept as chosen: `+=` is never `=`.
+const ASSIGNMENT_OPERATORS = [
+  ['=', '='],
+  ['+=', '+='],
+  ['-=', '-='],
+]
+
+// The operator of `variables_update`.
+const UPDATE_OPERATORS = [
+  ['++', '++'],
+  ['--', '--'],
+]
+
+// How many argument sockets a call block has (ARG0..ARG3). Restated from
+// backend/app/build/blockly_bridge/structural.py::CALL_ARGUMENT_INPUTS, which a
+// backend test pins against the catalog; a call with more arguments is shown as
+// read-only C++ instead.
+const CALL_ARGUMENT_COUNT = 4
+
+// Appends the ARG0..ARGn value sockets and the closing bracket to a call block.
+function appendCallArguments(block) {
+  for (let index = 0; index < CALL_ARGUMENT_COUNT; index += 1) {
+    const input = block.appendValueInput(`ARG${index}`)
+    if (index > 0) input.appendField(',')
+  }
+  block.appendDummyInput().appendField(')')
+  block.setInputsInline(true)
+}
 
 //: Block types this module defines. The toolbox is no longer built here: it
 //: comes from the master block catalog (`./catalog/`), which names these
@@ -78,6 +124,11 @@ export const ARDUINO_BLOCK_TYPES = [
   'call_existing_function',
   'if_equals',
   'variables_declare',
+  'variables_set',
+  'call_method',
+  'call_function_value',
+  'logic_true',
+  'logic_false',
   'variables_get',
   'text_literal',
   'text_index_of',
@@ -88,6 +139,15 @@ export const ARDUINO_BLOCK_TYPES = [
   'logic_equal',
   'logic_not_equal',
   'logic_less_equal',
+  'logic_less',
+  'logic_greater',
+  'logic_greater_equal',
+  'logic_and',
+  'logic_or',
+  'logic_not',
+  'logic_ternary',
+  'for_loop',
+  'variables_update',
   'logic_if',
   'return_void',
 ]
@@ -104,6 +164,53 @@ function binaryValueBlock(symbol, output, colour, tooltip) {
       this.setTooltip(tooltip)
     },
   }
+}
+
+// The parameters a signature description lists, keeping only well-formed
+// entries — the description is display data, so anything unexpected is
+// simply not drawn rather than trusted.
+function signatureParameters(signature) {
+  if (!signature || !Array.isArray(signature.parameters)) return []
+  return signature.parameters.filter(
+    (p) => p && typeof p.name === 'string' && p.name && typeof p.type === 'string' && p.type,
+  )
+}
+
+// Redraws function_implementation's read-only header from its signature
+// description: the declarator exactly as written, then one row per
+// parameter (`parameter  message : const String &`) so a student sees the
+// names a variable block can read. Plain labels only — no field here is
+// editable or serialized; the description itself round-trips through
+// save/loadExtraState. With no description: the original 'function body'.
+function renderSignatureHeader(block) {
+  for (const input of [...block.inputList]) {
+    if (input.name === 'HEADER' || input.name === 'PARAMS' || input.name.startsWith('PARAM_')) {
+      block.removeInput(input.name)
+    }
+  }
+  const signature = block.signatureState_
+  const rows = []
+  if (!signature) {
+    rows.push(block.appendDummyInput('HEADER').appendField('function body'))
+  } else {
+    rows.push(block.appendDummyInput('HEADER').appendField('function').appendField(signature.text))
+    if (Array.isArray(signature.parameters)) {
+      const parameters = signatureParameters(signature)
+      if (parameters.length === 0) {
+        rows.push(block.appendDummyInput('PARAMS').appendField('no parameters'))
+      }
+      parameters.forEach((parameter, index) => {
+        rows.push(
+          block
+            .appendDummyInput(`PARAM_${index}`)
+            .appendField('parameter')
+            .appendField(parameter.name)
+            .appendField(`: ${parameter.type}`),
+        )
+      })
+    }
+  }
+  for (const row of rows) block.moveInputBefore(row.name, 'BODY')
 }
 
 let registered = false
@@ -172,12 +279,12 @@ export function registerArduinoBlocks() {
     init() {
       this.appendDummyInput()
         .appendField('wait')
-        .appendField(new Blockly.FieldNumber(1000, 0), 'MS')
+        .appendField(new Blockly.FieldTextInput('1000'), 'MS')
         .appendField('ms')
       this.setPreviousStatement(true, null)
       this.setNextStatement(true, null)
       this.setColour(65)
-      this.setTooltip('delay(milliseconds);')
+      this.setTooltip('delay(milliseconds); - a number, or the name of a constant such as BUZZER_CHIRP_MS.')
     },
   }
 
@@ -187,19 +294,39 @@ export function registerArduinoBlocks() {
   // when it loads a section's `workspace` state (backend/app/build/
   // section_blockly.py). Its C++ signature (name, return type, parameters)
   // is fixed by the firmware and preserved server-side
-  // (`SemanticSection.signature`) — this block never shows or edits it, only
-  // the body. A "hat" block like arduino_setup/arduino_loop for the same
-  // reason: it anchors a stack, it does not chain into one.
+  // (`SemanticSection.signature`), which is what the generated C++ always
+  // uses. The block SHOWS it as a read-only header (P4.2): the backend sends a
+  // description in `extraState` (backend/app/build/blockly_bridge/
+  // signature_display.py), kept through save/load by save/loadExtraState and
+  // drawn with plain labels — nothing here can edit it, and the backend never
+  // reads it back. With no description the header is the plain 'function
+  // body' label it always was. A "hat" block like arduino_setup/arduino_loop
+  // for the same reason: it anchors a stack, it does not chain into one.
   Blockly.Blocks['function_implementation'] = {
     init() {
-      this.appendDummyInput().appendField('function body')
+      this.signatureState_ = null
+      this.appendDummyInput('HEADER').appendField('function body')
       this.appendStatementInput('BODY')
       this.setPreviousStatement(false)
       this.setNextStatement(false)
       this.setColour(290)
-      this.setTooltip(
-        'The body of this firmware function. Its name, return type and parameters are fixed by the firmware.',
-      )
+      this.setTooltip(() => {
+        const names = signatureParameters(this.signatureState_).map((p) => p.name)
+        return (
+          'The body of this firmware function. Its name, return type and parameters are fixed by the firmware' +
+          ' and cannot be changed here.' +
+          (names.length ? ` Read a parameter (${names.join(', ')}) with a variable block.` : '')
+        )
+      })
+    },
+    saveExtraState() {
+      return this.signatureState_ ? { signature: this.signatureState_ } : null
+    },
+    loadExtraState(state) {
+      const signature = state && state.signature
+      this.signatureState_ =
+        signature && typeof signature === 'object' && typeof signature.text === 'string' ? signature : null
+      renderSignatureHeader(this)
     },
   }
 
@@ -211,11 +338,77 @@ export function registerArduinoBlocks() {
       this.appendDummyInput()
         .appendField('call')
         .appendField(new Blockly.FieldTextInput('functionName'), 'NAME')
-        .appendField('()')
+        .appendField('(')
+      appendCallArguments(this)
       this.setPreviousStatement(true, null)
       this.setNextStatement(true, null)
       this.setColour(290)
-      this.setTooltip('Calls an existing function this firmware defines, with no arguments.')
+      this.setTooltip('Calls a function this firmware defines, passing the arguments in the sockets, in order.')
+    },
+  }
+
+  // A call on an OBJECT: `message.trim();`, `client.publish(A, B);`. The
+  // receiver is part of the meaning, so it is its own field.
+  Blockly.Blocks['call_method'] = {
+    init() {
+      this.appendDummyInput()
+        .appendField('call method')
+        .appendField(new Blockly.FieldTextInput('object'), 'RECEIVER')
+        .appendField('.')
+        .appendField(new Blockly.FieldTextInput('method'), 'METHOD')
+        .appendField('(')
+      appendCallArguments(this)
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(290)
+      this.setTooltip('Calls a method on an object, passing the arguments in the sockets, in order.')
+    },
+  }
+
+  // A call used as a value: `millis()`.
+  Blockly.Blocks['call_function_value'] = {
+    init() {
+      this.appendDummyInput()
+        .appendField('call')
+        .appendField(new Blockly.FieldTextInput('functionName'), 'NAME')
+        .appendField('(')
+      appendCallArguments(this)
+      this.setOutput(true, null)
+      this.setColour(290)
+      this.setTooltip('Calls a function and uses the value it returns.')
+    },
+  }
+
+  // Assignment: `x = v;` and `x += v;`. The operator is kept as chosen.
+  Blockly.Blocks['variables_set'] = {
+    init() {
+      this.appendValueInput('VALUE')
+        .appendField('set')
+        .appendField(new Blockly.FieldTextInput('name'), 'NAME')
+        .appendField(new Blockly.FieldDropdown(ASSIGNMENT_OPERATORS), 'OPERATOR')
+      this.setInputsInline(true)
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(330)
+      this.setTooltip('Stores a value in an existing variable, or adds to / subtracts from it.')
+    },
+  }
+
+  Blockly.Blocks['logic_true'] = {
+    init() {
+      this.appendDummyInput().appendField('true')
+      this.setOutput(true, null)
+      this.setColour(210)
+      this.setTooltip('The boolean value true.')
+    },
+  }
+
+  Blockly.Blocks['logic_false'] = {
+    init() {
+      this.appendDummyInput().appendField('false')
+      this.setOutput(true, null)
+      this.setColour(210)
+      this.setTooltip('The boolean value false.')
     },
   }
 
@@ -254,14 +447,16 @@ export function registerArduinoBlocks() {
     init() {
       this.appendDummyInput()
         .appendField('declare')
+        .appendField(new Blockly.FieldDropdown(DECLARATION_QUALIFIERS), 'QUALIFIER')
         .appendField(new Blockly.FieldDropdown(DECLARATION_TYPES), 'TYPE')
         .appendField(new Blockly.FieldTextInput('name'), 'NAME')
+      // Optional: an empty socket declares the variable without a value.
       this.appendValueInput('INITIAL').appendField('=')
       this.setInputsInline(true)
       this.setPreviousStatement(true, null)
       this.setNextStatement(true, null)
       this.setColour(330)
-      this.setTooltip('Declares a local variable of a type, with an initial value.')
+      this.setTooltip('Declares a variable of a type, optionally static or const, with an optional initial value.')
     },
   }
 
@@ -338,14 +533,110 @@ export function registerArduinoBlocks() {
     'True when A is less than or equal to B.',
   )
 
+  Blockly.Blocks['logic_greater'] = binaryValueBlock('>', 'Boolean', 30, 'True when A is greater than B.')
+  Blockly.Blocks['logic_less'] = binaryValueBlock('<', 'Boolean', 30, 'True when A is less than B.')
+  Blockly.Blocks['logic_greater_equal'] = binaryValueBlock(
+    '≥',
+    'Boolean',
+    30,
+    'True when A is greater than or equal to B.',
+  )
+
+  // Logical connectives: both operands are booleans. `&&` binds tighter than
+  // `||`; the backend writes parentheses from the tree, so nesting one block
+  // inside another is always unambiguous in the generated C++.
+  Blockly.Blocks['logic_and'] = {
+    init() {
+      this.appendValueInput('A').setCheck('Boolean')
+      this.appendValueInput('B').setCheck('Boolean').appendField('and')
+      this.setInputsInline(true)
+      this.setOutput(true, 'Boolean')
+      this.setColour(30)
+      this.setTooltip('True when both A and B are true.')
+    },
+  }
+
+  Blockly.Blocks['logic_or'] = {
+    init() {
+      this.appendValueInput('A').setCheck('Boolean')
+      this.appendValueInput('B').setCheck('Boolean').appendField('or')
+      this.setInputsInline(true)
+      this.setOutput(true, 'Boolean')
+      this.setColour(30)
+      this.setTooltip('True when A or B (or both) is true.')
+    },
+  }
+
+  Blockly.Blocks['logic_not'] = {
+    init() {
+      this.appendValueInput('VALUE').setCheck('Boolean').appendField('not')
+      this.setInputsInline(true)
+      this.setOutput(true, 'Boolean')
+      this.setColour(30)
+      this.setTooltip('True when the value is false, and false when it is true.')
+    },
+  }
+
+  // `condition ? a : b`.
+  Blockly.Blocks['logic_ternary'] = {
+    init() {
+      this.appendValueInput('CONDITION').setCheck('Boolean').appendField('if')
+      this.appendValueInput('THEN').appendField('then')
+      this.appendValueInput('ELSE').appendField('else')
+      this.setInputsInline(true)
+      this.setOutput(true, null)
+      this.setColour(30)
+      this.setTooltip('Gives the THEN value when the condition is true, otherwise the ELSE value.')
+    },
+  }
+
+  // if / else if / else in ONE block. DO is the body; ELSE_IF holds a single
+  // nested `if` block (the next link of the chain) and ELSE the final body. A
+  // chain continues with else-if OR else, never both - the backend refuses a
+  // block that fills both.
   Blockly.Blocks['logic_if'] = {
     init() {
       this.appendValueInput('CONDITION').setCheck('Boolean').appendField('if')
       this.appendStatementInput('DO')
+      this.appendStatementInput('ELSE_IF').appendField('else if (one if block)')
+      this.appendStatementInput('ELSE').appendField('else')
       this.setPreviousStatement(true, null)
       this.setNextStatement(true, null)
       this.setColour(30)
-      this.setTooltip('Runs the body only when the comparison in the socket is true.')
+      this.setTooltip(
+        'Runs the body when the condition is true. Optionally continues with ONE else-if (an if block) or an else body.',
+      )
+    },
+  }
+
+  // A C-style for loop. INIT and STEP each hold ONE statement block (a
+  // declaration or assignment; an assignment or ++/--); either may be empty.
+  Blockly.Blocks['for_loop'] = {
+    init() {
+      this.appendStatementInput('INIT').appendField('for  start')
+      this.appendValueInput('CONDITION').setCheck('Boolean').appendField('while')
+      this.appendStatementInput('STEP').appendField('then step')
+      this.appendStatementInput('DO').appendField('do')
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(120)
+      this.setTooltip(
+        'for (start; while; step) { do } - runs the start once, then repeats the body and the step while the condition holds.',
+      )
+    },
+  }
+
+  // `x++;` / `x--;`.
+  Blockly.Blocks['variables_update'] = {
+    init() {
+      this.appendDummyInput()
+        .appendField('step')
+        .appendField(new Blockly.FieldTextInput('name'), 'NAME')
+        .appendField(new Blockly.FieldDropdown(UPDATE_OPERATORS), 'OPERATOR')
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(330)
+      this.setTooltip('Adds one to (++) or subtracts one from (--) a variable.')
     },
   }
 
@@ -358,6 +649,36 @@ export function registerArduinoBlocks() {
       this.setNextStatement(false)
       this.setColour(290)
       this.setTooltip('Stops this function here and returns — nothing below it runs.')
+    },
+  }
+
+  // DISPLAY-ONLY. Draws one fragment of firmware C++ the semantic layer does
+  // not understand yet (backend/app/build/blockly_bridge/models.py::
+  // PRESERVED_BLOCK_TYPE), in the position it holds in the function body, so a
+  // section is never shown as an empty container. Deliberately NOT a catalog
+  // block, not in the toolbox and not in ARDUINO_BLOCK_TYPES: it has no
+  // semantic operation and no generator. When a workspace comes back the
+  // backend reads only its id and its position in the chain (so the fragment
+  // stays where this block now sits), never its TEXT — the fragment's real
+  // copy is the `preserved` list beside the workspace. Read-only, unmovable and undeletable so it cannot
+  // be mistaken for, or edited like, a real block.
+  Blockly.Blocks['preserved_source'] = {
+    init() {
+      // A serializable label: the field VALUE is the exact source (newlines
+      // and all) and only the on-canvas rendering collapses whitespace, so
+      // what serializes back is never the shortened display text.
+      const text = new Blockly.FieldLabelSerializable('')
+      text.maxDisplayLength = 160
+      this.appendDummyInput().appendField('C++ (read-only)')
+      this.appendDummyInput().appendField(text, 'TEXT')
+      this.setPreviousStatement(true, null)
+      this.setNextStatement(true, null)
+      this.setColour(0)
+      this.setEditable(false)
+      this.setMovable(false)
+      this.setDeletable(false)
+      this.setTooltip(() => `C++ statement — not yet editable as blocks. Kept exactly as written:
+${this.getFieldValue('TEXT')}`)
     },
   }
 }

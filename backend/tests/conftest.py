@@ -21,6 +21,13 @@ first one that forgot would silently start writing to the real database.
 
 from __future__ import annotations
 
+import os
+
+# Must precede the first `app.config` import: config loads backend/lab.env.local
+# at import time, and the suite must never depend on a developer's real
+# credentials. An empty path disables the bootstrap.
+os.environ["TRAINER_LAB_ENV_PATH"] = ""
+
 import pytest
 
 from app import config
@@ -38,6 +45,25 @@ def isolated_event_store():
     finally:
         set_default_store(None)
         store.close()
+
+
+@pytest.fixture(autouse=True)
+def no_leaked_sessions(isolated_event_store):
+    """End every session a test left behind.
+
+    A WebSocket disconnect now DETACHES a session (it stays resumable for a
+    grace period) instead of discarding it, so sessions outlive the test that
+    opened them. The process-wide managers must start each test empty, and
+    the recorders are finished while this test's store is still installed
+    (this fixture depends on `isolated_event_store`, so it tears down first).
+    """
+    yield
+    from app.build_sessions import build_session_manager
+    from app.sessions import session_manager
+
+    for manager in (session_manager, build_session_manager):
+        for session_id in list(manager._sessions):
+            manager.end(session_id)
 
 
 @pytest.fixture(autouse=True)

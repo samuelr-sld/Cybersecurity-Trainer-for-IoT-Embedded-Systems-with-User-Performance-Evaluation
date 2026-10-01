@@ -63,6 +63,8 @@ from app.build.semantic import (
     PROGRAM_LOOP,
     PROGRAM_SETUP,
     TIME_DELAY,
+    ConditionalStatement,
+    ForStatement,
     LiteralValue,
     OperationStatement,
     SemanticProgram,
@@ -568,11 +570,11 @@ def test_a_section_with_no_container_block_comes_back_unsupported():
 
 
 def test_b3s_own_reason_travels_back_unchanged():
-    program = round_trip("void setup() {\n  client.setServer(HOST, PORT);\n}\n")
+    program = round_trip("void setup() {\n  ready = table[i];\n}\n")
     statement = program.section("setup").statements[0]
     assert isinstance(statement, UnsupportedStatement)
     assert statement.reason is UnsupportedReason.NOT_A_CALL
-    assert statement.source_text == "client.setServer(HOST, PORT);"
+    assert statement.source_text == "ready = table[i];"
 
 
 def test_a_control_flow_block_comes_back_whole_and_in_place():
@@ -595,13 +597,13 @@ def test_source_b4_understood_but_could_not_draw_keeps_its_exact_text():
     # workspace holds is the text — so it returns as unsupported, under the
     # IR's nearest member, with the text untouched. This is the ONE place the
     # round trip narrows, and it narrows a reason, never a character of source.
-    source = "void loop() {\n  Serial.println(1);\n  delay(BLINK_MS);\n}\n"
+    source = "void loop() {\n  ready = table[i];\n  digitalWrite(2, RUNNING);\n}\n"
     drawn = program_to_blockly(semantic(source))
     assert drawn.preserved[1].source.reason is BridgeReason.FIELD_VALUE_NOT_REPRESENTABLE
     statements = blockly_to_semantic(drawn).section("loop").statements
     assert [statement.source_text for statement in statements] == [
-        "Serial.println(1);",
-        "delay(BLINK_MS);",
+        "ready = table[i];",
+        "digitalWrite(2, RUNNING);",
     ]
     assert [statement.reason for statement in statements] == [
         UnsupportedReason.NOT_A_CALL,
@@ -612,11 +614,22 @@ def test_source_b4_understood_but_could_not_draw_keeps_its_exact_text():
 def test_no_preserved_fragment_is_lost_for_the_real_firmware():
     drawn = program_to_blockly(semantic(panel_one_source()))
     restored = blockly_to_semantic(drawn)
+
+    def unsupported(statements):
+        """Every carried-verbatim statement, nested ones in document order."""
+        for statement in statements:
+            if isinstance(statement, ConditionalStatement):
+                yield from unsupported(statement.body)
+                if statement.else_if is not None:
+                    yield from unsupported((statement.else_if,))
+                yield from unsupported(statement.else_body or ())
+            elif isinstance(statement, ForStatement):
+                yield from unsupported(statement.body)
+            elif not statement.supported:
+                yield statement.source_text
+
     kept = [
-        statement.source_text
-        for section in restored.sections
-        for statement in section.statements
-        if not statement.supported
+        text for section in restored.sections for text in unsupported(section.statements)
     ]
     assert [record.source.text for record in drawn.preserved] == kept
 
@@ -631,39 +644,11 @@ def test_the_blink_program_survives_the_round_trip_exactly():
 
 
 def test_the_real_panel_one_firmware_survives_the_round_trip_exactly():
-    # ONE PRE-EXISTING, DOCUMENTED EXCEPTION, newly exercised by this
-    # correction: `chirpBuzzer()` is a representable container for the first
-    # time (`functions.implementation`), and its `delay(BUZZER_CHIRP_MS)` is
-    # exactly `adapter.py`'s own canonical example of "ordinary source
-    # variance" — a named constant where the real block draws a numeric
-    # field, so the statement round-trips as understood-but-undrawable
-    # (`BridgeReason.FIELD_VALUE_NOT_REPRESENTABLE`) and comes back as
-    # `UnsupportedReason.UNSUPPORTED_ARGUMENT`. This narrowing always existed;
-    # it was simply never exercised for a HELPER_FUNCTION body before, because
-    # such a body was not converted through the bridge at all. Every other
-    # section — including every OTHER statement of `chirpBuzzer()` itself —
-    # still survives exactly.
+    # Every section, every statement. `delay(BUZZER_CHIRP_MS)` used to be the
+    # one documented exception (a named constant in a numeric field); the
+    # delay block's MS field now holds names, so there is none.
     source = panel_one_source()
-    before = semantic(source)
-    after = round_trip(source)
-
-    changed_ids = [b.section_id for a, b in zip(before.sections, after.sections) if a != b]
-    assert changed_ids == ["helper_chirpBuzzer"]
-
-    before_chirp = before.section("helper_chirpBuzzer")
-    after_chirp = after.section("helper_chirpBuzzer")
-    assert before_chirp.operation_id == after_chirp.operation_id
-    assert before_chirp.signature == after_chirp.signature
-    assert len(before_chirp.statements) == len(after_chirp.statements)
-    for index, (before_stmt, after_stmt) in enumerate(
-        zip(before_chirp.statements, after_chirp.statements)
-    ):
-        if index == 1:
-            assert isinstance(after_stmt, UnsupportedStatement)
-            assert after_stmt.reason is UnsupportedReason.UNSUPPORTED_ARGUMENT
-            assert after_stmt.source_text == "delay(BUZZER_CHIRP_MS);"
-        else:
-            assert before_stmt == after_stmt
+    assert round_trip(source) == semantic(source)
 
 
 def test_panel_ones_pin_modes_survive_with_their_named_pins_intact():
@@ -798,8 +783,8 @@ def test_a_field_the_operation_has_no_operand_for_fails_clearly():
 
 
 def test_a_field_value_no_field_can_hold_fails_clearly():
-    block = statement_block(TIME_DELAY, "delay(BUZZER_MS);", MS="BUZZER_MS")
-    with pytest.raises(InvalidBlocklyFieldValueError, match="BUZZER_MS"):
+    block = statement_block(TIME_DELAY, "delay(1 + 2);", MS="1 + 2")
+    with pytest.raises(InvalidBlocklyFieldValueError, match="1 . 2"):
         blockly_to_semantic(one_section_program(container_block(PROGRAM_SETUP, block)))
 
 

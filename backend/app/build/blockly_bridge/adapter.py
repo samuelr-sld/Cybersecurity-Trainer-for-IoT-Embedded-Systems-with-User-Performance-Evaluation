@@ -69,6 +69,7 @@ from app.build.blockly_bridge.bindings import (
 from app.build.blockly_bridge.errors import UnrepresentableOperationError
 from app.build.blockly_bridge.models import (
     BlocklyBlock,
+    BlocklyBranch,
     BlocklyField,
     BlocklyProgram,
     BlocklySection,
@@ -80,22 +81,44 @@ from app.build.blockly_bridge.structural import (
     ARITHMETIC_BLOCK_IDS,
     BINARY_OPERANDS,
     COMPARISON_BLOCK_IDS,
-    DECLARATION_TYPE_TOKENS,
+    CALL_ARGUMENT_INPUTS,
+    DECLARATION_QUALIFIER_TOKENS,
+    ELSE_IF_INPUT,
+    ELSE_INPUT,
+    FOR_INIT_INPUT,
+    FOR_STEP_INPUT,
     FUNCTIONS_CALL_EXISTING_BLOCK_ID,
+    FUNCTIONS_CALL_METHOD_BLOCK_ID,
+    FUNCTIONS_CALL_VALUE_BLOCK_ID,
     FUNCTIONS_RETURN_VOID_BLOCK_ID,
+    LOGIC_FALSE_BLOCK_ID,
     LOGIC_IF_BLOCK_ID,
     LOGIC_IF_EQUALS_BLOCK_ID,
+    LOGIC_NOT_BLOCK_ID,
+    LOGIC_TERNARY_BLOCK_ID,
+    LOGIC_TRUE_BLOCK_ID,
+    LOGICAL_BLOCK_IDS,
+    LOOPS_FOR_BLOCK_ID,
     MATH_NUMBER_BLOCK_ID,
     TEXT_LITERAL_BLOCK_ID,
     VARIABLES_DECLARE_BLOCK_ID,
     VARIABLES_GET_BLOCK_ID,
+    VARIABLES_SET_BLOCK_ID,
+    VARIABLES_UPDATE_BLOCK_ID,
+    declaration_type_token,
 )
 from app.build.semantic import (
     ArithmeticValue,
+    AssignmentStatement,
     CallStatement,
+    CallValue,
     ComparisonValue,
     ConditionalStatement,
+    ForStatement,
     LiteralValue,
+    LogicalValue,
+    MethodCallStatement,
+    NotValue,
     OperationStatement,
     OperationValue,
     ReturnStatement,
@@ -105,7 +128,9 @@ from app.build.semantic import (
     SemanticType,
     SemanticValue,
     SymbolValue,
+    TernaryValue,
     UnsupportedStatement,
+    UpdateStatement,
     VariableDeclaration,
 )
 
@@ -237,10 +262,24 @@ def _item(
         return _statement_block(statement, catalog, bindings)
     if isinstance(statement, CallStatement):
         return _call_existing_block(statement, catalog)
+    if isinstance(statement, MethodCallStatement):
+        return _method_call_block(statement, catalog)
+    if isinstance(statement, AssignmentStatement):
+        return _assign_block(statement, catalog)
     if isinstance(statement, ConditionalStatement):
-        if _fits_if_equals(statement.condition):
+        # The narrow `if equal to` block has no else; a chain is always drawn
+        # by the generic `if`, which does.
+        if (
+            _fits_if_equals(statement.condition)
+            and statement.else_if is None
+            and statement.else_body is None
+        ):
             return _if_equals_block(statement, catalog, bindings)
         return _if_block(statement, catalog, bindings)
+    if isinstance(statement, ForStatement):
+        return _for_block(statement, catalog, bindings)
+    if isinstance(statement, UpdateStatement):
+        return _update_block(statement, catalog)
     if isinstance(statement, VariableDeclaration):
         return _declare_block(statement, catalog)
     if isinstance(statement, ReturnStatement):
@@ -274,31 +313,113 @@ def _require_implemented(block_id: str, catalog: BlockCatalog) -> BlockDefinitio
 
 
 def _single_statements_input(definition: BlockDefinition) -> str:
-    """The one STATEMENTS input this block declares — its body's input name."""
+    """The FIRST STATEMENTS input this block declares — its primary body's name.
+
+    A block with more (`logic.if`: DO, ELSE_IF, ELSE) carries the rest as
+    branches; a block with none cannot hold a body at all.
+    """
     body_inputs = [item for item in definition.inputs if item.value_type is ValueType.STATEMENTS]
-    if len(body_inputs) != 1:
+    if not body_inputs:
         raise UnrepresentableOperationError(
-            f"{definition.block_id}: needs exactly one statement body input, "
-            f"it has {len(body_inputs)}"
+            f"{definition.block_id}: needs a statement body input, it has none"
         )
     return body_inputs[0].name
 
 
-def _call_existing_block(statement: CallStatement, catalog: BlockCatalog) -> BlocklyBlock:
+def _require_inputs(definition: BlockDefinition, *names: str) -> None:
+    """The catalog block must declare every input this module fills by name."""
+    declared = {item.name for item in definition.inputs}
+    missing = [name for name in names if name not in declared]
+    if missing:
+        raise UnrepresentableOperationError(
+            f"{definition.block_id}: the bridge fills {missing}, which the catalog block "
+            "does not declare"
+        )
+
+
+def _argument_inputs(
+    arguments: tuple[SemanticValue, ...], catalog: BlockCatalog
+) -> tuple[BlocklyValueInput, ...] | None:
+    """A call's arguments as `ARG0..` value inputs, in order - or None.
+
+    None is "understood, undrawable": more arguments than the block has sockets,
+    or one argument no value block can draw. The caller then carries the WHOLE
+    statement verbatim - an argument is never dropped and a call is never drawn
+    with fewer arguments than it has.
+    """
+    if len(arguments) > len(CALL_ARGUMENT_INPUTS):
+        return None
+    inputs: list[BlocklyValueInput] = []
+    for name, argument in zip(CALL_ARGUMENT_INPUTS, arguments):
+        block = _value_block(argument, catalog)
+        if block is None:
+            return None
+        inputs.append(BlocklyValueInput(name=name, block=block))
+    return tuple(inputs)
+
+
+def _call_existing_block(
+    statement: CallStatement, catalog: BlockCatalog
+) -> BlocklyBlock | PreservedSource:
     """A `CallStatement` as the `functions.call_existing` block.
 
-    Always representable: `CallStatement.function_name` is validated at
-    construction to be a plain identifier, which a TEXT field can always
-    hold — there is no "understood but undrawable" case here, unlike the
-    catalog-bound statements `_statement_block` converts.
+    The function NAME is always representable (`CallStatement.function_name` is
+    validated to be a plain identifier, which a TEXT field can hold); its
+    arguments may not be, in which case the statement is preserved whole.
     """
     definition = _require_implemented(FUNCTIONS_CALL_EXISTING_BLOCK_ID, catalog)
+    inputs = _argument_inputs(statement.arguments, catalog)
+    if inputs is None:
+        return _undrawable(statement.text, f"call to {statement.function_name}")
     return BlocklyBlock(
         operation_id=FUNCTIONS_CALL_EXISTING_BLOCK_ID,
         block_id=definition.block_id,
         block_type=definition.blockly_type,
         source_text=statement.text,
         fields=(BlocklyField(name="NAME", value=statement.function_name),),
+        values=inputs,
+    )
+
+
+def _method_call_block(
+    statement: MethodCallStatement, catalog: BlockCatalog
+) -> BlocklyBlock | PreservedSource:
+    """A `MethodCallStatement` as `functions.call_method`: RECEIVER, METHOD, ARGn."""
+    definition = _require_implemented(FUNCTIONS_CALL_METHOD_BLOCK_ID, catalog)
+    inputs = _argument_inputs(statement.arguments, catalog)
+    if inputs is None:
+        return _undrawable(statement.text, f"call to {statement.receiver}.{statement.method_name}")
+    return BlocklyBlock(
+        operation_id=FUNCTIONS_CALL_METHOD_BLOCK_ID,
+        block_id=definition.block_id,
+        block_type=definition.blockly_type,
+        source_text=statement.text,
+        fields=(
+            BlocklyField(name="RECEIVER", value=statement.receiver),
+            BlocklyField(name="METHOD", value=statement.method_name),
+        ),
+        values=inputs,
+    )
+
+
+def _assign_block(
+    statement: AssignmentStatement, catalog: BlockCatalog
+) -> BlocklyBlock | PreservedSource:
+    """An `AssignmentStatement` as `variables.set`: NAME, OPERATOR, a VALUE socket."""
+    definition = _require_implemented(VARIABLES_SET_BLOCK_ID, catalog)
+    value = _value_block(statement.value, catalog)
+    if value is None:
+        return _undrawable(statement.text, f"assignment to {statement.target}")
+    return BlocklyBlock(
+        operation_id=VARIABLES_SET_BLOCK_ID,
+        block_id=definition.block_id,
+        block_type=definition.blockly_type,
+        source_text=statement.text,
+        fields=(
+            BlocklyField(name="NAME", value=statement.target),
+            BlocklyField(name="OPERATOR", value=statement.operator),
+        ),
+        values=(BlocklyValueInput(name="VALUE", block=value),),
     )
 
 
@@ -380,15 +501,35 @@ def _if_block(
 ) -> BlocklyBlock | PreservedSource:
     """A `ConditionalStatement` as the generic `logic.if` block.
 
-    The condition becomes a value block in the CONDITION socket — whatever
-    comparison it is (`position <= 0`, `left != right`), built by
+    The condition becomes a value block in the CONDITION socket, built by
     `_value_block` from the IR's own value tree, so no condition shape is
-    special-cased here.
+    special-cased here. A chain continues in ONE of two extra statement inputs:
+    ELSE_IF holds the next link (itself a `logic.if`), ELSE holds the final body.
+
+    ALL OR NOTHING: a link whose condition cannot be drawn, or an `else {}`
+    with nothing in it (an empty statement input cannot say "an else exists"),
+    makes the WHOLE chain preserved source rather than a chain with a hole.
     """
     definition = _require_implemented(LOGIC_IF_BLOCK_ID, catalog)
+    _require_inputs(definition, "CONDITION", ELSE_IF_INPUT, ELSE_INPUT)
     condition = _value_block(statement.condition, catalog)
     if condition is None:
         return _undrawable(statement.text, f"condition ({statement.condition.source_text})")
+    branches: list[BlocklyBranch] = []
+    if statement.else_if is not None:
+        link = _if_block(statement.else_if, catalog, bindings)
+        if isinstance(link, PreservedSource):
+            return _undrawable(statement.text, "an else-if branch")
+        branches.append(BlocklyBranch(name=ELSE_IF_INPUT, items=(link,)))
+    elif statement.else_body is not None:
+        if not statement.else_body:
+            return _undrawable(statement.text, "an empty else")
+        branches.append(
+            BlocklyBranch(
+                name=ELSE_INPUT,
+                items=tuple(_item(item, catalog, bindings) for item in statement.else_body),
+            )
+        )
     return BlocklyBlock(
         operation_id=LOGIC_IF_BLOCK_ID,
         block_id=definition.block_id,
@@ -397,36 +538,100 @@ def _if_block(
         values=(BlocklyValueInput(name="CONDITION", block=condition),),
         body_input=_single_statements_input(definition),
         body=tuple(_item(item, catalog, bindings) for item in statement.body),
+        branches=tuple(branches),
+    )
+
+
+def _for_block(
+    statement: ForStatement, catalog: BlockCatalog, bindings: FieldBindingTable
+) -> BlocklyBlock | PreservedSource:
+    """A `ForStatement` as `loops.for`: INIT, CONDITION, STEP and the DO body.
+
+    INIT and STEP each hold the ONE statement block their header part is; an
+    empty part is an empty input. Every part must be drawable or the whole loop
+    stays preserved source - a `for` with a hole in its header would generate a
+    different loop.
+    """
+    definition = _require_implemented(LOOPS_FOR_BLOCK_ID, catalog)
+    _require_inputs(definition, FOR_INIT_INPUT, "CONDITION", FOR_STEP_INPUT)
+    values: tuple[BlocklyValueInput, ...] = ()
+    if statement.condition is not None:
+        condition = _value_block(statement.condition, catalog)
+        if condition is None:
+            return _undrawable(statement.text, f"the condition ({statement.condition.source_text})")
+        values = (BlocklyValueInput(name="CONDITION", block=condition),)
+    branches: list[BlocklyBranch] = []
+    for name, part in ((FOR_INIT_INPUT, statement.init), (FOR_STEP_INPUT, statement.step)):
+        if part is None:
+            continue
+        drawn = _item(part, catalog, bindings)
+        if isinstance(drawn, PreservedSource):
+            return _undrawable(statement.text, f"the {name.lower()} of a for loop")
+        branches.append(BlocklyBranch(name=name, items=(drawn,)))
+    return BlocklyBlock(
+        operation_id=LOOPS_FOR_BLOCK_ID,
+        block_id=definition.block_id,
+        block_type=definition.blockly_type,
+        source_text=statement.text,
+        values=values,
+        body_input=_single_statements_input(definition),
+        body=tuple(_item(item, catalog, bindings) for item in statement.body),
+        branches=tuple(branches),
+    )
+
+
+def _update_block(statement: UpdateStatement, catalog: BlockCatalog) -> BlocklyBlock:
+    """An `UpdateStatement` as `variables.update`: NAME and OPERATOR (++ / --)."""
+    definition = _require_implemented(VARIABLES_UPDATE_BLOCK_ID, catalog)
+    return BlocklyBlock(
+        operation_id=VARIABLES_UPDATE_BLOCK_ID,
+        block_id=definition.block_id,
+        block_type=definition.blockly_type,
+        source_text=statement.text,
+        fields=(
+            BlocklyField(name="NAME", value=statement.target),
+            BlocklyField(name="OPERATOR", value=statement.operator),
+        ),
     )
 
 
 def _declare_block(
     statement: VariableDeclaration, catalog: BlockCatalog
 ) -> BlocklyBlock | PreservedSource:
-    """A `VariableDeclaration` as `variables.declare`: TYPE, NAME, INITIAL."""
+    """A `VariableDeclaration` as `variables.declare`.
+
+    QUALIFIER, TYPE and NAME are fields; INITIAL is a value socket that is
+    simply absent for `String message;`.
+    """
     definition = _require_implemented(VARIABLES_DECLARE_BLOCK_ID, catalog)
-    initial = _value_block(statement.initializer, catalog)
-    token = DECLARATION_TYPE_TOKENS.get(statement.value_type)
-    if initial is None or token is None:
-        return _undrawable(statement.text, f"declaration of {statement.name}")
+    values: tuple[BlocklyValueInput, ...] = ()
+    if statement.initializer is not None:
+        initial = _value_block(statement.initializer, catalog)
+        if initial is None:
+            return _undrawable(statement.text, f"declaration of {statement.name}")
+        values = (BlocklyValueInput(name="INITIAL", block=initial),)
     return BlocklyBlock(
         operation_id=VARIABLES_DECLARE_BLOCK_ID,
         block_id=definition.block_id,
         block_type=definition.blockly_type,
         source_text=statement.text,
         fields=(
-            BlocklyField(name="TYPE", value=token),
+            BlocklyField(name="QUALIFIER", value=DECLARATION_QUALIFIER_TOKENS[statement.qualifiers]),
+            BlocklyField(
+                name="TYPE",
+                value=declaration_type_token(statement.value_type, statement.type_name),
+            ),
             BlocklyField(name="NAME", value=statement.name),
         ),
-        values=(BlocklyValueInput(name="INITIAL", block=initial),),
+        values=values,
     )
 
 
 def _value_block(value: SemanticValue, catalog: BlockCatalog) -> BlocklyBlock | None:
     """One IR value as the value block that draws it, or None if none can.
 
-    None is "understood, undrawable" — a boolean literal, an empty text
-    literal (a Blockly field cannot hold nothing), a non-finite number — and
+    None is "understood, undrawable" — an empty text literal (a Blockly field
+    cannot hold nothing), a non-finite number, a call with too many arguments — and
     the caller decides whether to preserve or report the enclosing statement.
     A structural value is found by block id (`structural.py`); a VALUE
     operation (`text.index_of`, ...) through the catalog relation, with its
@@ -439,9 +644,62 @@ def _value_block(value: SemanticValue, catalog: BlockCatalog) -> BlocklyBlock | 
             return _leaf_block(TEXT_LITERAL_BLOCK_ID, "VALUE", str(value.value), catalog)
         if value.value_type is SemanticType.NUMBER and math.isfinite(value.value):
             return _leaf_block(MATH_NUMBER_BLOCK_ID, "VALUE", str(value.value), catalog)
+        if value.value_type is SemanticType.BOOLEAN:
+            definition = _require_implemented(
+                LOGIC_TRUE_BLOCK_ID if value.value else LOGIC_FALSE_BLOCK_ID, catalog
+            )
+            return BlocklyBlock(
+                operation_id=definition.semantic_operation,
+                block_id=definition.block_id,
+                block_type=definition.blockly_type,
+            )
         return None
-    if isinstance(value, (ComparisonValue, ArithmeticValue)):
-        table = COMPARISON_BLOCK_IDS if isinstance(value, ComparisonValue) else ARITHMETIC_BLOCK_IDS
+    if isinstance(value, CallValue):
+        inputs = _argument_inputs(value.arguments, catalog)
+        if inputs is None:
+            return None
+        definition = _require_implemented(FUNCTIONS_CALL_VALUE_BLOCK_ID, catalog)
+        return BlocklyBlock(
+            operation_id=definition.semantic_operation,
+            block_id=definition.block_id,
+            block_type=definition.blockly_type,
+            fields=(BlocklyField(name="NAME", value=value.function_name),),
+            values=inputs,
+        )
+    if isinstance(value, NotValue):
+        operand = _value_block(value.operand, catalog)
+        if operand is None:
+            return None
+        definition = _require_implemented(LOGIC_NOT_BLOCK_ID, catalog)
+        return BlocklyBlock(
+            operation_id=definition.semantic_operation,
+            block_id=definition.block_id,
+            block_type=definition.blockly_type,
+            values=(BlocklyValueInput(name="VALUE", block=operand),),
+        )
+    if isinstance(value, TernaryValue):
+        parts = [
+            _value_block(part, catalog) for part in (value.condition, value.if_true, value.if_false)
+        ]
+        if any(part is None for part in parts):
+            return None
+        definition = _require_implemented(LOGIC_TERNARY_BLOCK_ID, catalog)
+        return BlocklyBlock(
+            operation_id=definition.semantic_operation,
+            block_id=definition.block_id,
+            block_type=definition.blockly_type,
+            values=tuple(
+                BlocklyValueInput(name=name, block=part)
+                for name, part in zip(("CONDITION", "THEN", "ELSE"), parts)
+            ),
+        )
+    if isinstance(value, (ComparisonValue, ArithmeticValue, LogicalValue)):
+        if isinstance(value, ComparisonValue):
+            table = COMPARISON_BLOCK_IDS
+        elif isinstance(value, LogicalValue):
+            table = LOGICAL_BLOCK_IDS
+        else:
+            table = ARITHMETIC_BLOCK_IDS
         block_id = table.get(value.operator)
         left = _value_block(value.left, catalog)
         right = _value_block(value.right, catalog)

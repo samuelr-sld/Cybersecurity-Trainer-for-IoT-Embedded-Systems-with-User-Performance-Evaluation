@@ -1,10 +1,11 @@
 """Build Mode session lifecycle.
 
-Mirrors `app/sessions.py` for Hack Mode: one session per WebSocket
-connection, held in memory for the lifetime of that connection, and fully
-isolated from every other session. A disconnect removes the session (and its
-workspace) entirely — nothing about a student's firmware edits persists
-across a reconnect in Phase 3A.
+Mirrors `app/sessions.py` for Hack Mode: one session per Build Mode entry,
+held in memory and fully isolated from every other session. A WebSocket
+disconnect DETACHES the session (workspace, edits, results, recorder all
+kept) for `config.SESSION_RESUME_GRACE_SECONDS` so a reloaded page can resume
+it with `?session=<id>`; it is finished only by `BuildSessionManager.end` —
+an explicit end request or that timeout. See `app/session_residency.py`.
 
 A session owns its own `BuildWorkspace` (created via a `default_factory`, so
 every session gets an independent instance and no two connections can
@@ -64,6 +65,7 @@ from app.build.validation import (
     default_validation_plan,
 )
 from app.hardware import DeviceState
+from app.session_residency import Residency
 
 
 def _utc_now() -> datetime:
@@ -297,6 +299,9 @@ class BuildSessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, BuildSession] = {}
         self._lock = asyncio.Lock()
+        # See `app.sessions.SessionManager`: a disconnect detaches, it does
+        # not end. The workspace and every retained result outlive the socket.
+        self._residency = Residency()
 
     async def create(
         self,
@@ -379,7 +384,39 @@ class BuildSessionManager:
         rather than merely expedient: a dict `pop` contains no await point,
         so under asyncio it cannot interleave with `create`/`get`/`remove`.
         """
+        self._residency.forget(session_id)
         return self._sessions.pop(session_id, None)
+
+    # -- attach / detach / resume (a reload is not the end of a session) -----
+
+    def resume(self, session_id: str | None, participant_id: str | None) -> BuildSession | None:
+        """The live session a reconnecting client asks for, or None (start new)."""
+        if not session_id:
+            return None
+        session = self._sessions.get(session_id)
+        if session is None or session.participant_id != participant_id:
+            return None
+        return session
+
+    def claim(self, session_id: str) -> object:
+        return self._residency.claim(session_id)
+
+    def is_current(self, session_id: str, token: object) -> bool:
+        return self._residency.is_current(session_id, token)
+
+    def detach(self, session: BuildSession, token: object) -> bool:
+        """Keep the session (workspace, results, telemetry) after its socket is lost."""
+        return self._residency.detach(session.session_id, token, lambda: self.end(session.session_id))
+
+    def end(self, session_id: str) -> BuildSession | None:
+        """Finish a session for good: discard its artifact, stamp its end. Sync, idempotent."""
+        session = self.discard(session_id)
+        if session is not None:
+            # Lazy: app.build.service imports this module's types.
+            from app.build.service import end_session_sync
+
+            end_session_sync(session)
+        return session
 
     def is_live(self, session_id: str) -> bool:
         """Whether this process is serving the session now (Evaluation read)."""

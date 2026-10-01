@@ -211,7 +211,7 @@ def test_banner_and_session_frames_are_unchanged(client: TestClient, no_board) -
     with client.websocket_connect("/ws/hack") as ws:
         session_frame = ws.receive_json()
         assert session_frame["type"] == "session"
-        assert set(session_frame) == {"type", "session_id", "protocol_version"}
+        assert set(session_frame) == {"type", "session_id", "protocol_version", "resumed"}
         banner = ws.receive_json()
         assert banner["type"] == "output"
         assert "hack mode channel established" in banner["data"]

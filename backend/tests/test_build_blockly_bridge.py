@@ -300,16 +300,15 @@ def test_a_symbol_and_a_literal_that_read_the_same_produce_the_same_field_text()
     assert fields_of(program_to_blockly(symbolic).section("loop").block.body[0]) == {"MS": "1000"}
 
 
-def test_a_symbolic_duration_is_not_forced_into_a_numeric_field():
-    # `delay(BUZZER_CHIRP_MS)` is understood by B3 and undrawable by the real
-    # `delay` block, whose MS field is a Blockly FieldNumber. Preserved, not
-    # coerced to 0 and not dropped.
+def test_a_symbolic_duration_is_drawn_by_the_delay_block_as_its_name():
+    # P2: `delay(BUZZER_CHIRP_MS)` names a constant. The delay block's MS field
+    # is a text field (like a pin), so the NAME is drawn as written - not
+    # coerced to a number and not preserved.
     program = convert("void loop() {\n  delay(BUZZER_CHIRP_MS);\n}\n")
-    item = program.section("loop").block.body[0]
-    assert isinstance(item, PreservedSource)
-    assert item.text == "delay(BUZZER_CHIRP_MS);"
-    assert item.reason is BridgeReason.FIELD_VALUE_NOT_REPRESENTABLE
-    assert item.understood_by_the_ir is True
+    (item,) = program.section("loop").block.body
+    assert isinstance(item, BlocklyBlock)
+    assert item.block_type == "delay"
+    assert fields_of(item) == {"MS": "BUZZER_CHIRP_MS"}
 
 
 def test_a_boolean_literal_is_not_rewritten_into_a_dropdowns_token():
@@ -338,8 +337,12 @@ def test_an_undrawable_authored_statement_has_nothing_to_preserve_and_says_so():
     # — its C++ still exists (the generator writes it from the operation), but
     # this workspace cannot show it.
     authored = OperationStatement(
-        operation=default_semantic_operations.require(TIME_DELAY),
-        arguments=(SemanticArgument("MS", SymbolValue("BUZZER_CHIRP_MS")),),
+        operation=default_semantic_operations.require(GPIO_DIGITAL_WRITE),
+        arguments=(
+            SemanticArgument("PIN", SymbolValue("BUZZER")),
+            # A name the HIGH/LOW dropdown cannot hold.
+            SemanticArgument("VALUE", SymbolValue("run")),
+        ),
     )
     program = SemanticProgram(
         sections=(
@@ -449,13 +452,13 @@ def test_order_is_preserved_across_supported_and_unsupported_statements():
     source = (
         "void setup() {\n"
         "  pinMode(1, OUTPUT);\n"
-        "  Serial.begin(115200);\n"
+        "  while (busy) { yield(); }\n"
         "  pinMode(2, INPUT);\n"
         "}\n"
     )
     assert body_types(convert(source).section("setup").block) == [
         "pinmode",
-        "Serial.begin(115200);",
+        "while (busy) { yield(); }",
         "pinmode",
     ]
 
@@ -464,7 +467,7 @@ def test_the_blockly_chain_skips_preserved_source_but_the_record_locates_it():
     source = (
         "void setup() {\n"
         "  pinMode(1, OUTPUT);\n"
-        "  Serial.begin(115200);\n"
+        "  while (busy) { yield(); }\n"
         "  pinMode(2, INPUT);\n"
         "}\n"
     )
@@ -521,7 +524,7 @@ def test_no_unsupported_source_text_is_lost_for_the_real_firmware():
 
 
 def test_b3s_reason_travels_through_unchanged():
-    program = convert("void setup() {\n  client.setServer(HOST, PORT);\n}\n")
+    program = convert("void setup() {\n  ready = table[i];\n}\n")
     item = program.section("setup").block.body[0]
     assert item.reason is UnsupportedReason.NOT_A_CALL
     assert item.understood_by_the_ir is False
@@ -550,10 +553,10 @@ def test_an_unsupported_sections_body_is_never_drawn_as_blocks():
     assert [block.block_type for block in program.blocks] == ["arduino_setup"]
 
 
-def test_a_control_flow_block_is_preserved_whole():
+def test_a_control_flow_block_outside_the_grammar_is_preserved_whole():
     source = (
         "void loop() {\n"
-        "  if (ready) {\n"
+        "  while (ready) {\n"
         "    digitalWrite(1, HIGH);\n"
         "  }\n"
         "  delay(5);\n"
@@ -562,15 +565,15 @@ def test_a_control_flow_block_is_preserved_whole():
     program = convert(source)
     items = program.section("loop").block.body
     assert isinstance(items[0], PreservedSource)
-    assert items[0].text.startswith("if (ready)")
+    assert items[0].text.startswith("while (ready)")
     assert isinstance(items[1], BlocklyBlock)
 
 
 def test_the_two_kinds_of_preservation_are_distinguishable():
     source = (
         "void loop() {\n"
-        "  Serial.println(1);\n"
-        "  delay(BLINK_MS);\n"
+        "  ready = table[i];\n"
+        "  digitalWrite(2, RUNNING);\n"
         "}\n"
     )
     records = convert(source).preserved
@@ -825,6 +828,24 @@ def test_the_frontend_block_definitions_were_read_at_all():
         "logic_less_equal",
         "logic_if",
         "return_void",
+        # P3: ordering comparisons, and/or/not, ternary, for, ++/--.
+        "logic_less",
+        "logic_greater",
+        "logic_greater_equal",
+        "logic_and",
+        "logic_or",
+        "logic_not",
+        "logic_ternary",
+        "for_loop",
+        "variables_update",
+        # P2: assignment, calls on objects/functions, boolean literals.
+        "variables_set",
+        "call_method",
+        "call_function_value",
+        "logic_true",
+        "logic_false",
+        # Display-only (Phase P1): draws preserved source, not a catalog block.
+        "preserved_source",
     }
     assert frontend["pinmode"]["MODE"][1] == ("OUTPUT", "INPUT", "INPUT_PULLUP")
     # The fields the bridge reads by name, drawn as the kind it expects.
@@ -836,12 +857,17 @@ def test_the_frontend_block_definitions_were_read_at_all():
 
 
 def test_the_declaration_type_dropdown_offers_exactly_the_bridge_tokens():
-    from app.build.blockly_bridge.structural import DECLARATION_TYPE_TOKENS
+    from app.build.blockly_bridge.structural import (
+        DECLARATION_QUALIFIER_TOKENS,
+        DECLARATION_TYPE_FOR_TOKEN,
+    )
 
     source = ARDUINO_BLOCKS_JS.read_text(encoding="utf-8")
     body = re.search(r"const DECLARATION_TYPES = \[(.*?)\]\n", source, re.S).group(1)
-    assert tuple(re.findall(r"\['\w+', '(\w+)'\]", body)) == tuple(
-        DECLARATION_TYPE_TOKENS.values()
+    assert tuple(re.findall(r"\['[^']+', '(\w+)'\]", body)) == tuple(DECLARATION_TYPE_FOR_TOKEN)
+    body = re.search(r"const DECLARATION_QUALIFIERS = \[(.*?)\]\n", source, re.S).group(1)
+    assert tuple(re.findall(r"\['[^']+', '(\w+)'\]", body)) == tuple(
+        DECLARATION_QUALIFIER_TOKENS.values()
     )
 
 
@@ -886,6 +912,12 @@ def test_the_representation_carries_both_halves():
         {
             "sectionId": "global",
             "index": 0,
+            # Every record locates itself: the block whose body holds it and
+            # its own drawn block's id (a section with no container is its
+            # own parent).
+            "id": "global.0",
+            "parentId": "global",
+            "input": None,
             "text": "const int LED = 2;",
             "reason": "unsupported_section",
             "understoodByTheIr": False,
@@ -956,7 +988,11 @@ def test_a_field_name_follows_the_catalogs_input_naming():
 
 def test_panel_one_setup_draws_its_seven_pin_modes():
     program = convert(panel_one_source())
-    blocks = program.section("setup").block.child_blocks
+    blocks = [
+        block
+        for block in program.section("setup").block.child_blocks
+        if block.block_type == "pinmode"
+    ]
     assert [fields_of(block)["PIN"] for block in blocks] == [
         "START_BUTTON",
         "STOP_BUTTON",
@@ -971,30 +1007,34 @@ def test_panel_one_setup_draws_its_seven_pin_modes():
 
 def test_panel_one_setup_keeps_its_wifi_and_mqtt_source_between_the_blocks():
     program = convert(panel_one_source())
-    items = body_types(program.section("setup").block)
+    body = program.section("setup").block.body
+
+    def label(item) -> str:
+        if isinstance(item, PreservedSource):
+            return item.text
+        fields = fields_of(item)
+        if item.block_type == "call_method":
+            return f"{fields['RECEIVER']}.{fields['METHOD']}"
+        if item.block_type == "call_existing_function":
+            return fields["NAME"]
+        return item.block_type
+
+    items = [label(item) for item in body]
 
     # The stable prefix -- Serial.begin, the seven pin_mode blocks, then the
-    # initial motor-safe state -- is unaffected by the real Wi-Fi connect
-    # sequence appended after it, so it is still pinned by position.
-    assert items[0] == "Serial.begin(115200);"
+    # initial motor-safe state -- is unaffected by the Wi-Fi connect sequence
+    # appended after it, so it is still pinned by position.
+    assert items[0] == "Serial.begin"
     assert items[1:8] == ["pinmode"] * 7
-    assert items[8] == "setMotorOutputs(false);"
+    assert items[8] == "setMotorOutputs"
 
-    # The real Wi-Fi connect and MQTT client wiring that follows must survive
-    # the semantic/block transformation as preserved source, in the order the
-    # firmware performs it. Content-based rather than pinned to an exact
-    # index: the diagnostic Serial output interleaved between these calls is
-    # free to grow or shrink independently of what this test actually cares
-    # about, which is that these statements are not lost or reordered.
-    def index_of(prefix: str) -> int:
-        for i, item in enumerate(items):
-            if item.startswith(prefix):
-                return i
-        raise AssertionError(f"no preserved item starts with {prefix!r}: {items}")
-
-    wifi_begin = index_of("WiFi.begin(")
-    set_server = index_of("client.setServer(")
-    set_callback = index_of("client.setCallback(")
+    # P2: the Wi-Fi connect and MQTT client wiring that follows are call
+    # blocks now, in the order the firmware performs it. Content-based rather
+    # than pinned to an index: the diagnostic Serial output interleaved between
+    # them is free to grow or shrink independently.
+    wifi_begin = items.index("WiFi.begin")
+    set_server = items.index("client.setServer")
+    set_callback = items.index("client.setCallback")
 
     assert wifi_begin > 8
     assert wifi_begin < set_server < set_callback
@@ -1002,6 +1042,9 @@ def test_panel_one_setup_keeps_its_wifi_and_mqtt_source_between_the_blocks():
     # buttons must work from boot with no network, so connecting is left to
     # the non-blocking ensureConnected() in loop().
     assert not any(item.startswith("while (WiFi.status()") for item in items)
+    # What remains preserved is only what P2 does not model: the comments.
+    assert all(isinstance(item, PreservedSource) for item in body if isinstance(item, PreservedSource))
+    assert [item.text[:2] for item in body if isinstance(item, PreservedSource)] == ["//", "//"]
 
 
 def test_panel_one_loop_draws_its_two_zero_arg_calls_and_preserves_the_rest():
@@ -1014,27 +1057,36 @@ def test_panel_one_loop_draws_its_two_zero_arg_calls_and_preserves_the_rest():
     assert loop.block is not None
     assert [block.block_type for block in loop.block.child_blocks] == [
         "call_existing_function",
+        "call_method",
         "call_existing_function",
     ]
-    preserved_texts = [
-        item.text for item in loop.block.body if isinstance(item, PreservedSource)
-    ]
-    assert preserved_texts == ["client.loop();"]
+    # P2: `client.loop();` is a call on an object, drawn as a method-call block.
+    assert fields_of(loop.block.child_blocks[1]) == {"RECEIVER": "client", "METHOD": "loop"}
+    assert not [item for item in loop.block.body if isinstance(item, PreservedSource)]
 
 
 def test_panel_one_mqtt_logic_is_never_claimed_as_a_block():
-    # CORRECTED: both sections are representable CONTAINERS now
-    # (`functions.implementation`), but their MQTT-specific bodies are still
-    # never drawn — only the generic pieces this phase actually models (a
-    # comparison-gated `if`) are.
+    # P3: `onMessage` draws its declaration, its String method calls and its
+    # `for` loop as generic blocks; `String(topic) == COMMAND_TOPIC` is outside
+    # the expression grammar and stays preserved. `applyCommand`'s whole
+    # if / else-if chain is ONE generic `if` block.
     program = convert(panel_one_source())
     on_message = program.section("callback_onMessage")
     assert on_message.block is not None
-    assert on_message.block.child_blocks == ()
+    assert [block.block_type for block in on_message.block.child_blocks] == [
+        "variables_declare",
+        "call_method",
+        "for_loop",
+        "call_method",
+        "call_method",
+    ]
+    assert len([i for i in on_message.block.body if isinstance(i, PreservedSource)]) == 1
 
     apply_command = program.section("helper_applyCommand")
     assert apply_command.block is not None
-    assert [block.block_type for block in apply_command.block.child_blocks] == ["if_equals"]
+    (chain,) = apply_command.block.child_blocks
+    assert chain.block_type == "logic_if"
+    assert chain.branch("ELSE_IF") is not None and chain.branch("ELSE") is None
 
     for block_type in ("mosquitto_pub", "mqtt_publish", "mqtt_subscribe"):
         assert block_type not in [block.block_type for block in program.blocks]
@@ -1115,6 +1167,9 @@ def test_the_bridge_modules_were_found():
         # B4's shape, so B5 is reachable from an editor and not only from
         # inside this codebase. Every static check in this section covers it.
         "workspace_state.py",
+        # P4.2: a function declarator described for the container's
+        # read-only header. Display only; every static check covers it.
+        "signature_display.py",
     }
 
 

@@ -268,6 +268,19 @@ class BuildSessionMessage(_BuildFrame):
     type: Literal["session"] = "session"
     session_id: str
     protocol_version: int = BUILD_PROTOCOL_VERSION
+    #: True when this connection re-attached to a session that was already
+    #: running (`?session=<id>` after a reload); see `SessionMessage.resumed`.
+    resumed: bool = False
+    #: Whole seconds since the session began, measured by the server (so a
+    #: client with a skewed clock still continues from the true start). Every
+    #: connection carries it; a new session reports ~0.
+    elapsed_seconds: int = 0
+    #: Only on a resume: the events the session already recorded, in order,
+    #: each with its own `elapsed_seconds`, so a reloaded page rebuilds the
+    #: Activity Log it had. Taken from `BuildSession.events`; nothing is
+    #: generated for it. Empty for a new session, whose bootstrap events
+    #: still arrive as ordinary `event` frames.
+    history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BuildStateMessage(_BuildFrame):

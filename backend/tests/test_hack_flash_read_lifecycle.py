@@ -411,6 +411,10 @@ def test_tearing_the_socket_down_mid_read_leaks_neither_session_nor_process(
         assert heartbeat.exists(), "the read never started"
         assert asyncio.run(session_manager.count()) == before + 1
 
+    # The socket is gone: the session is detached (resumable), the read is not.
+    assert asyncio.run(session_manager.count()) == before + 1
+    for sid in list(session_manager._sessions):
+        session_manager.end(sid)
     assert asyncio.run(session_manager.count()) == before
     deadline = time.monotonic() + process.KILL_GRACE_SECONDS + 2
     while time.monotonic() < deadline:

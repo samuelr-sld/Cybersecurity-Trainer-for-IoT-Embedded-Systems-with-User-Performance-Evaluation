@@ -37,6 +37,7 @@ from app.build.semantic import (
     ComparisonValue,
     ConditionalStatement,
     LiteralValue,
+    MethodCallStatement,
     OperationForm,
     OperationStatement,
     SemanticAnalysisError,
@@ -50,6 +51,7 @@ from app.build.semantic import (
     SemanticSection,
     SemanticType,
     SymbolValue,
+    TernaryValue,
     UnknownOperationError,
     UnsupportedReason,
     UnsupportedStatement,
@@ -314,15 +316,16 @@ def test_order_is_preserved_across_supported_and_unsupported_statements():
     source = (
         "void setup() {\n"
         "  pinMode(2, OUTPUT);\n"
-        "  Serial.begin(115200);\n"
+        "  while (busy) { yield(); }\n"
         "  delay(10);\n"
-        "  WiFi.begin(SSID);\n"
+        "  ready = table[i];\n"
         "  digitalWrite(2, HIGH);\n"
         "}\n"
     )
     program = analyze(source)
     assert [
-        s.operation_id if s.supported else s.reason.value for s in program.setup.statements
+        s.operation_id if isinstance(s, OperationStatement) else s.reason.value
+        for s in program.setup.statements
     ] == [
         GPIO_PIN_MODE,
         "not_a_call",
@@ -458,13 +461,27 @@ def test_digital_write_accepts_a_boolean_literal_value():
     assert statement.value("VALUE") == LiteralValue(True, SemanticType.BOOLEAN)
 
 
-def test_digital_write_with_a_ternary_value_is_not_half_represented():
-    # `setMotorOutputs` in the real Panel 1 firmware writes exactly this.
+def test_digital_write_with_a_ternary_value_is_a_complete_call_not_half_of_one():
+    # `setMotorOutputs` in the real Panel 1 firmware writes exactly this. The
+    # fixed HIGH/LOW field cannot hold a ternary, so the statement is an
+    # ordinary call to `digitalWrite` with BOTH arguments kept - never an
+    # operation with one argument dropped.
     program = analyze("void loop() {\n  digitalWrite(MOTOR_IN1, run ? HIGH : LOW);\n}\n")
     assert program.loop.operation_statements == ()
-    (statement,) = program.loop.unsupported_statements
-    assert statement.reason is UnsupportedReason.UNSUPPORTED_ARGUMENT
+    (statement,) = program.loop.statements
+    assert isinstance(statement, CallStatement)
+    assert statement.function_name == "digitalWrite"
+    assert len(statement.arguments) == 2
+    assert statement.arguments[0] == SymbolValue("MOTOR_IN1")
+    assert isinstance(statement.arguments[1], TernaryValue)
     assert statement.source_text == "digitalWrite(MOTOR_IN1, run ? HIGH : LOW);"
+
+
+def test_digital_write_with_an_argument_nothing_can_state_stays_whole_source():
+    program = analyze("void loop() {\n  digitalWrite(MOTOR_IN1, table[i]);\n}\n")
+    (statement,) = program.loop.statements
+    assert isinstance(statement, UnsupportedStatement)
+    assert statement.reason is UnsupportedReason.UNSUPPORTED_ARGUMENT
 
 
 # =============================================================================
@@ -498,19 +515,22 @@ def test_delay_with_the_wrong_argument_count_is_carried_verbatim():
 @pytest.mark.parametrize(
     ("statement_source", "reason"),
     [
-        ("Serial.begin(115200);", UnsupportedReason.NOT_A_CALL),
-        ("client.setCallback(onMessage);", UnsupportedReason.NOT_A_CALL),
-        # An initialized `int counter = 0;` is a `VariableDeclaration` now;
-        # an uninitialized or qualified one is still carried verbatim.
-        ("int counter;", UnsupportedReason.NOT_A_CALL),
-        ("static int counter = 0;", UnsupportedReason.NOT_A_CALL),
-        ("motorRunning = true;", UnsupportedReason.NOT_A_CALL),
+        # P2: method calls, declarations (qualified or not) and assignments are
+        # understood - but only COMPLETELY. One argument/expression the value
+        # layer cannot state carries the WHOLE statement verbatim.
+        ("Serial.begin(table[i]);", UnsupportedReason.NOT_A_CALL),
+        ("client.publish(T, table[i]);", UnsupportedReason.NOT_A_CALL),
+        ("volatile int counter;", UnsupportedReason.NOT_A_CALL),
+        ("const int counter;", UnsupportedReason.NOT_A_CALL),
+        ("int a = 1, b = 2;", UnsupportedReason.NOT_A_CALL),
+        ("motorRunning = table[i];", UnsupportedReason.NOT_A_CALL),
+        ("message += static_cast<char>(payload[i]);", UnsupportedReason.NOT_A_CALL),
         ("if (ready) return;", UnsupportedReason.NOT_A_CALL),
         ("pinMode(2, OUTPUT)", UnsupportedReason.NOT_A_CALL),
-        ("analogWrite(2, 128);", UnsupportedReason.UNKNOWN_CALL),
+        ("analogWrite(2, table[i]);", UnsupportedReason.UNKNOWN_CALL),
         ("digitalWrite(2);", UnsupportedReason.ARGUMENT_COUNT),
-        ("delay(millis() + 5);", UnsupportedReason.UNSUPPORTED_ARGUMENT),
-        ("pinMode(2 + 1, OUTPUT);", UnsupportedReason.UNSUPPORTED_ARGUMENT),
+        ("delay(table[i]);", UnsupportedReason.UNSUPPORTED_ARGUMENT),
+        ("pinMode(table[i], OUTPUT);", UnsupportedReason.UNSUPPORTED_ARGUMENT),
     ],
 )
 def test_unsupported_statements_keep_their_text_and_say_why(statement_source, reason):
@@ -534,9 +554,17 @@ def test_a_zero_argument_call_to_an_unregistered_function_is_a_call_statement():
     assert statement.supported is True
 
 
-def test_a_call_to_an_unregistered_function_with_arguments_stays_unsupported():
-    # Deliberately NOT widened: `CallStatement` is zero-argument only.
+def test_a_call_to_an_unregistered_function_with_arguments_is_a_call_statement():
+    # P2: `CallStatement` carries its ordered arguments.
     program = analyze("void loop() {\n  setBrightness(128);\n}\n")
+    (statement,) = program.loop.statements
+    assert isinstance(statement, CallStatement)
+    assert statement.function_name == "setBrightness"
+    assert statement.arguments == (LiteralValue(128, SemanticType.NUMBER),)
+
+
+def test_a_call_with_an_argument_the_ir_cannot_state_stays_unsupported():
+    program = analyze("void loop() {\n  setBrightness(table[i]);\n}\n")
     (statement,) = program.loop.statements
     assert isinstance(statement, UnsupportedStatement)
     assert statement.reason is UnsupportedReason.UNKNOWN_CALL
@@ -548,7 +576,7 @@ def test_an_unsupported_construct_never_raises():
     program = analyze(
         "void loop() {\n"
         "  String message = client.read();\n"
-        "  message.trim();\n"
+        "  message.trim(table[i]);\n"
         "  publishState(message.c_str(), true);\n"
         "}\n"
     )
@@ -632,7 +660,11 @@ def test_a_call_that_is_supported_only_because_the_registry_declares_it():
     )
     program = analyze_document(analyze_source("void loop() {\n  delay(5);\n}\n"), operations=narrow)
     (statement,) = program.loop.statements
-    assert statement.reason is UnsupportedReason.UNKNOWN_CALL
+    # No longer the `time.delay` OPERATION - it is an ordinary call to a
+    # function named `delay`, which regenerates identically.
+    assert not isinstance(statement, OperationStatement)
+    assert isinstance(statement, CallStatement)
+    assert statement.function_name == "delay"
 
 
 def test_a_section_kind_without_a_container_operation_is_whole_and_uninterpreted():
@@ -718,9 +750,10 @@ def test_helper_functions_and_callbacks_are_representable_containers():
     assert call_statement.function_name == "helper"
 
     # `setup()`'s own `client.setCallback(onMessage);` is a method call on an
-    # object — still not a construct this layer recognizes.
+    # object - a `MethodCallStatement` since P2, keeping its receiver.
     (setup_statement,) = program.section("setup").statements
-    assert isinstance(setup_statement, UnsupportedStatement)
+    assert isinstance(setup_statement, MethodCallStatement)
+    assert (setup_statement.receiver, setup_statement.method_name) == ("client", "setCallback")
 
 
 def test_a_helper_functions_body_is_now_interpreted():
@@ -1062,32 +1095,36 @@ def test_panel_one_setup_mixes_supported_and_unsupported_statements():
     setup = program.setup
 
     # The seven pin_mode() calls remain the only statements the semantic
-    # layer claims as recognized operations.
+    # layer claims as recognized OPERATIONS.
     assert len(setup.operation_statements) == 7
     assert {s.operation.operation_id for s in setup.operation_statements} == {
         "gpio.pin_mode"
     }
 
-    # Everything else -- the serial diagnostics and the real Wi-Fi/MQTT
-    # connect sequence this firmware performs -- is carried verbatim as
-    # unsupported rather than dropped, approximated, or misclassified as
-    # understood. Checked by content rather than by a raw count, since that
-    # count is free to change as the connect/diagnostic sequence does without
-    # affecting what this test actually cares about: the supported/
-    # unsupported split itself.
-    unsupported_texts = {s.source_text for s in setup.unsupported_statements}
+    # P2: the serial diagnostics and the Wi-Fi/MQTT connect sequence are method
+    # calls and a function call with an argument - understood, each keeping its
+    # receiver, method and ordered arguments. What stays carried verbatim is
+    # what P2 does not model: here, the two explanatory comments.
+    method_calls = {s.source_text: s for s in setup.statements if isinstance(s, MethodCallStatement)}
     for expected in (
         "Serial.begin(115200);",
-        "setMotorOutputs(false);",
         "WiFi.begin(WIFI_SSID, WIFI_PASSWORD);",
         "client.setServer(MQTT_BROKER, MQTT_PORT);",
         "client.setCallback(onMessage);",
     ):
-        assert expected in unsupported_texts
+        assert expected in method_calls
+    begin = method_calls["WiFi.begin(WIFI_SSID, WIFI_PASSWORD);"]
+    assert (begin.receiver, begin.method_name) == ("WiFi", "begin")
+    assert begin.arguments == (SymbolValue("WIFI_SSID"), SymbolValue("WIFI_PASSWORD"))
+    calls = {s.source_text: s for s in setup.statements if isinstance(s, CallStatement)}
+    assert calls["setMotorOutputs(false);"].arguments == (
+        LiteralValue(False, SemanticType.BOOLEAN),
+    )
+    assert all(s.source_text.startswith("//") for s in setup.unsupported_statements)
 
     # No statement is claimed twice or silently dropped between the two
     # buckets.
-    assert len(setup.statements) == len(setup.operation_statements) + len(
+    assert len(setup.statements) == len([s for s in setup.statements if s.supported]) + len(
         setup.unsupported_statements
     )
 
@@ -1095,15 +1132,21 @@ def test_panel_one_setup_mixes_supported_and_unsupported_statements():
 def test_panel_one_loop_mixes_call_statements_and_one_unsupported_method():
     # CORRECTED: `ensureConnected()` and `pollButtons()` are zero-argument
     # calls to functions this firmware defines itself — both are
-    # `CallStatement`s now. `client.loop();` is a method call on an object and
-    # stays unsupported; no `OperationStatement` is claimed either way.
+    # `CallStatement`s now. `client.loop();` is a method call on an object - a
+    # `MethodCallStatement` since P2; no `OperationStatement` is claimed either way.
     program = analyze(PANEL_ONE_INO.read_text(encoding="utf-8"))
     loop = program.loop
     assert loop.supported is True
     assert loop.operation_statements == ()
     calls = [s for s in loop.statements if isinstance(s, CallStatement)]
     assert [s.function_name for s in calls] == ["ensureConnected", "pollButtons"]
-    assert [s.source_text for s in loop.unsupported_statements] == ["client.loop();"]
+    assert loop.unsupported_statements == ()
+    (method_call,) = [s for s in loop.statements if isinstance(s, MethodCallStatement)]
+    assert (method_call.receiver, method_call.method_name, method_call.arguments) == (
+        "client",
+        "loop",
+        (),
+    )
 
 
 def test_panel_one_mqtt_implementation_is_never_semantically_claimed():
@@ -1117,7 +1160,23 @@ def test_panel_one_mqtt_implementation_is_never_semantically_claimed():
     on_message = program.section("callback_onMessage")
     assert on_message.supported is True
     assert on_message.operation_statements == ()
-    assert all(isinstance(s, UnsupportedStatement) for s in on_message.statements)
+    # The declaration, the three String method calls and the `for` loop are
+    # understood; the `String(topic)` comparison is outside the grammar and stays
+    # carried verbatim, in place.
+    assert [type(s).__name__ for s in on_message.statements] == [
+        "VariableDeclaration",
+        "MethodCallStatement",
+        "ForStatement",
+        "MethodCallStatement",
+        "MethodCallStatement",
+        "UnsupportedStatement",
+    ]
+    # P3 reads the `for` HEADER and body; the statement inside it is the one
+    # thing still outside the expression grammar (a cast and an index).
+    loop = on_message.statements[2]
+    (inside,) = loop.body
+    assert isinstance(inside, UnsupportedStatement)
+    assert inside.source_text == "message += static_cast<char>(payload[i]);"
 
     # applyCommand() IS partially understood now — its `if (message == "X")`
     # gate is exactly the construct the correction targets — but the MQTT

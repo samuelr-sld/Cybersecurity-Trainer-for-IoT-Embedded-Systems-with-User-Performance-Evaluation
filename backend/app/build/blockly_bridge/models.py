@@ -47,6 +47,7 @@ from enum import Enum
 from typing import Any
 
 from app.build.blockly_bridge.errors import BlocklyModelError
+from app.build.blockly_bridge.signature_display import signature_extra_state
 from app.build.semantic import UnsupportedReason
 
 #: The same shape the block catalog requires of an input name, and therefore
@@ -63,6 +64,15 @@ BLOCKLY_LANGUAGE_VERSION = 0
 FIRST_BLOCK_X = 24
 FIRST_BLOCK_Y = 24
 BLOCK_VERTICAL_GAP = 320
+
+#: The Blockly type a `PreservedSource` is DRAWN as. Not a catalog block, no
+#: semantic operation and no generator. The reverse reader (`workspace_state.py`)
+#: reads only its `id` and its position in a chain, at every depth: the
+#: position is where the fragment goes, and the fragment placed there is the
+#: record with that id in the `preserved` list beside the workspace - never
+#: this block's field.
+PRESERVED_BLOCK_TYPE = "preserved_source"
+PRESERVED_TEXT_FIELD = "TEXT"
 
 
 class BridgeReason(str, Enum):
@@ -166,6 +176,27 @@ class BlocklyValueInput:
 
 
 @dataclass(frozen=True)
+class BlocklyBranch:
+    """A SECOND (or later) statement input of a block: `else`, a `for`'s step.
+
+    A block's first statement input is `BlocklyBlock.body_input`/`body`; a block
+    with more than one (`logic_if`: DO, ELSE_IF, ELSE; `for_loop`: DO, INIT,
+    STEP) carries the others here, each by the input name the catalog declares.
+    Same item type as a body - blocks and preserved source, in order.
+    """
+
+    name: str
+    items: tuple[BlocklyBlock | PreservedSource, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not re.match(_FIELD_NAME_PATTERN, self.name):
+            raise BlocklyModelError(f"invalid branch input name: {self.name!r}")
+        for item in self.items:
+            if not isinstance(item, (BlocklyBlock, PreservedSource)):
+                raise BlocklyModelError(f"branch {self.name}: not a body item: {item!r}")
+
+
+@dataclass(frozen=True)
 class BlocklyBlock:
     """One block: a catalog block type, its field values, and its body.
 
@@ -196,12 +227,14 @@ class BlocklyBlock:
     exact C++ declarator of the function this container's body belongs to
     (`"static void applyCommand(const String &message)"`), carried so this
     IN-MEMORY object can round-trip back to an equal `SemanticSection` without
-    losing it. It is PROVENANCE exactly like `source_text` — not part of the
-    Blockly workspace state (`to_state()` never writes it; a real editor never
-    sees or sends it) and not derived from a field. A REAL edit over the wire
-    still needs `app/build/section_blockly.py::program_with_section` to copy it
-    across explicitly, because `app/build/blockly_bridge/workspace_state.py`
-    parses a browser's JSON, which never carried this field to begin with; this
+    losing it. It is PROVENANCE exactly like `source_text` and not derived from
+    a field. Its one appearance in the workspace state is a DISPLAY-ONLY
+    `extraState` describing it for the block's read-only header (P4.2,
+    `signature_display.py`), which the reverse reader never reads. So a REAL
+    edit over the wire still needs `app/build/section_blockly.py::
+    program_with_section` to copy the section's own signature across
+    explicitly, because `app/build/blockly_bridge/workspace_state.py` never
+    reconstructs one from a browser's JSON; this
     is what makes the plain in-process `program_to_blockly` -> `blockly_to_
     semantic` round trip (no browser, no section_blockly.py) equal on its own.
     None for `program.setup`/`program.loop` and for every statement block.
@@ -217,6 +250,8 @@ class BlocklyBlock:
     body: tuple[BlocklyBlock | PreservedSource, ...] = ()
     #: VALUE sockets and the value block in each — see `BlocklyValueInput`.
     values: tuple[BlocklyValueInput, ...] = ()
+    #: Statement inputs beyond `body_input` - see `BlocklyBranch`.
+    branches: tuple[BlocklyBranch, ...] = ()
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -257,9 +292,16 @@ class BlocklyBlock:
         for item in self.values:
             if not isinstance(item, BlocklyValueInput):
                 raise BlocklyModelError(f"{self.block_type}: not a value input: {item!r}")
-        if len(set(socket_names)) != len(socket_names) or self.body_input in socket_names:
+        for branch in self.branches:
+            if not isinstance(branch, BlocklyBranch):
+                raise BlocklyModelError(f"{self.block_type}: not a branch: {branch!r}")
+        branch_names = [branch.name for branch in self.branches]
+        every_input = [*socket_names, *branch_names]
+        if self.body_input is not None:
+            every_input.append(self.body_input)
+        if len(set(every_input)) != len(every_input):
             raise BlocklyModelError(f"{self.block_type}: duplicate input names")
-        if set(socket_names) & set(names):
+        if set(every_input) & set(names):
             raise BlocklyModelError(f"{self.block_type}: a name is both a field and an input")
 
     def value(self, name: str) -> BlocklyBlock | None:
@@ -283,35 +325,99 @@ class BlocklyBlock:
             if isinstance(item, PreservedSource)
         )
 
-    def to_state(self) -> dict[str, Any]:
-        """This block as Blockly serialization JSON, body chained by `next`.
+    def branch(self, name: str) -> BlocklyBranch | None:
+        """The extra statement input with this name, or None."""
+        for branch in self.branches:
+            if branch.name == name:
+                return branch
+        return None
 
-        Only blocks appear in the chain. Preserved fragments are reported
-        separately by `BlocklyProgram.preserved`, with the index that says
-        where they sat — a Blockly workspace state cannot hold a node that is
-        not a block, and faking one would be the dishonesty this phase is
-        built to avoid.
+    @property
+    def bodies(self) -> tuple[tuple[str, tuple[BlocklyBlock | PreservedSource, ...]], ...]:
+        """Every statement input this block fills, primary first: `(name, items)`."""
+        found: list[tuple[str, tuple[BlocklyBlock | PreservedSource, ...]]] = []
+        if self.body_input is not None:
+            found.append((self.body_input, self.body))
+        found.extend((branch.name, branch.items) for branch in self.branches)
+        return tuple(found)
+
+    def child_id(self, block_id: str, input_name: str, index: int) -> str:
+        """The id of the item at `index` in this block's `input_name` body.
+
+        Deterministic and structural: the primary body's items are `<id>.<n>`,
+        an extra input's are `<id>.<INPUT>.<n>`. It is how a `preserved`
+        record names the block whose body holds it.
+        """
+        if input_name == self.body_input:
+            return f"{block_id}.{index}"
+        return f"{block_id}.{input_name}.{index}"
+
+    def to_state(self, block_id: str | None = None) -> dict[str, Any]:
+        """This block as Blockly serialization JSON, bodies chained by `next`.
+
+        Preserved fragments are drawn too, as read-only `preserved_source`
+        blocks at the position they hold in their body, so a student sees the
+        C++ the toolbox cannot yet express instead of an empty container. They
+        are display only: the authoritative copy of each fragment is reported
+        separately by `BlocklySection.records`, and the reverse reader ignores
+        these blocks.
+
+        `block_id`, when given, is written as the block's `id` and derives the
+        ids of every body item beneath it (`child_id`). Blockly keeps a
+        provided id through load and save, which is what lets a record say
+        WHICH block's body a fragment belongs to and survive an edit. Value
+        blocks carry no body and no id.
         """
         state: dict[str, Any] = {"type": self.block_type}
+        if block_id is not None:
+            state["id"] = block_id
+        # A named function's declarator, for the container's READ-ONLY header
+        # (P4.2). Display only: Blockly round-trips it through the block's
+        # saveExtraState/loadExtraState, the reverse reader never reads it, and
+        # a submission's signature is always the section's own - see
+        # `signature_display.py`.
+        extra = signature_extra_state(self.container_signature)
+        if extra is not None:
+            state["extraState"] = extra
         if self.fields:
             state["fields"] = {field.name: field.value for field in self.fields}
         inputs: dict[str, Any] = {
             item.name: {"block": item.block.to_state()} for item in self.values
         }
-        chain = _chain(self.child_blocks)
-        if chain is not None:
-            assert self.body_input is not None  # guaranteed by __post_init__
-            inputs[self.body_input] = {"block": chain}
+        for name, items in self.bodies:
+            chain = _chain(
+                items, None if block_id is None else lambda index, n=name: self.child_id(block_id, n, index)
+            )
+            if chain is not None:
+                inputs[name] = {"block": chain}
         if inputs:
             state["inputs"] = inputs
         return state
 
 
-def _chain(blocks: tuple[BlocklyBlock, ...]) -> dict[str, Any] | None:
-    """A statement stack as one nested `next`-linked state, or None if empty."""
+def _preserved_state(item: PreservedSource, block_id: str | None = None) -> dict[str, Any]:
+    """A preserved fragment as its read-only, display-only Blockly block."""
+    state: dict[str, Any] = {"type": PRESERVED_BLOCK_TYPE}
+    if block_id is not None:
+        state["id"] = block_id
+    state["fields"] = {PRESERVED_TEXT_FIELD: item.text}
+    return state
+
+
+def _chain(items: tuple[BlocklyBlock | PreservedSource, ...], ids=None) -> dict[str, Any] | None:
+    """A statement stack as one nested `next`-linked state, or None if empty.
+
+    `ids`, when given, maps an item's index to the id it is written under.
+    """
     state: dict[str, Any] | None = None
-    for block in reversed(blocks):
-        current = block.to_state()
+    for index in range(len(items) - 1, -1, -1):
+        item = items[index]
+        item_id = None if ids is None else ids(index)
+        current = (
+            _preserved_state(item, item_id)
+            if isinstance(item, PreservedSource)
+            else item.to_state(item_id)
+        )
         if state is not None:
             current["next"] = {"block": state}
         state = current
@@ -320,19 +426,37 @@ def _chain(blocks: tuple[BlocklyBlock, ...]) -> dict[str, Any] | None:
 
 @dataclass(frozen=True)
 class PreservedRecord:
-    """One preserved fragment, located: which section, and where in its body.
+    """One preserved fragment, located: which section, and where in which body.
 
-    The index is the fragment's position among ALL of the section's ordered
-    items, blocks included, so `supported / unsupported / supported` comes
+    `index` is the fragment's position among ALL the items of the body that
+    holds it, blocks included, so `supported / unsupported / supported` comes
     back as indices 0, 1, 2 rather than as an undated footnote.
+
+    `parent_id` and `input_name` say WHICH body: the id of the block whose
+    statement input `input_name` holds the fragment (`section_id` itself for
+    the section's own container; a `<section>.<n>...` path for a block nested
+    inside it). `fragment_id` is the id of the fragment's own drawn block. All
+    three are deterministic functions of the tree (`BlocklyBlock.child_id`), so
+    a nested fragment is as authoritative as a section-level one: the record,
+    not the drawing, is what the reverse reader trusts.
     """
 
     section_id: str
     index: int
     source: PreservedSource
+    parent_id: str = ""
+    input_name: str | None = None
+    fragment_id: str = ""
 
     def to_record(self) -> dict[str, Any]:
-        return {"sectionId": self.section_id, "index": self.index, **self.source.to_record()}
+        return {
+            "sectionId": self.section_id,
+            "index": self.index,
+            "id": self.fragment_id or f"{self.section_id}.{self.index}",
+            "parentId": self.parent_id or self.section_id,
+            "input": self.input_name,
+            **self.source.to_record(),
+        }
 
 
 @dataclass(frozen=True)
@@ -375,12 +499,47 @@ class BlocklySection:
 
     @property
     def records(self) -> tuple[PreservedRecord, ...]:
-        """Every preserved fragment of this section, located by index."""
-        return tuple(
-            PreservedRecord(section_id=self.section_id, index=index, source=item)
-            for index, item in enumerate(self.items)
-            if isinstance(item, PreservedSource)
-        )
+        """Every preserved fragment of this section, located - at any depth.
+
+        Section-level fragments first-come in body order, then nested ones as
+        they are met walking the tree depth first, so the list is stable and a
+        record's `parent_id` always names a block that is drawn (see
+        `BlocklyBlock.to_state`).
+        """
+        found: list[PreservedRecord] = []
+        if self.block is None:
+            for index, item in enumerate(self.preserved):
+                found.append(
+                    PreservedRecord(
+                        section_id=self.section_id,
+                        index=index,
+                        source=item,
+                        parent_id=self.section_id,
+                        fragment_id=f"{self.section_id}.{index}",
+                    )
+                )
+            return tuple(found)
+
+        def walk(block: BlocklyBlock, block_id: str) -> None:
+            for name, items in block.bodies:
+                for index, item in enumerate(items):
+                    child_id = block.child_id(block_id, name, index)
+                    if isinstance(item, PreservedSource):
+                        found.append(
+                            PreservedRecord(
+                                section_id=self.section_id,
+                                index=index,
+                                source=item,
+                                parent_id=block_id,
+                                input_name=name,
+                                fragment_id=child_id,
+                            )
+                        )
+                    else:
+                        walk(item, child_id)
+
+        walk(self.block, self.section_id)
+        return tuple(found)
 
     @property
     def representable(self) -> bool:
@@ -418,7 +577,7 @@ class BlocklySection:
         """
         blocks: list[dict[str, Any]] = []
         if self.block is not None:
-            state = self.block.to_state()
+            state = self.block.to_state(self.section_id)
             state["x"] = FIRST_BLOCK_X
             state["y"] = FIRST_BLOCK_Y
             blocks.append(state)
@@ -483,8 +642,8 @@ class BlocklyProgram:
         rendered beside it by `to_representation()`.
         """
         blocks: list[dict[str, Any]] = []
-        for index, block in enumerate(self.blocks):
-            state = block.to_state()
+        for index, section in enumerate(s for s in self.sections if s.block is not None):
+            state = section.block.to_state(section.section_id)
             state["x"] = FIRST_BLOCK_X
             state["y"] = FIRST_BLOCK_Y + index * BLOCK_VERTICAL_GAP
             blocks.append(state)

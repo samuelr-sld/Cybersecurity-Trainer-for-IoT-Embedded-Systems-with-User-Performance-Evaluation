@@ -231,7 +231,11 @@ def build_default_bindings() -> FieldBindingTable:
                 FieldBinding("PIN", FieldKind.TEXT),
                 FieldBinding("VALUE", FieldKind.DROPDOWN, ("HIGH", "LOW")),
             ),
-            TIME_DELAY: (FieldBinding("MS", FieldKind.NUMBER),),
+            # TEXT, not NUMBER: `delay(BUZZER_CHIRP_MS)` names a constant, which a
+            # numeric field cannot hold. A TEXT field parses back to the same
+            # tokens a pin does (a number or a name), and `SymbolValue` fits a
+            # NUMBER parameter, so nothing is loosened beyond what a pin already is.
+            TIME_DELAY: (FieldBinding("MS", FieldKind.TEXT),),
         }
     )
 

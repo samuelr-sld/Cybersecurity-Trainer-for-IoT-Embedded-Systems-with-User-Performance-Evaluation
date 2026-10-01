@@ -840,7 +840,13 @@ def test_the_generator_spells_every_declaration_type_the_way_the_analyzer_reads_
     from app.build.semantic.analyzer import _DECLARATION_TYPES
 
     assert set(CPP_DECLARATION_TYPES) == set(DECLARABLE_TYPES)
-    assert {value: key for key, value in _DECLARATION_TYPES.items()} == CPP_DECLARATION_TYPES
+    # The analyzer reads MORE spellings than the default three (`unsigned long`,
+    # ...); the defaults are exactly the generator's own.
+    assert {
+        value: key
+        for key, value in _DECLARATION_TYPES.items()
+        if key in CPP_DECLARATION_TYPES.values()
+    } == CPP_DECLARATION_TYPES
 
 
 def test_a_missing_emission_is_a_clean_miss_rather_than_a_guess():

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { withParticipant } from '../api/trainerApi'
+import { withParticipant, withResumeSession } from '../api/trainerApi'
+import { recallSession, rememberSession } from '../session/activeSession'
 
 export const CONNECTION_STATUS = {
   CONNECTING: 'connecting',
@@ -44,54 +45,79 @@ export default function useBuildSocket(handlers) {
   const [status, setStatus] = useState(CONNECTION_STATUS.CONNECTING)
 
   useEffect(() => {
-    // See useHackSocket: attributes the recorded session for Evaluation.
-    const socket = new WebSocket(withParticipant(resolveWsUrl(), handlersRef.current.participantId))
-    socketRef.current = socket
+    // The socket opens on the next tick, not synchronously: React's Strict
+    // Mode mounts, cleans up and remounts an effect back to back, and a
+    // synchronous open would create a real backend session for the probe and
+    // leave it behind. Cleanup cancels the timer, so the probe opens nothing.
+    //
+    // `participantId` (read once, at mount) attributes this session's
+    // recorded activity to the signed-in student for Evaluation. The
+    // remembered session id asks the backend to re-attach to the session a
+    // reload interrupted (a reload destroys this component, not the session).
+    let socket = null
+    const opener = setTimeout(() => {
+      socket = new WebSocket(
+        withResumeSession(
+          withParticipant(resolveWsUrl(), handlersRef.current.participantId),
+          recallSession('build'),
+        ),
+      )
+      socketRef.current = socket
 
-    socket.onopen = () => setStatus(CONNECTION_STATUS.CONNECTED)
-    socket.onclose = () => setStatus(CONNECTION_STATUS.DISCONNECTED)
-    socket.onerror = () => setStatus(CONNECTION_STATUS.ERROR)
-    socket.onmessage = (evt) => {
-      let message
-      try {
-        message = JSON.parse(evt.data)
-      } catch {
-        return
+      socket.onopen = () => setStatus(CONNECTION_STATUS.CONNECTED)
+      socket.onclose = () => setStatus(CONNECTION_STATUS.DISCONNECTED)
+      socket.onerror = () => setStatus(CONNECTION_STATUS.ERROR)
+      socket.onmessage = (evt) => {
+        let message
+        try {
+          message = JSON.parse(evt.data)
+        } catch {
+          return
+        }
+        const h = handlersRef.current
+        switch (message.type) {
+          case 'session':
+            rememberSession('build', message.session_id)
+            h.onSession?.(message)
+            break
+          case 'state':
+            h.onState?.(message.data)
+            break
+          case 'section':
+            // Phase B8 correction: the read leg of the section -> Blockly
+            // contract (backend/app/models/build_messages.py: BuildSectionMessage).
+            // Answers a `section_blockly` request — {path, sectionId,
+            // representable, workspace, preserved} — and is never followed by
+            // a `state` frame, since opening a section to look at it changes
+            // nothing.
+            h.onSection?.(message.data)
+            break
+          case 'event':
+            h.onEvent?.(message)
+            break
+          case 'error':
+            h.onError?.(message.message)
+            break
+          default:
+            break
+        }
       }
-      const h = handlersRef.current
-      switch (message.type) {
-        case 'session':
-          h.onSession?.(message)
-          break
-        case 'state':
-          h.onState?.(message.data)
-          break
-        case 'section':
-          // Phase B8 correction: the read leg of the section -> Blockly
-          // contract (backend/app/models/build_messages.py: BuildSectionMessage).
-          // Answers a `section_blockly` request — {path, sectionId,
-          // representable, workspace, preserved} — and is never followed by
-          // a `state` frame, since opening a section to look at it changes
-          // nothing.
-          h.onSection?.(message.data)
-          break
-        case 'event':
-          h.onEvent?.(message)
-          break
-        case 'error':
-          h.onError?.(message.message)
-          break
-        default:
-          break
-      }
-    }
+    }, 0)
 
     return () => {
-      socket.onopen = null
-      socket.onclose = null
-      socket.onerror = null
-      socket.onmessage = null
-      socket.close()
+      // Detach handlers before closing so no late native event (the close
+      // this triggers included) can call back into a hook instance whose
+      // owner is already unmounting. Closing the socket does NOT end the
+      // backend session — it is detached and stays resumable for its grace
+      // period; ending one is an explicit request (App.jsx).
+      clearTimeout(opener)
+      if (socket) {
+        socket.onopen = null
+        socket.onclose = null
+        socket.onerror = null
+        socket.onmessage = null
+        socket.close()
+      }
       socketRef.current = null
     }
   }, [])

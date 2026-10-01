@@ -188,6 +188,7 @@ from app.hack_live_mqtt import configure_live_mqtt
 from app.pager import PAGER_PROMPT, Pager, PagerAction
 from app.participants import resolve_participant
 from app.scenario_selection import select_session_scenario
+from app.session_panel_guard import resume_panel_matches
 from app.sessions import HackSession, session_manager
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -590,6 +591,29 @@ async def _process_frames(
         await _handle_message(channel, session, message)
 
 
+async def _replay_session(channel: _Channel, session: HackSession) -> None:
+    """Re-send what a re-attached page cannot have: the session's own record.
+
+    Read straight from the recorder and the scenario — the same rows the
+    database holds — so nothing is reconstructed or invented. The terminal's
+    scrollback is not replayed (xterm.js owns that and a reloaded page starts
+    it empty); the session, its events and its state are what matter.
+    """
+    await channel.send(
+        OutputMessage(data="[backend] session resumed - your previous activity is preserved\r\n")
+    )
+    for record in session.recorder.events:
+        await channel.send(
+            EventMessage(
+                event=record.event_type,
+                data=dict(record.data),
+                occurred_at=to_iso(record.occurred_at),
+                sequence=record.sequence,
+            )
+        )
+    await channel.send(StateMessage(data=session.scenario.snapshot()))
+
+
 @router.websocket("/ws/hack")
 async def hack_websocket(websocket: WebSocket) -> None:
     """Serve one Hack Mode terminal session."""
@@ -612,23 +636,36 @@ async def hack_websocket(websocket: WebSocket) -> None:
     # flow — or with a board whose panel, package or scenario id cannot be
     # resolved, the selection is the long-standing default scenario, and the
     # reason is logged rather than shown to the student.
-    selection = select_session_scenario()
-    # If the attached panel declares a machine-checkable authorization
-    # criterion and the lab credentials are provisioned, the session's
-    # `mosquitto_pub`/`mosquitto_sub` act over the REAL training broker instead
-    # of the in-memory simulation. This is still a lookup + in-memory wiring:
-    # it attaches connection settings to the scenario and opens NOTHING here
-    # (the link connects per command, on a worker thread). With no such panel,
-    # no credentials, or the feature disabled, it attaches nothing and the
-    # session stays simulated — the ordinary development flow. It never raises.
-    configure_live_mqtt(selection)
-    # Evaluation: attribute this session to the registered participant the
-    # client named (`?participant=<student number>`), or to nobody. A lookup
-    # only — it never refuses the connection and sends no frame.
+    # RELOAD-SAFE SESSIONS. A client that already has a session (it asked
+    # `?session=<id>` after a page reload) is re-attached to it instead of
+    # getting a new one: same scenario, same recorder, same telemetry. The
+    # lookup is a dict read; anything that cannot be honoured (unknown or
+    # ended id, someone else's session) falls through to the normal new-session
+    # path below, so a stale id can never corrupt or block a start.
     participant_id = resolve_participant(websocket.query_params.get("participant"))
-    session = await session_manager.create(
-        scenario=selection.scenario, participant_id=participant_id
-    )
+    session = session_manager.resume(websocket.query_params.get("session"), participant_id)
+    if session is not None and not resume_panel_matches(session_manager.panel_of(session.session_id)):
+        session = None  # the session's panel is not the attached one: start normally
+    resumed = session is not None
+    if session is None:
+        selection = select_session_scenario()
+        # If the attached panel declares a machine-checkable authorization
+        # criterion and the lab credentials are provisioned, the session's
+        # `mosquitto_pub`/`mosquitto_sub` act over the REAL training broker
+        # instead of the in-memory simulation. Still a lookup + in-memory
+        # wiring; it opens NOTHING here and never raises.
+        configure_live_mqtt(selection)
+        session = await session_manager.create(
+            scenario=selection.scenario,
+            participant_id=participant_id,
+            panel_id=selection.panel_id,
+        )
+        described = selection.describe()
+    else:
+        described = "resumed"
+    # The connection now serving this session. Its token is how the teardown
+    # below knows whether it is still the one entitled to detach it.
+    token = session_manager.claim(session.session_id)
     channel = _Channel(websocket)
     # Started here, but it opens nothing: it parks on an empty queue until a
     # serial command connects the board. See `_pump_serial`.
@@ -636,7 +673,10 @@ async def hack_websocket(websocket: WebSocket) -> None:
         _pump_serial(channel, session), name=f"serial-pump-{session.session_id}"
     )
     logger.info(
-        "hack session opened: %s [%s]", session.session_id, selection.describe()
+        "hack session %s: %s [%s]",
+        "resumed" if resumed else "opened",
+        session.session_id,
+        described,
     )
 
     # See `_process_frames` for why receiving and handling are two tasks.
@@ -648,8 +688,11 @@ async def hack_websocket(websocket: WebSocket) -> None:
     receiving: asyncio.Future | None = None
 
     try:
-        await channel.send(SessionMessage(session_id=session.session_id))
-        await channel.send(OutputMessage(data=BANNER))
+        await channel.send(SessionMessage(session_id=session.session_id, resumed=resumed))
+        if resumed:
+            await _replay_session(channel, session)
+        else:
+            await channel.send(OutputMessage(data=BANNER))
 
         while True:
             receiving = asyncio.ensure_future(websocket.receive())
@@ -684,25 +727,25 @@ async def hack_websocket(websocket: WebSocket) -> None:
         # session at all: both leaked on every real disconnect, and the held
         # port then blocked Build Mode from flashing that board.
         #
-        # `worker.cancel()` stops a command still running for a student who
-        # has left: a real `esptool` read in flight is killed with its whole
-        # process tree (`app/build/process.py::run_capture`) rather than
-        # left reading until its timeout, holding the port.
-        #
         # So teardown is synchronous calls that cannot be interrupted.
-        # `pump.cancel()` only requests cancellation (the task ends on the
-        # next loop pass, writing nothing — `_Channel.send` absorbs a closed
-        # socket), `release()` closes the port inline, `recorder.finish()`
-        # stamps the session's end time with one SQLite UPDATE, and
-        # `discard()` drops the registry entry without taking the async
-        # lock. See `SerialTransport.release`, `HackEventRecorder.finish`
-        # and `SessionManager.discard` — all three are documented as
-        # await-free precisely because of this block.
+        #
+        # A DISCONNECT IS NOT THE END OF THE SESSION. What belongs to this
+        # *connection* is stopped: the receive future, the worker (a command
+        # still running for a client that has left is killed with its process
+        # tree, `app/build/process.py::run_capture`) and the serial pump.
+        # `detach` then releases the serial port (so it cannot block Build
+        # Mode's flasher) and starts the resume grace period; the session,
+        # its scenario and its recorder stay alive for a reloaded page to
+        # re-attach to. It is finished by `SessionManager.end` — an explicit
+        # end request, or the grace period running out — never by a socket
+        # closing. If this connection was superseded by a resume (or the
+        # session was ended explicitly), it no longer owns the session and
+        # touches nothing of it.
         if receiving is not None:
             receiving.cancel()
         worker.cancel()
         pump.cancel()
-        session.serial.release()
-        session.recorder.finish()
-        session_manager.discard(session.session_id)
-        logger.info("hack session closed: %s", session.session_id)
+        if session_manager.detach(session, token):
+            logger.info("hack session detached: %s", session.session_id)
+        else:
+            logger.info("hack connection closed (session not owned): %s", session.session_id)

@@ -83,23 +83,46 @@ from app.build.blockly_bridge.models import (
 from app.build.blockly_bridge.structural import (
     ARITHMETIC_BLOCK_IDS,
     BINARY_OPERANDS,
+    CALL_ARGUMENT_INPUTS,
     COMPARISON_BLOCK_IDS,
-    DECLARATION_TYPE_TOKENS,
+    DECLARATION_QUALIFIER_TOKENS,
+    DECLARATION_TYPE_FOR_TOKEN,
+    ELSE_IF_INPUT,
+    ELSE_INPUT,
+    FOR_INIT_INPUT,
+    FOR_STEP_INPUT,
     FUNCTIONS_CALL_EXISTING_BLOCK_ID,
+    FUNCTIONS_CALL_METHOD_BLOCK_ID,
+    FUNCTIONS_CALL_VALUE_BLOCK_ID,
     FUNCTIONS_RETURN_VOID_BLOCK_ID,
+    LOGIC_FALSE_BLOCK_ID,
     LOGIC_IF_BLOCK_ID,
     LOGIC_IF_EQUALS_BLOCK_ID,
+    LOGIC_NOT_BLOCK_ID,
+    LOGIC_TERNARY_BLOCK_ID,
+    LOGIC_TRUE_BLOCK_ID,
+    LOGICAL_BLOCK_IDS,
+    LOOPS_FOR_BLOCK_ID,
     MATH_NUMBER_BLOCK_ID,
     TEXT_LITERAL_BLOCK_ID,
     VARIABLES_DECLARE_BLOCK_ID,
     VARIABLES_GET_BLOCK_ID,
+    VARIABLES_SET_BLOCK_ID,
+    VARIABLES_UPDATE_BLOCK_ID,
 )
 from app.build.semantic import (
+    ASSIGNMENT_OPERATORS,
     ArithmeticValue,
+    AssignmentStatement,
     CallStatement,
+    CallValue,
     ComparisonValue,
     ConditionalStatement,
+    ForStatement,
     LiteralValue,
+    LogicalValue,
+    MethodCallStatement,
+    NotValue,
     OperationForm,
     OperationStatement,
     OperationValue,
@@ -114,8 +137,10 @@ from app.build.semantic import (
     SemanticType,
     SemanticValue,
     SymbolValue,
+    TernaryValue,
     UnsupportedReason,
     UnsupportedStatement,
+    UpdateStatement,
     VariableDeclaration,
     default_semantic_operations,
 )
@@ -124,7 +149,8 @@ from app.build.semantic import (
 #: tables, derived rather than restated so the two directions cannot disagree.
 _COMPARISON_OPERATOR_FOR = {block_id: operator for operator, block_id in COMPARISON_BLOCK_IDS.items()}
 _ARITHMETIC_OPERATOR_FOR = {block_id: operator for operator, block_id in ARITHMETIC_BLOCK_IDS.items()}
-_DECLARATION_TYPE_FOR = {token: value_type for value_type, token in DECLARATION_TYPE_TOKENS.items()}
+_LOGICAL_OPERATOR_FOR = {block_id: operator for operator, block_id in LOGICAL_BLOCK_IDS.items()}
+_DECLARATION_QUALIFIERS_FOR = {token: qualifiers for qualifiers, token in DECLARATION_QUALIFIER_TOKENS.items()}
 
 #: A NAME field's token must be a C++ identifier: it is written into firmware
 #: verbatim, so anything wider would let a field carry arbitrary source.
@@ -284,9 +310,19 @@ def _statement(
         return _if_statement(item, definition, section_id, catalog, bindings, operations)
     if definition.block_id == VARIABLES_DECLARE_BLOCK_ID:
         return _declare_statement(item, definition, catalog, operations)
+    if definition.block_id == LOOPS_FOR_BLOCK_ID:
+        return _for_statement(item, definition, section_id, catalog, bindings, operations)
+    if definition.block_id == VARIABLES_UPDATE_BLOCK_ID:
+        return _update_statement(item, definition)
+    if definition.block_id == VARIABLES_SET_BLOCK_ID:
+        return _assign_statement(item, definition, catalog, operations)
+    if definition.block_id == FUNCTIONS_CALL_EXISTING_BLOCK_ID:
+        return _call_existing_statement(item, definition, section_id, catalog, operations)
+    if definition.block_id == FUNCTIONS_CALL_METHOD_BLOCK_ID:
+        return _method_call_statement(item, definition, section_id, catalog, operations)
     if definition.block_id == FUNCTIONS_RETURN_VOID_BLOCK_ID:
         _require_no_operands(item, definition, fields=())
-        if item.body or item.body_input is not None:
+        if item.body or item.body_input is not None or item.branches:
             raise UnsupportedBlocklyStructureError(
                 f"{item.block_type}: {definition.block_id} declares no statement body"
             )
@@ -298,14 +334,12 @@ def _statement(
             f"{item.block_type}: {definition.block_id} takes no value inputs, but this "
             f"block carries {[value.name for value in item.values]}"
         )
-    if definition.block_id == FUNCTIONS_CALL_EXISTING_BLOCK_ID:
-        return _call_existing_statement(item, definition, section_id)
     if definition.block_id == LOGIC_IF_EQUALS_BLOCK_ID:
         return _if_equals_statement(item, definition, section_id, catalog, bindings, operations)
 
     operation = _operation_of(definition, operations)
     _require_form(definition, operation, BlockKind.STATEMENT, OperationForm.STATEMENT)
-    if item.body or item.body_input is not None:
+    if item.body or item.body_input is not None or item.branches:
         # No OTHER implemented block nests a body inside a statement — the
         # two above are handled first, above. Reading one as if it did would
         # invent a structure the catalog does not declare for it; the first
@@ -337,36 +371,134 @@ def _statement(
     )
 
 
-def _call_existing_statement(
-    item: BlocklyBlock, definition: BlockDefinition, section_id: str
-) -> CallStatement:
-    """A `functions.call_existing` block, read back as a `CallStatement`.
+def _call_arguments(
+    item: BlocklyBlock,
+    catalog: BlockCatalog,
+    operations: SemanticOperationRegistry,
+) -> tuple[SemanticValue, ...]:
+    """A call block's `ARG0..` sockets read back as ordered argument values.
 
-    Bypasses `FieldBindingTable`/`_arguments`, which are shaped around a
-    fixed-arity platform operation; this block has exactly one field, NAME,
-    holding an arbitrary function name, not an operand of a registered
-    operation.
+    Arguments fill the sockets FROM THE FIRST: an empty socket followed by a
+    filled one is a gap, and reading past it would silently renumber the
+    arguments of a call, so it is refused instead of repaired.
     """
-    if item.body or item.body_input is not None:
+    filled = {value.name for value in item.values}
+    unknown = sorted(filled - set(CALL_ARGUMENT_INPUTS))
+    if unknown:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: input(s) {unknown} belong to no argument socket"
+        )
+    arguments: list[SemanticValue] = []
+    gap = False
+    for name in CALL_ARGUMENT_INPUTS:
+        block = item.value(name)
+        if block is None:
+            gap = True
+            continue
+        if gap:
+            raise InvalidBlocklyFieldValueError(
+                f"{item.block_type}: argument {name} is filled but an earlier argument is empty"
+            )
+        arguments.append(_value_of(block, item.block_type, catalog, operations))
+    return tuple(arguments)
+
+
+def _no_body(item: BlocklyBlock, definition: BlockDefinition) -> None:
+    if item.body or item.body_input is not None or item.branches:
         raise UnsupportedBlocklyStructureError(
             f"{item.block_type}: {definition.block_id} declares no statement body, "
             "but this block carries one"
         )
+
+
+def _call_existing_statement(
+    item: BlocklyBlock,
+    definition: BlockDefinition,
+    section_id: str,
+    catalog: BlockCatalog,
+    operations: SemanticOperationRegistry,
+) -> CallStatement:
+    """A `functions.call_existing` block, read back as a `CallStatement`.
+
+    Bypasses `FieldBindingTable`/`_arguments`, which are shaped around a
+    fixed-arity platform operation; this block has one field, NAME, holding an
+    arbitrary function name, and up to `MAX_CALL_ARGUMENTS` argument sockets.
+    """
+    _no_body(item, definition)
+    _require_no_operands(item, definition, fields=("NAME",), slots=CALL_ARGUMENT_INPUTS)
     fields = {field.name: field.value for field in item.fields}
-    name = fields.pop("NAME", None)
+    name = fields.get("NAME")
     if name is None:
         raise MissingBlocklyFieldError(
             f"{item.block_type}: no NAME field, which {definition.block_id} needs"
         )
-    if fields:
-        raise UnsupportedBlocklyStructureError(
-            f"{item.block_type}: field(s) {sorted(fields)} belong to no operand of "
-            f"{definition.block_id}"
-        )
+    arguments = _call_arguments(item, catalog, operations)
     try:
-        return CallStatement(function_name=name, text=item.source_text)
+        return CallStatement(
+            function_name=name, text=item.source_text, arguments=arguments
+        )
     except ValueError as error:
         raise InvalidBlocklyFieldValueError(f"{item.block_type}.NAME: {error}") from error
+
+
+def _method_call_statement(
+    item: BlocklyBlock,
+    definition: BlockDefinition,
+    section_id: str,
+    catalog: BlockCatalog,
+    operations: SemanticOperationRegistry,
+) -> MethodCallStatement:
+    """A `functions.call_method` block, read back as a `MethodCallStatement`."""
+    _no_body(item, definition)
+    _require_no_operands(item, definition, fields=("RECEIVER", "METHOD"), slots=CALL_ARGUMENT_INPUTS)
+    fields = {field.name: field.value for field in item.fields}
+    receiver, method = fields.get("RECEIVER"), fields.get("METHOD")
+    if receiver is None or method is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: needs RECEIVER and METHOD fields, which "
+            f"{definition.block_id} declares"
+        )
+    arguments = _call_arguments(item, catalog, operations)
+    try:
+        return MethodCallStatement(
+            receiver=receiver,
+            method_name=method,
+            arguments=arguments,
+            text=item.source_text,
+        )
+    except ValueError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
+
+
+def _assign_statement(
+    item: BlocklyBlock,
+    definition: BlockDefinition,
+    catalog: BlockCatalog,
+    operations: SemanticOperationRegistry,
+) -> AssignmentStatement:
+    """A `variables.set` block: NAME and OPERATOR fields, a VALUE socket."""
+    _no_body(item, definition)
+    _require_no_operands(item, definition, fields=("NAME", "OPERATOR"), slots=("VALUE",))
+    fields = {field.name: field.value for field in item.fields}
+    name, operator = fields.get("NAME"), fields.get("OPERATOR")
+    if name is None or operator is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: needs NAME and OPERATOR fields, which {definition.block_id} declares"
+        )
+    if operator not in ASSIGNMENT_OPERATORS:
+        raise InvalidBlocklyFieldValueError(
+            f"{item.block_type}.OPERATOR: {operator!r} is not one of {list(ASSIGNMENT_OPERATORS)}"
+        )
+    slot = item.value("VALUE")
+    if slot is None:
+        raise MissingBlocklyFieldError(f"{item.block_type}: {name} needs a value in its VALUE slot")
+    value = _value_of(slot, item.block_type, catalog, operations)
+    try:
+        return AssignmentStatement(
+            target=name, operator=operator, value=value, text=item.source_text
+        )
+    except ValueError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
 
 
 def _if_equals_statement(
@@ -386,6 +518,10 @@ def _if_equals_statement(
     or `call_existing` block inside this one's DO works without either
     function knowing the other exists.
     """
+    if item.branches:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: {definition.block_id} has no else or extra statement input"
+        )
     fields = {field.name: field.value for field in item.fields}
     left = fields.pop("LEFT", None)
     operator = fields.pop("OPERATOR", None)
@@ -437,13 +573,13 @@ def _if_statement(
     bindings: FieldBindingTable,
     operations: SemanticOperationRegistry,
 ) -> ConditionalStatement:
-    """A generic `logic.if` block: a comparison in CONDITION, a body in DO.
+    """A generic `logic.if` block: a boolean in CONDITION, DO, and an optional chain.
 
-    The condition must be a COMPARISON block. The IR could state a bare
-    boolean condition, but `analyzer.py` reads only a comparison back out of
-    an `if` head — so accepting anything else here would write firmware whose
-    next reading comes back as opaque source, which the security region's
-    full-ownership rule would then refuse to let the student edit again.
+    The condition may be any value block that can stand as a boolean - a
+    comparison, `and`/`or`/`not`, a name, a call - because the analyzer reads
+    exactly those back out of an `if` head, so what is written here is what the
+    next reading understands. The chain continues in ELSE_IF (ONE nested `if`,
+    the next link) OR ELSE (a body), never both.
     """
     _require_no_operands(item, definition, fields=(), slots=("CONDITION",))
     slot = item.value("CONDITION")
@@ -453,16 +589,128 @@ def _if_statement(
             "needs"
         )
     condition = _value_of(slot, section_id, catalog, operations)
-    if not isinstance(condition, ComparisonValue):
-        raise InvalidBlocklyFieldValueError(
-            f"{item.block_type}.CONDITION: an if condition must be a comparison block, "
-            f"got {slot.block_id}"
-        )
     _require_body_input(item, definition)
     body = tuple(
         _statement(child, section_id, catalog, bindings, operations) for child in item.body
     )
-    return ConditionalStatement(condition=condition, body=body, text=item.source_text)
+
+    unknown = sorted(
+        branch.name for branch in item.branches if branch.name not in (ELSE_IF_INPUT, ELSE_INPUT)
+    )
+    if unknown:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: {unknown} are not statement inputs of {definition.block_id}"
+        )
+    else_if_branch = item.branch(ELSE_IF_INPUT)
+    else_branch = item.branch(ELSE_INPUT)
+    if else_if_branch is not None and else_branch is not None:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: an if continues with else-if OR else, not both"
+        )
+    else_if = None
+    else_body = None
+    if else_if_branch is not None:
+        if len(else_if_branch.items) != 1:
+            raise UnsupportedBlocklyStructureError(
+                f"{item.block_type}: the else-if input holds exactly one if block, it has "
+                f"{len(else_if_branch.items)} items"
+            )
+        link = _statement(else_if_branch.items[0], section_id, catalog, bindings, operations)
+        if not isinstance(link, ConditionalStatement):
+            raise UnsupportedBlocklyStructureError(
+                f"{item.block_type}: the else-if input holds an if block, not a "
+                f"{type(link).__name__}"
+            )
+        else_if = link
+    elif else_branch is not None:
+        if not else_branch.items:
+            raise UnsupportedBlocklyStructureError(
+                f"{item.block_type}: an else with nothing in it is not stated"
+            )
+        else_body = tuple(
+            _statement(child, section_id, catalog, bindings, operations)
+            for child in else_branch.items
+        )
+    try:
+        return ConditionalStatement(
+            condition=condition,
+            body=body,
+            text=item.source_text,
+            else_if=else_if,
+            else_body=else_body,
+        )
+    except SemanticModelError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
+
+
+def _header_part(
+    item: BlocklyBlock,
+    name: str,
+    section_id: str,
+    catalog: BlockCatalog,
+    bindings: FieldBindingTable,
+    operations: SemanticOperationRegistry,
+) -> SemanticStatement | None:
+    """A `for` header input: nothing, or exactly one statement block."""
+    branch = item.branch(name)
+    if branch is None or not branch.items:
+        return None
+    if len(branch.items) != 1 or isinstance(branch.items[0], PreservedSource):
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: the {name} input holds exactly one statement block"
+        )
+    return _statement(branch.items[0], section_id, catalog, bindings, operations)
+
+
+def _for_statement(
+    item: BlocklyBlock,
+    definition: BlockDefinition,
+    section_id: str,
+    catalog: BlockCatalog,
+    bindings: FieldBindingTable,
+    operations: SemanticOperationRegistry,
+) -> ForStatement:
+    """A `loops.for` block: INIT, CONDITION and STEP header parts, and the DO body."""
+    _require_no_operands(item, definition, fields=(), slots=("CONDITION",))
+    unknown = sorted(
+        branch.name
+        for branch in item.branches
+        if branch.name not in (FOR_INIT_INPUT, FOR_STEP_INPUT)
+    )
+    if unknown:
+        raise UnsupportedBlocklyStructureError(
+            f"{item.block_type}: {unknown} are not statement inputs of {definition.block_id}"
+        )
+    _require_body_input(item, definition)
+    init = _header_part(item, FOR_INIT_INPUT, section_id, catalog, bindings, operations)
+    step = _header_part(item, FOR_STEP_INPUT, section_id, catalog, bindings, operations)
+    slot = item.value("CONDITION")
+    condition = None if slot is None else _value_of(slot, section_id, catalog, operations)
+    body = tuple(
+        _statement(child, section_id, catalog, bindings, operations) for child in item.body
+    )
+    try:
+        return ForStatement(
+            init=init, condition=condition, step=step, body=body, text=item.source_text
+        )
+    except SemanticModelError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
+
+
+def _update_statement(item: BlocklyBlock, definition: BlockDefinition) -> UpdateStatement:
+    """A `variables.update` block: NAME and OPERATOR (`++` / `--`)."""
+    _no_body(item, definition)
+    _require_no_operands(item, definition, fields=("NAME", "OPERATOR"))
+    fields = {field.name: field.value for field in item.fields}
+    name, operator = fields.get("NAME"), fields.get("OPERATOR")
+    if name is None or operator is None:
+        raise MissingBlocklyFieldError(
+            f"{item.block_type}: needs NAME and OPERATOR fields, which {definition.block_id} declares"
+        )
+    try:
+        return UpdateStatement(target=name, operator=operator, text=item.source_text)
+    except SemanticModelError as error:
+        raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
 
 
 def _declare_statement(
@@ -471,29 +719,46 @@ def _declare_statement(
     catalog: BlockCatalog,
     operations: SemanticOperationRegistry,
 ) -> VariableDeclaration:
-    """A `variables.declare` block: TYPE and NAME fields, an INITIAL value."""
-    _require_no_operands(item, definition, fields=("TYPE", "NAME"), slots=("INITIAL",))
+    """A `variables.declare` block: QUALIFIER, TYPE, NAME fields; INITIAL optional.
+
+    A workspace with no QUALIFIER field is read as "no qualifier" (a block saved
+    before the field existed); an empty INITIAL socket is a declaration with no
+    initializer, not an error.
+    """
+    _no_body(item, definition)
+    _require_no_operands(
+        item, definition, fields=("QUALIFIER", "TYPE", "NAME"), slots=("INITIAL",)
+    )
     fields = {field.name: field.value for field in item.fields}
     type_token, name = fields.get("TYPE"), fields.get("NAME")
     if type_token is None or name is None:
         raise MissingBlocklyFieldError(
             f"{item.block_type}: needs TYPE and NAME fields, which {definition.block_id} declares"
         )
-    value_type = _DECLARATION_TYPE_FOR.get(type_token)
-    if value_type is None:
+    resolved = DECLARATION_TYPE_FOR_TOKEN.get(type_token)
+    if resolved is None:
         raise InvalidBlocklyFieldValueError(
             f"{item.block_type}.TYPE: {type_token!r} is not one of "
-            f"{sorted(_DECLARATION_TYPE_FOR)}"
+            f"{sorted(DECLARATION_TYPE_FOR_TOKEN)}"
+        )
+    value_type, type_name = resolved
+    qualifier_token = fields.get("QUALIFIER", "none")
+    qualifiers = _DECLARATION_QUALIFIERS_FOR.get(qualifier_token)
+    if qualifiers is None:
+        raise InvalidBlocklyFieldValueError(
+            f"{item.block_type}.QUALIFIER: {qualifier_token!r} is not one of "
+            f"{sorted(_DECLARATION_QUALIFIERS_FOR)}"
         )
     slot = item.value("INITIAL")
-    if slot is None:
-        raise MissingBlocklyFieldError(
-            f"{item.block_type}: {name} needs an initial value in its INITIAL slot"
-        )
-    initializer = _value_of(slot, item.block_type, catalog, operations)
+    initializer = None if slot is None else _value_of(slot, item.block_type, catalog, operations)
     try:
         return VariableDeclaration(
-            value_type=value_type, name=name, initializer=initializer, text=item.source_text
+            value_type=value_type,
+            name=name,
+            initializer=initializer,
+            text=item.source_text,
+            qualifiers=qualifiers,
+            type_name=type_name,
         )
     except SemanticModelError as error:
         raise InvalidBlocklyFieldValueError(f"{item.block_type}: {error}") from error
@@ -536,6 +801,17 @@ def _value_of(
             raise InvalidBlocklyFieldValueError(f"{block.block_type}.VALUE: {text!r} is not a number")
         number = float(text) if "." in text else int(text)
         return LiteralValue(value=number, value_type=SemanticType.NUMBER)
+    if block_id in (LOGIC_TRUE_BLOCK_ID, LOGIC_FALSE_BLOCK_ID):
+        _require_no_operands(block, definition, fields=())
+        return LiteralValue(value=block_id == LOGIC_TRUE_BLOCK_ID, value_type=SemanticType.BOOLEAN)
+    if block_id == FUNCTIONS_CALL_VALUE_BLOCK_ID:
+        _require_no_operands(block, definition, fields=("NAME",), slots=CALL_ARGUMENT_INPUTS)
+        name = _field(block, fields, "NAME")
+        arguments = _call_arguments(block, catalog, operations)
+        try:
+            return CallValue(function_name=name, arguments=arguments)
+        except SemanticModelError as error:
+            raise InvalidBlocklyFieldValueError(f"{block.block_type}.NAME: {error}") from error
     if block_id == VARIABLES_GET_BLOCK_ID:
         _require_no_operands(block, definition, fields=("NAME",))
         name = _field(block, fields, "NAME")
@@ -545,14 +821,41 @@ def _value_of(
             )
         return SymbolValue(name=name)
 
-    binary = _COMPARISON_OPERATOR_FOR.get(block_id) or _ARITHMETIC_OPERATOR_FOR.get(block_id)
+    if block_id == LOGIC_NOT_BLOCK_ID:
+        _require_no_operands(block, definition, fields=(), slots=("VALUE",))
+        operand = _value_of(_slot(block, "VALUE"), section_id, catalog, operations)
+        try:
+            return NotValue(operand=operand)
+        except SemanticModelError as error:
+            raise InvalidBlocklyFieldValueError(f"{block.block_type}: {error}") from error
+    if block_id == LOGIC_TERNARY_BLOCK_ID:
+        names = ("CONDITION", "THEN", "ELSE")
+        _require_no_operands(block, definition, fields=(), slots=names)
+        condition, if_true, if_false = (
+            _value_of(_slot(block, name), section_id, catalog, operations) for name in names
+        )
+        try:
+            return TernaryValue(condition=condition, if_true=if_true, if_false=if_false)
+        except SemanticModelError as error:
+            raise InvalidBlocklyFieldValueError(f"{block.block_type}: {error}") from error
+
+    binary = (
+        _COMPARISON_OPERATOR_FOR.get(block_id)
+        or _ARITHMETIC_OPERATOR_FOR.get(block_id)
+        or _LOGICAL_OPERATOR_FOR.get(block_id)
+    )
     if binary is not None:
         _require_no_operands(block, definition, fields=(), slots=BINARY_OPERANDS)
         left, right = (
             _value_of(_slot(block, name), section_id, catalog, operations)
             for name in BINARY_OPERANDS
         )
-        kind = ComparisonValue if block_id in _COMPARISON_OPERATOR_FOR else ArithmeticValue
+        if block_id in _COMPARISON_OPERATOR_FOR:
+            kind = ComparisonValue
+        elif block_id in _LOGICAL_OPERATOR_FOR:
+            kind = LogicalValue
+        else:
+            kind = ArithmeticValue
         try:
             return kind(left=left, operator=binary, right=right)
         except SemanticModelError as error:
@@ -727,10 +1030,9 @@ def _require_body_input(block: BlocklyBlock, definition: BlockDefinition) -> Non
     one that breaks it.
     """
     body_inputs = [item for item in definition.inputs if item.value_type is ValueType.STATEMENTS]
-    if len(body_inputs) != 1:  # pragma: no cover - a container declares exactly one
+    if not body_inputs:  # pragma: no cover - a container declares at least one
         raise UnrepresentableOperationError(
-            f"{definition.block_id}: needs exactly one statement body input, "
-            f"it has {len(body_inputs)}"
+            f"{definition.block_id}: needs a statement body input, it has none"
         )
     declared = body_inputs[0].name
     if block.body_input is not None and block.body_input != declared:

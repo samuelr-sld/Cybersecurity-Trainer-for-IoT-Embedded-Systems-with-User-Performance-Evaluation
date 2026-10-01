@@ -146,7 +146,39 @@ TOKEN_PARSING_IMPLEMENTED = {
     "functions.return_void": "return_void",
 }
 
-ALL_IMPLEMENTED = {**LEGACY_IMPLEMENTED, **CORRECTION_IMPLEMENTED, **TOKEN_PARSING_IMPLEMENTED}
+#: P2's generic statement/value blocks: assignment, a call on an object, a call
+#: used as a value, and the two boolean literals. (`functions.call_existing` and
+#: `variables.declare` above gained argument sockets / qualifier fields.)
+P2_IMPLEMENTED = {
+    "variables.set": "variables_set",
+    "functions.call_method": "call_method",
+    "functions.call_value": "call_function_value",
+    "logic.true": "logic_true",
+    "logic.false": "logic_false",
+}
+
+#: P3's control flow and operators: ordering comparisons, `&&`/`||`/`!`, the
+#: ternary, a C-style `for`, and postfix `++`/`--`. (`logic.if` above gained the
+#: ELSE_IF / ELSE statement inputs.)
+P3_IMPLEMENTED = {
+    "logic.less": "logic_less",
+    "logic.greater": "logic_greater",
+    "logic.greater_equal": "logic_greater_equal",
+    "logic.and": "logic_and",
+    "logic.or": "logic_or",
+    "logic.not": "logic_not",
+    "logic.ternary": "logic_ternary",
+    "loops.for": "for_loop",
+    "variables.update": "variables_update",
+}
+
+ALL_IMPLEMENTED = {
+    **LEGACY_IMPLEMENTED,
+    **CORRECTION_IMPLEMENTED,
+    **TOKEN_PARSING_IMPLEMENTED,
+    **P2_IMPLEMENTED,
+    **P3_IMPLEMENTED,
+}
 
 
 def _block(**overrides) -> BlockDefinition:
@@ -329,6 +361,7 @@ def test_populated_toolbox_hides_empty_categories() -> None:
     # the four Arduino categories the legacy POC populated.
     assert [item["name"] for item in categories] == [
         "Logic",
+        "Loops",
         "Math",
         "Text",
         "Variables",

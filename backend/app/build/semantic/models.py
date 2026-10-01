@@ -4,9 +4,13 @@
       -> SemanticSection      (one per CodeSection, by id)
            -> SemanticStatement
                 -> OperationStatement    (operation + named arguments)
-                -> CallStatement         (call an existing, zero-arg function)
-                -> ConditionalStatement  (if (CONDITION) { body: SemanticStatement[] })
-                -> VariableDeclaration   (TYPE NAME = VALUE, a local)
+                -> CallStatement         (call an existing function, with arguments)
+                -> MethodCallStatement   (RECEIVER.method(arguments);)
+                -> AssignmentStatement   (TARGET =|+=|-= VALUE;)
+                -> ConditionalStatement  (if (COND) { body } [else if ... | else { body }])
+                -> ForStatement          (for (INIT; COND; STEP) { body })
+                -> UpdateStatement       (NAME++; NAME--;)
+                -> VariableDeclaration   ([static] [const] TYPE NAME [= VALUE];)
                 -> ReturnStatement       (return; — void)
                 -> UnsupportedStatement  (exact source text + why)
                      -> SemanticValue
@@ -15,6 +19,10 @@
                           -> ComparisonValue (LEFT ==/!=/<= RIGHT, always boolean)
                           -> ArithmeticValue (LEFT + RIGHT, numeric)
                           -> OperationValue  (a VALUE operation + named operands)
+                          -> CallValue       (NAME(arguments) used as a value)
+                          -> LogicalValue    (LEFT && RIGHT, LEFT || RIGHT)
+                          -> NotValue        (!OPERAND)
+                          -> TernaryValue    (COND ? A : B)
 
 THE QUESTION THIS LAYER ANSWERS. `app/build/discovery/models.py` already
 states the split it keeps from `FileSegment`; this module adds the third:
@@ -154,14 +162,18 @@ class LiteralValue(SemanticValue):
         return str(self.value)
 
 
-#: The comparison operators `ComparisonValue` may express. Still a closed set
-#: rather than every C++ relational operator: `==`/`!=` are what an
-#: authorization-style check needs (`message == expected`, `token != TOKEN`),
-#: and `<=` is the one ordering test Panel 1's token parser needs — rejecting
-#: a payload whose separator is missing or leading (`separator <= 0`). `<`,
-#: `>` and `>=` stay absent until a construct needs one.
-COMPARISON_OPERATORS = ("==", "!=", "<=")
+#: The comparison operators `ComparisonValue` may express. Still a closed set:
+#: `==`/`!=` are what an authorization-style check needs, and the four ordering
+#: operators (`<=`, `<`, `>`, `>=`) are what a loop bound or a debounce test
+#: needs. Ordering operators compare NUMBERS - see `ORDERING_OPERATORS`.
+COMPARISON_OPERATORS = ("==", "!=", "<=", "<", ">", ">=")
 _COMPARISON_OPERATORS = COMPARISON_OPERATORS
+
+#: The comparison operators that order numbers rather than test equality.
+ORDERING_OPERATORS = ("<=", "<", ">", ">=")
+
+#: The logical connectives `LogicalValue` may express.
+LOGICAL_OPERATORS = ("&&", "||")
 
 #: The arithmetic operators `ArithmeticValue` may express: `+`, for the one
 #: offset the token parser computes (`separator + 1`). Nothing wider.
@@ -198,6 +210,13 @@ class ComparisonValue(SemanticValue):
             raise SemanticModelError(f"comparison right operand is not a value: {self.right!r}")
         if self.operator not in _COMPARISON_OPERATORS:
             raise SemanticModelError(f"invalid comparison operator: {self.operator!r}")
+        if self.operator in ORDERING_OPERATORS:
+            for side, operand in (("left", self.left), ("right", self.right)):
+                if not operand.fits(SemanticType.NUMBER):
+                    raise SemanticModelError(
+                        f"comparison {self.operator} {side} operand ({operand.source_text}) "
+                        "is not numeric"
+                    )
 
     def fits(self, value_type: SemanticType) -> bool:
         """A comparison is always boolean — it is the IR's only source of one."""
@@ -336,6 +355,147 @@ class OperationValue(SemanticValue):
         """Diagnostics only — `text.index_of(message, " ")`, never C++."""
         operands = ", ".join(argument.value.source_text for argument in self.arguments)
         return f"{self.operation_id}({operands})"
+
+
+#: Words that can never name a function, a method receiver or an assignment
+#: target: C++'s own control-flow vocabulary.
+_NOT_A_NAME = frozenset(
+    {"if", "else", "for", "while", "do", "switch", "case", "default", "return", "catch", "try"}
+)
+
+
+def _check_call_name(what: str, name: object) -> None:
+    """A function/method/target name: a plain identifier, not control flow."""
+    if (
+        not isinstance(name, str)
+        or re.match(r"^[A-Za-z_]\w*$", name) is None
+        or name in _NOT_A_NAME
+    ):
+        raise SemanticModelError(f"invalid {what} name: {name!r}")
+
+
+def _check_call_arguments(arguments: object) -> None:
+    """Call arguments are an ORDERED tuple of values - order is the meaning."""
+    if not isinstance(arguments, tuple):
+        raise SemanticModelError(f"call arguments must be a tuple, got {type(arguments).__name__}")
+    for argument in arguments:
+        if not isinstance(argument, SemanticValue):
+            raise SemanticModelError(f"call argument is not a value: {argument!r}")
+
+
+@dataclass(frozen=True)
+class CallValue(SemanticValue):
+    """`name(arguments)` used where a value is expected: `millis()`.
+
+    The value-position counterpart of `CallStatement`. Its RETURN TYPE IS NOT
+    KNOWN - the IR does not resolve names, and `millis` is a number only because
+    of a header this layer never reads - so, exactly like `SymbolValue`, it fits
+    every slot rather than claiming a type it has not established.
+    """
+
+    function_name: str
+    arguments: tuple[SemanticValue, ...] = ()
+
+    def __post_init__(self) -> None:
+        _check_call_name("function", self.function_name)
+        _check_call_arguments(self.arguments)
+
+    def fits(self, value_type: SemanticType) -> bool:
+        return isinstance(value_type, SemanticType)
+
+    @property
+    def source_text(self) -> str:
+        return f"{self.function_name}({', '.join(a.source_text for a in self.arguments)})"
+
+
+@dataclass(frozen=True)
+class LogicalValue(SemanticValue):
+    """`LEFT && RIGHT` or `LEFT || RIGHT` - always boolean.
+
+    Both operands must themselves be able to stand as a boolean (a comparison,
+    a `bool` name, a boolean literal, a call). `&&` binds tighter than `||`,
+    exactly as in C++; the generator parenthesizes from the TREE, so the text
+    always reads back as the tree it was written from.
+    """
+
+    left: SemanticValue
+    operator: str
+    right: SemanticValue
+
+    def __post_init__(self) -> None:
+        if self.operator not in LOGICAL_OPERATORS:
+            raise SemanticModelError(f"invalid logical operator: {self.operator!r}")
+        for side, operand in (("left", self.left), ("right", self.right)):
+            if not isinstance(operand, SemanticValue):
+                raise SemanticModelError(f"logical {side} operand is not a value: {operand!r}")
+            if not operand.fits(SemanticType.BOOLEAN):
+                raise SemanticModelError(
+                    f"logical {side} operand ({operand.source_text}) is not a boolean"
+                )
+
+    def fits(self, value_type: SemanticType) -> bool:
+        return value_type is SemanticType.BOOLEAN
+
+    @property
+    def source_text(self) -> str:
+        return f"{self.left.source_text} {self.operator} {self.right.source_text}"
+
+
+@dataclass(frozen=True)
+class NotValue(SemanticValue):
+    """`!OPERAND` - boolean negation."""
+
+    operand: SemanticValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.operand, SemanticValue):
+            raise SemanticModelError(f"not-operand is not a value: {self.operand!r}")
+        if not self.operand.fits(SemanticType.BOOLEAN):
+            raise SemanticModelError(f"not-operand ({self.operand.source_text}) is not a boolean")
+
+    def fits(self, value_type: SemanticType) -> bool:
+        return value_type is SemanticType.BOOLEAN
+
+    @property
+    def source_text(self) -> str:
+        return f"!{self.operand.source_text}"
+
+
+@dataclass(frozen=True)
+class TernaryValue(SemanticValue):
+    """`CONDITION ? IF_TRUE : IF_FALSE` - a value chosen by a boolean.
+
+    It has no type of its own: it fits a slot exactly when BOTH branches do, so
+    `run ? HIGH : LOW` (two names, which fit everything) fits anywhere and
+    `flag ? "a" : "b"` fits only text.
+    """
+
+    condition: SemanticValue
+    if_true: SemanticValue
+    if_false: SemanticValue
+
+    def __post_init__(self) -> None:
+        for label, operand in (
+            ("condition", self.condition),
+            ("true branch", self.if_true),
+            ("false branch", self.if_false),
+        ):
+            if not isinstance(operand, SemanticValue):
+                raise SemanticModelError(f"ternary {label} is not a value: {operand!r}")
+        if not self.condition.fits(SemanticType.BOOLEAN):
+            raise SemanticModelError(
+                f"ternary condition ({self.condition.source_text}) is not a boolean"
+            )
+
+    def fits(self, value_type: SemanticType) -> bool:
+        return self.if_true.fits(value_type) and self.if_false.fits(value_type)
+
+    @property
+    def source_text(self) -> str:
+        return (
+            f"{self.condition.source_text} ? {self.if_true.source_text} : "
+            f"{self.if_false.source_text}"
+        )
 
 
 def _check_arguments(operation: SemanticOperation, arguments: tuple) -> None:
@@ -543,22 +703,20 @@ class CallStatement(SemanticStatement):
     without teaching the panel-agnostic registry a panel's own function names.
     `function_name` is therefore data on the statement, not an operation id.
 
-    DELIBERATELY ZERO-ARGUMENT ONLY, for now. Real firmware calls existing
-    helpers with no arguments constantly (`motorStart(); chirpBuzzer();
-    ensureConnected(); pollButtons();`), and every one of those becomes
-    representable with nothing more than a function name. A call WITH
-    arguments is not modelled here — it stays an `UnsupportedStatement`
-    exactly as it always has — because representing an arbitrary argument
-    list safely (typed, order-preserving, round-tripping through one Blockly
-    field) is a real extension this phase does not need to make. Widening this
-    is adding an `arguments` field here plus a matching Blockly value input,
-    not a change to what this class already means.
+    ARGUMENTS ARE ORDERED VALUES (P2). Originally zero-argument only; the
+    `arguments` tuple widens it to `applyMotorState(true);` without changing what
+    the class means. Order is significant and preserved end to end.
     """
 
     function_name: str
     text: str | None = None
+    #: The call's arguments, in order (P2). Empty for the original zero-argument
+    #: call. Each is a value the IR can state; a call whose argument it cannot
+    #: state stays an `UnsupportedStatement` carrying its exact source.
+    arguments: tuple[SemanticValue, ...] = ()
 
     def __post_init__(self) -> None:
+        _check_call_arguments(self.arguments)
         # The C++ identifier shape a bare function name must have. The same
         # pattern `app/build/semantic/emissions.py` requires of a
         # `CallEmission`, restated rather than imported for the same
@@ -587,39 +745,105 @@ class CallStatement(SemanticStatement):
 
 
 @dataclass(frozen=True)
+class MethodCallStatement(SemanticStatement):
+    """`receiver.method(arguments);` - a call on an object, for its effect.
+
+    Distinct from `CallStatement` on purpose: a FUNCTION CALL
+    (`applyMotorState(true);`) names a function, a METHOD CALL
+    (`message.reserve(length);`) names an object AND a method on it, and
+    collapsing the two would lose which object the call was made on. The
+    receiver is a plain identifier (`message`, `client`, `Serial`); chained
+    receivers (`WiFi.localIP().toString()`) and pointer access are not modelled.
+    """
+
+    receiver: str
+    method_name: str
+    arguments: tuple[SemanticValue, ...] = ()
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        _check_call_name("receiver", self.receiver)
+        _check_call_name("method", self.method_name)
+        _check_call_arguments(self.arguments)
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError("method call text must be non-empty source or absent")
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
+#: The assignment operators. `=` is plain assignment; `+=`/`-=` are compound
+#: and are kept as themselves - `message += x;` is never rewritten as
+#: `message = x;`.
+ASSIGNMENT_OPERATORS = ("=", "+=", "-=")
+
+#: The postfix step operators `UpdateStatement` may express.
+UPDATE_OPERATORS = ("++", "--")
+
+
+@dataclass(frozen=True)
+class AssignmentStatement(SemanticStatement):
+    """`target = value;` or `target += value;` - store into an existing name.
+
+    `operator` is explicit data (see `ASSIGNMENT_OPERATORS`). `target` is a
+    plain identifier: element (`a[i] = x`) and member (`o.f = x`) targets are
+    not modelled.
+    """
+
+    target: str
+    operator: str
+    value: SemanticValue
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        _check_call_name("assignment target", self.target)
+        if self.operator not in ASSIGNMENT_OPERATORS:
+            raise SemanticModelError(f"invalid assignment operator: {self.operator!r}")
+        if not isinstance(self.value, SemanticValue):
+            raise SemanticModelError(f"{self.target}: assigned value is not a value")
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError("assignment text must be non-empty source or absent")
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
 class ConditionalStatement(SemanticStatement):
-    """`if (CONDITION) { BODY }` — no `else`.
+    """`if (CONDITION) { BODY }`, optionally continued by `else if` / `else`.
 
-    THE ONE CONTROL-FLOW FORM THE IR HAS, and deliberately the smallest one
-    that can express an authorization gate: a condition and a body to run when
-    it holds. There is no `else`/`else if` here on purpose. C++ does not
-    require one: `if (a) { x(); }` immediately followed by `if (b) { y(); }`
-    behaves identically to `if (a) { x(); } else if (b) { y(); }` whenever the
-    conditions are mutually exclusive — which a string-equality authorization
-    check always is — and two independent `if`s is also the more natural
-    Blockly shape (drag two blocks, not one block with a growing mutator).
-    Firmware read from source that DOES use `else`/`else if` is unaffected:
-    the `if` head B3 recognizes becomes one `ConditionalStatement` and the
-    `else ...` that follows becomes its own `UnsupportedStatement`, carried
-    verbatim immediately after it — C++ does not require anything but
-    whitespace between a `}` and the `else` that follows it, so the two
-    statements placed back to back by `generator.py` still compile and still
-    behave exactly as the original did. What changes is only that the `else`
-    branch is not independently editable as blocks unless it is rewritten as
-    its own `if`.
+    A LINKED CHAIN, so any `if / else if / ... / else` is one value and a chain
+    of any length is the same shape: `else_if` is the next conditional in the
+    chain (itself a `ConditionalStatement`, which may have its own `else_if` or
+    `else_body`), `else_body` is the final `else { ... }`. At most one of the two
+    is set on a node - a node continues with another test OR ends with an
+    `else`, never both. Neither set is the plain `if` this class began as.
 
-    `condition` must `fits(SemanticType.BOOLEAN)` — a `ComparisonValue`
-    always does, a boolean `LiteralValue` does, and a bare `SymbolValue` does
-    too (symbols fit every type; the IR does not resolve names — see
-    `SymbolValue`). `body` is this construct's own nested statement list, may
-    be empty (an emptied Blockly body is a legitimate edit, exactly as an
-    emptied container body is), and may itself contain further supported or
-    unsupported statements, including a nested `ConditionalStatement`.
+    Braces are required: `if (a) x();` and `else x();` without them are not
+    modelled and stay carried verbatim (see `analyzer.py`).
+
+    `condition` must `fits(SemanticType.BOOLEAN)`: a comparison, a logical
+    combination, `!x`, a boolean literal, a bare name (names fit every type -
+    the IR does not resolve them) or a call. `body` and `else_body` are nested
+    statement lists, may be empty, and may hold further supported or
+    unsupported statements, including nested conditionals.
     """
 
     condition: SemanticValue
     body: tuple[SemanticStatement, ...]
     text: str | None = None
+    else_if: "ConditionalStatement | None" = None
+    else_body: tuple[SemanticStatement, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.condition, SemanticValue):
@@ -631,6 +855,16 @@ class ConditionalStatement(SemanticStatement):
         for statement in self.body:
             if not isinstance(statement, SemanticStatement):
                 raise SemanticModelError(f"not a statement in an if-body: {statement!r}")
+        if self.else_if is not None and self.else_body is not None:
+            raise SemanticModelError("a conditional continues with else-if OR else, not both")
+        if self.else_if is not None and not isinstance(self.else_if, ConditionalStatement):
+            raise SemanticModelError(f"else-if is not a conditional: {self.else_if!r}")
+        if self.else_body is not None:
+            if not isinstance(self.else_body, tuple):
+                raise SemanticModelError("else body must be a tuple of statements")
+            for statement in self.else_body:
+                if not isinstance(statement, SemanticStatement):
+                    raise SemanticModelError(f"not a statement in an else-body: {statement!r}")
         if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
             raise SemanticModelError(
                 "conditional statement text must be non-empty source or absent"
@@ -659,9 +893,41 @@ _RESERVED_NAMES = frozenset(
     }
 )
 
-#: The types a local may be declared with — the three the value layer can
-#: already state. Their C++ spellings live in `emissions.py`, not here.
+#: The types a local may be declared with - the three the value layer can
+#: already state. Their DEFAULT C++ spellings live in `DEFAULT_TYPE_NAMES`.
 DECLARABLE_TYPES = (SemanticType.TEXT, SemanticType.NUMBER, SemanticType.BOOLEAN)
+
+#: The C++ type SPELLINGS a declaration may carry, each with the value type it
+#: stands for. `String`/`int`/`bool` are the defaults (a declaration whose
+#: `type_name` is None); the rest are numeric spellings that MATTER to firmware
+#: (`unsigned long` is what `millis()` returns - writing it back as `int` would
+#: silently change behaviour). A closed set: a spelling not listed here is not
+#: a type this layer will claim to understand, and the declaration stays
+#: preserved source.
+DECLARATION_TYPE_NAMES = {
+    "String": SemanticType.TEXT,
+    "int": SemanticType.NUMBER,
+    "bool": SemanticType.BOOLEAN,
+    "unsigned long": SemanticType.NUMBER,
+    "unsigned int": SemanticType.NUMBER,
+    "long": SemanticType.NUMBER,
+    "float": SemanticType.NUMBER,
+    "double": SemanticType.NUMBER,
+    "byte": SemanticType.NUMBER,
+    "uint8_t": SemanticType.NUMBER,
+    "uint16_t": SemanticType.NUMBER,
+    "uint32_t": SemanticType.NUMBER,
+}
+
+#: The spelling used when a declaration's `type_name` is None.
+DEFAULT_TYPE_NAMES = {
+    SemanticType.TEXT: "String",
+    SemanticType.NUMBER: "int",
+    SemanticType.BOOLEAN: "bool",
+}
+
+#: Declaration qualifiers, in the only order they are written and stored.
+DECLARATION_QUALIFIERS = ("static", "const")
 
 
 def is_variable_name(name: object) -> bool:
@@ -675,43 +941,155 @@ def is_variable_name(name: object) -> bool:
 
 @dataclass(frozen=True)
 class VariableDeclaration(SemanticStatement):
-    """Declare a local variable and initialize it: `String token = ...;`.
+    """Declare a variable: `[static] [const] TYPE NAME [= VALUE];`.
 
-    LOCAL, TYPED, ALWAYS INITIALIZED — the minimum a function body needs to
-    name an intermediate value (Panel 1's parser names its token, the
-    separator position, and the two slices either side of it). A declaration
-    with no initializer, a global, an array, a `const`/`static` qualifier and
-    re-assignment are all absent: nothing in scope needs them, and each is a
-    real extension rather than a free one.
+    `String token = ...;` was the original form - local, typed, always
+    initialized. P2 widens it to what firmware actually writes, WITHOUT changing
+    what the original form means:
+
+    * `initializer` may be None - `String message;`, `bool running;`.
+    * `qualifiers` keeps `static`/`const` - `static unsigned long lastEdge = 0;`
+      is not `unsigned long lastEdge = 0;`, and dropping `static` would change
+      the variable's lifetime.
+    * `type_name` keeps the C++ spelling when it is not the default for
+      `value_type` (`unsigned long`); None means the default (`String`, `int`,
+      `bool`). It is canonical: an explicit spelling equal to the default is
+      refused, so one declaration has exactly one representation.
+
+    Still one declarator per statement - `int a = 1, b = 2;` is not modelled.
 
     A later REFERENCE to the variable is an ordinary `SymbolValue` carrying
-    its name — the IR's existing named-reference leaf, which already stands
-    for parameters and constants and deliberately resolves nothing. There is
-    no second "variable reference" class to keep in step with it.
-
-    `value_type` is the variable's declared type (`DECLARABLE_TYPES`), and the
-    initializer must fit it — so `int separator = "x";` cannot be stated.
+    its name - the IR's existing named-reference leaf, which already stands
+    for parameters and constants and deliberately resolves nothing.
     """
 
     value_type: SemanticType
     name: str
-    initializer: SemanticValue
+    initializer: SemanticValue | None
     text: str | None = None
+    qualifiers: tuple[str, ...] = ()
+    type_name: str | None = None
 
     def __post_init__(self) -> None:
         if self.value_type not in DECLARABLE_TYPES:
             raise SemanticModelError(f"a local cannot be declared as {self.value_type!r}")
         if not is_variable_name(self.name):
             raise SemanticModelError(f"invalid local variable name: {self.name!r}")
-        if not isinstance(self.initializer, SemanticValue):
-            raise SemanticModelError(f"{self.name}: initializer is not a value")
-        if not self.initializer.fits(self.value_type):
+        if self.initializer is not None:
+            if not isinstance(self.initializer, SemanticValue):
+                raise SemanticModelError(f"{self.name}: initializer is not a value")
+            if not self.initializer.fits(self.value_type):
+                raise SemanticModelError(
+                    f"{self.name}: initializer ({self.initializer.source_text}) does not fit a "
+                    f"{self.value_type.value} variable"
+                )
+        if not isinstance(self.qualifiers, tuple) or any(
+            item not in DECLARATION_QUALIFIERS for item in self.qualifiers
+        ):
+            raise SemanticModelError(f"{self.name}: invalid qualifiers {self.qualifiers!r}")
+        if list(self.qualifiers) != [q for q in DECLARATION_QUALIFIERS if q in self.qualifiers]:
             raise SemanticModelError(
-                f"{self.name}: initializer ({self.initializer.source_text}) does not fit a "
-                f"{self.value_type.value} variable"
+                f"{self.name}: qualifiers must be unique and in the order "
+                f"{DECLARATION_QUALIFIERS}, got {self.qualifiers!r}"
             )
+        if "const" in self.qualifiers and self.initializer is None:
+            raise SemanticModelError(f"{self.name}: a const declaration needs an initializer")
+        if self.type_name is not None:
+            if DECLARATION_TYPE_NAMES.get(self.type_name) is not self.value_type:
+                raise SemanticModelError(
+                    f"{self.name}: type {self.type_name!r} is not a {self.value_type.value} type"
+                )
+            if self.type_name == DEFAULT_TYPE_NAMES[self.value_type]:
+                raise SemanticModelError(
+                    f"{self.name}: {self.type_name!r} is the default spelling; leave type_name None"
+                )
         if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
             raise SemanticModelError("declaration text must be non-empty source or absent")
+
+    @property
+    def cpp_type(self) -> str:
+        """The type as it is written: the explicit spelling, else the default."""
+        return self.type_name or DEFAULT_TYPE_NAMES[self.value_type]
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class UpdateStatement(SemanticStatement):
+    """`target++;` / `target--;` - step a name by one.
+
+    Postfix only; `++i` is not modelled and stays source. Needed on its own
+    because a `for` loop's step is almost always one, and it is a statement in
+    its own right wherever a body allows one.
+    """
+
+    target: str
+    operator: str
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        _check_call_name("update target", self.target)
+        if self.operator not in UPDATE_OPERATORS:
+            raise SemanticModelError(f"invalid update operator: {self.operator!r}")
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError("update text must be non-empty source or absent")
+
+    @property
+    def source_text(self) -> str | None:
+        return self.text
+
+    @property
+    def supported(self) -> bool:
+        return True
+
+
+@dataclass(frozen=True)
+class ForStatement(SemanticStatement):
+    """`for (INIT; CONDITION; STEP) { BODY }` - each header part optional.
+
+    * `init` is one declaration (unqualified) or one assignment.
+    * `condition` is a boolean value.
+    * `step` is one assignment or one `++`/`--` update.
+
+    A header this layer cannot state in FULL - a comma expression, a ranged
+    `for`, an init it does not model - is not a `ForStatement` at all: the whole
+    loop stays carried source. Nothing is half-kept.
+    """
+
+    init: "VariableDeclaration | AssignmentStatement | None"
+    condition: SemanticValue | None
+    step: "AssignmentStatement | UpdateStatement | None"
+    body: tuple[SemanticStatement, ...]
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.init is not None:
+            if not isinstance(self.init, (VariableDeclaration, AssignmentStatement)):
+                raise SemanticModelError(f"a for-init is a declaration or assignment: {self.init!r}")
+            if isinstance(self.init, VariableDeclaration) and self.init.qualifiers:
+                raise SemanticModelError("a for-init declaration takes no qualifier")
+        if self.condition is not None:
+            if not isinstance(self.condition, SemanticValue):
+                raise SemanticModelError(f"for-condition is not a value: {self.condition!r}")
+            if not self.condition.fits(SemanticType.BOOLEAN):
+                raise SemanticModelError(
+                    f"for-condition ({self.condition.source_text}) does not fit a boolean"
+                )
+        if self.step is not None and not isinstance(
+            self.step, (AssignmentStatement, UpdateStatement)
+        ):
+            raise SemanticModelError(f"a for-step is an assignment or an update: {self.step!r}")
+        for statement in self.body:
+            if not isinstance(statement, SemanticStatement):
+                raise SemanticModelError(f"not a statement in a for-body: {statement!r}")
+        if self.text is not None and (not isinstance(self.text, str) or not self.text.strip()):
+            raise SemanticModelError("for statement text must be non-empty source or absent")
 
     @property
     def source_text(self) -> str | None:
@@ -921,11 +1299,30 @@ def _statement_operations(statement: SemanticStatement) -> set[str]:
         return found
     if isinstance(statement, ConditionalStatement):
         found = _value_operations(statement.condition)
+        for item in (*statement.body, *(statement.else_body or ())):
+            found |= _statement_operations(item)
+        if statement.else_if is not None:
+            found |= _statement_operations(statement.else_if)
+        return found
+    if isinstance(statement, ForStatement):
+        found = set()
+        for part in (statement.init, statement.step):
+            if part is not None:
+                found |= _statement_operations(part)
+        if statement.condition is not None:
+            found |= _value_operations(statement.condition)
         for item in statement.body:
             found |= _statement_operations(item)
         return found
     if isinstance(statement, VariableDeclaration):
-        return _value_operations(statement.initializer)
+        return set() if statement.initializer is None else _value_operations(statement.initializer)
+    if isinstance(statement, AssignmentStatement):
+        return _value_operations(statement.value)
+    if isinstance(statement, (CallStatement, MethodCallStatement)):
+        found = set()
+        for argument in statement.arguments:
+            found |= _value_operations(argument)
+        return found
     return set()
 
 
@@ -935,6 +1332,19 @@ def _value_operations(value: SemanticValue) -> set[str]:
         for argument in value.arguments:
             found |= _value_operations(argument.value)
         return found
-    if isinstance(value, (ComparisonValue, ArithmeticValue)):
+    if isinstance(value, (ComparisonValue, ArithmeticValue, LogicalValue)):
         return _value_operations(value.left) | _value_operations(value.right)
+    if isinstance(value, NotValue):
+        return _value_operations(value.operand)
+    if isinstance(value, TernaryValue):
+        return (
+            _value_operations(value.condition)
+            | _value_operations(value.if_true)
+            | _value_operations(value.if_false)
+        )
+    if isinstance(value, CallValue):
+        found = set()
+        for argument in value.arguments:
+            found |= _value_operations(argument)
+        return found
     return set()

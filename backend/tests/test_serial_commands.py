@@ -577,6 +577,10 @@ def test_the_session_is_unregistered_when_the_student_disconnects(
         _open_session(ws)
         _run(ws, "serial-monitor")
 
+    # Detached (resumable) rather than gone; ending it unregisters it.
+    assert asyncio.run(session_manager.count()) == before + 1
+    for sid in list(session_manager._sessions):
+        session_manager.end(sid)
     assert asyncio.run(session_manager.count()) == before
 
 

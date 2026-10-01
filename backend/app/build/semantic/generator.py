@@ -61,7 +61,6 @@ from __future__ import annotations
 import math
 
 from app.build.semantic.emissions import (
-    CPP_DECLARATION_TYPES,
     CallEmission,
     CppEmissionTable,
     FunctionEmission,
@@ -76,10 +75,16 @@ from app.build.semantic.errors import (
 )
 from app.build.semantic.models import (
     ArithmeticValue,
+    AssignmentStatement,
     CallStatement,
+    CallValue,
     ComparisonValue,
     ConditionalStatement,
+    ForStatement,
     LiteralValue,
+    LogicalValue,
+    MethodCallStatement,
+    NotValue,
     OperationStatement,
     OperationValue,
     ReturnStatement,
@@ -88,7 +93,9 @@ from app.build.semantic.models import (
     SemanticStatement,
     SemanticValue,
     SymbolValue,
+    TernaryValue,
     UnsupportedStatement,
+    UpdateStatement,
     VariableDeclaration,
 )
 from app.build.semantic.operations import (
@@ -222,13 +229,16 @@ def _placed(
     exactly that puts the fragment back where it was, character for character,
     for any source indented the way this generator indents.
 
-    A `ConditionalStatement` is the one exception: it is multi-line by
-    construction (an `if` head, its indented body, a closing brace), so
-    `_if_lines` bakes every line's indent in itself, first line included, and
-    is joined directly rather than routed through the single-line rule above.
+    A `ConditionalStatement` and a `ForStatement` are the exceptions: each is
+    multi-line by construction (a head, an indented body, a closing brace), so
+    `_if_lines`/`_for_lines` bake every line's indent in themselves, first line
+    included, and are joined directly rather than routed through the
+    single-line rule above.
     """
     if isinstance(statement, ConditionalStatement):
         return "\n".join(_if_lines(statement, indent, operations, emissions))
+    if isinstance(statement, ForStatement):
+        return "\n".join(_for_lines(statement, indent, operations, emissions))
     return indent + _statement(statement, operations, emissions)
 
 
@@ -244,23 +254,47 @@ def _statement(
     if isinstance(statement, OperationStatement):
         return _call(statement, operations, emissions)
     if isinstance(statement, CallStatement):
-        return f"{statement.function_name}();"
+        arguments = _arguments(statement.arguments, statement.function_name, operations, emissions)
+        return f"{statement.function_name}({arguments});"
+    if isinstance(statement, MethodCallStatement):
+        arguments = _arguments(
+            statement.arguments,
+            f"{statement.receiver}.{statement.method_name}",
+            operations,
+            emissions,
+        )
+        return f"{statement.receiver}.{statement.method_name}({arguments});"
+    if isinstance(statement, AssignmentStatement):
+        value = _value(statement.value, statement.target, operations, emissions)
+        return f"{statement.target} {statement.operator} {value};"
     if isinstance(statement, VariableDeclaration):
-        cpp_type = CPP_DECLARATION_TYPES.get(statement.value_type)
-        if cpp_type is None:
-            raise InvalidSemanticValueError(
-                f"{statement.name}: no C++ type is declared for a "
-                f"{statement.value_type.value} local"
-            )
+        # Qualifiers and the type spelling are written exactly as the
+        # declaration carries them: `static unsigned long lastEdge = 0;` is
+        # never shortened to `unsigned long lastEdge = 0;`.
+        head = " ".join([*statement.qualifiers, statement.cpp_type, statement.name])
+        if statement.initializer is None:
+            return f"{head};"
         initializer = _value(statement.initializer, statement.name, operations, emissions)
-        return f"{cpp_type} {statement.name} = {initializer};"
+        return f"{head} = {initializer};"
+    if isinstance(statement, UpdateStatement):
+        return f"{statement.target}{statement.operator};"
     if isinstance(statement, ReturnStatement):
         return "return;"
     raise InvalidContainerError(
         f"no generation rule for a {type(statement).__name__}; the IR states a statement "
         "as an understood operation, a call, a conditional, a local declaration, a "
-        "return, or as source carried verbatim, and nothing else"
+        "return, an assignment, a method call, or as source carried verbatim, and nothing else"
     )
+
+
+def _arguments(
+    arguments: tuple[SemanticValue, ...],
+    where: str,
+    operations: SemanticOperationRegistry,
+    emissions: CppEmissionTable,
+) -> str:
+    """A call's argument list, in order, comma-separated."""
+    return ", ".join(_value(argument, where, operations, emissions) for argument in arguments)
 
 
 def _if_lines(
@@ -269,16 +303,54 @@ def _if_lines(
     operations: SemanticOperationRegistry,
     emissions: CppEmissionTable,
 ) -> list[str]:
-    """`if (COND) { ... }`, as fully-indented lines — see `ConditionalStatement`.
+    """`if (COND) { ... }` and its `else if` / `else` chain, as indented lines.
 
-    No `else` is ever written: the IR has none (see the class docstring for
-    why that loses nothing a compiler cares about). Recurses through `_placed`
-    for the body, so a nested `ConditionalStatement` inside an `if`'s body
-    indents correctly without this function knowing anything about nesting.
+    Written from the linked chain: each link is `} else if (COND) {` on the line
+    of the previous closing brace, and a final `else` is `} else {`. Recurses
+    through `_placed` for every body, so a nested statement of any kind indents
+    correctly without this function knowing anything about nesting.
     """
     inner = indent + INDENT
-    condition = _value(statement.condition, "condition", operations, emissions)
-    lines = [f"{indent}if ({condition}) {{"]
+    lines: list[str] = []
+    prefix = ""  # what precedes `if`: nothing for the first link, `} else ` after
+    link = statement
+    while True:
+        condition = _value(link.condition, "condition", operations, emissions)
+        lines.append(f"{indent}{prefix}if ({condition}) {{")
+        lines.extend(_placed(item, inner, operations, emissions) for item in link.body)
+        if link.else_if is not None:
+            link, prefix = link.else_if, "} else "
+            continue
+        if link.else_body is not None:
+            lines.append(f"{indent}}} else {{")
+            lines.extend(_placed(item, inner, operations, emissions) for item in link.else_body)
+        break
+    lines.append(f"{indent}}}")
+    return lines
+
+
+def _for_lines(
+    statement: ForStatement,
+    indent: str,
+    operations: SemanticOperationRegistry,
+    emissions: CppEmissionTable,
+) -> list[str]:
+    """`for (INIT; COND; STEP) { ... }` as indented lines.
+
+    Each header part is the SAME statement/value text a body would get, with the
+    statement's own trailing `;` taken off (the header supplies the separators).
+    An empty part is written empty: `for (;;)` stays `for (;;)`.
+    """
+    init = "" if statement.init is None else _statement(statement.init, operations, emissions)[:-1]
+    condition = (
+        ""
+        if statement.condition is None
+        else _value(statement.condition, "for condition", operations, emissions)
+    )
+    step = "" if statement.step is None else _statement(statement.step, operations, emissions)[:-1]
+    header = f"for ({init}; {condition}; {step})" if (init or condition or step) else "for (;;)"
+    inner = indent + INDENT
+    lines = [f"{indent}{header} {{"]
     lines.extend(_placed(item, inner, operations, emissions) for item in statement.body)
     lines.append(f"{indent}}}")
     return lines
@@ -359,6 +431,27 @@ def _declared(
 # --- values -----------------------------------------------------------------
 
 
+#: Binding strength of each value form, tightest last. A child whose strength is
+#: BELOW what its parent slot requires is parenthesized, so the text always reads
+#: back as the tree it was written from - and a child that binds tightly enough
+#: is written bare, so `a == b && !c` stays exactly that.
+_TERNARY, _OR, _AND, _COMPARISON, _SUM, _NOT, _ATOM = 1, 2, 3, 4, 5, 6, 9
+
+
+def _strength(value: SemanticValue) -> int:
+    if isinstance(value, TernaryValue):
+        return _TERNARY
+    if isinstance(value, LogicalValue):
+        return _OR if value.operator == "||" else _AND
+    if isinstance(value, ComparisonValue):
+        return _COMPARISON
+    if isinstance(value, ArithmeticValue):
+        return _SUM
+    if isinstance(value, NotValue):
+        return _NOT
+    return _ATOM
+
+
 def _value(
     value: SemanticValue,
     where: str,
@@ -367,51 +460,60 @@ def _value(
 ) -> str:
     """One value as a C++ expression.
 
-    A symbol is written as the NAME it is — `START_BUTTON` stays
+    A symbol is written as the NAME it is - `START_BUTTON` stays
     `START_BUTTON`, never 32, because the IR does not resolve names and
     generating a resolved value would put a number in firmware the student
     never wrote.
 
-    PARENTHESES FOLLOW THE TREE, NOT A PRECEDENCE TABLE. A compound value
-    nested where C++ could regroup it — a comparison inside anything, a sum on
-    the right of a sum, anything compound as a method's receiver — is wrapped,
-    so the text always parses back to the tree it was written from. A left-
-    nested sum (`a + b + c`) is the one case written bare, because C++'s left
-    associativity already groups it that way.
+    PARENTHESES FOLLOW THE TREE, NOT THE ORIGINAL TEXT. Each operand is wrapped
+    exactly when it binds more loosely than the slot it stands in requires
+    (`_operand`), following C++ precedence: `!`, then `+`, then comparison, `&&`,
+    `||`, `?:`. Left-associative operators write a left child of their own
+    strength bare and wrap a right one; a ternary's else-branch is bare because
+    `?:` associates to the right.
     """
     if isinstance(value, SymbolValue):
         return value.name
     if isinstance(value, LiteralValue):
         return _literal(value, where)
     if isinstance(value, ComparisonValue):
-        left = _operand(value.left, where, operations, emissions, ComparisonValue)
-        right = _operand(value.right, where, operations, emissions, ComparisonValue)
+        left = _operand(value.left, _SUM, where, operations, emissions)
+        right = _operand(value.right, _SUM, where, operations, emissions)
         return f"{left} {value.operator} {right}"
     if isinstance(value, ArithmeticValue):
-        left = (
-            _value(value.left, where, operations, emissions)
-            if isinstance(value.left, ArithmeticValue)
-            else _operand(value.left, where, operations, emissions, ComparisonValue)
-        )
-        right = _operand(
-            value.right, where, operations, emissions, (ArithmeticValue, ComparisonValue)
-        )
+        left = _operand(value.left, _SUM, where, operations, emissions)
+        right = _operand(value.right, _SUM + 1, where, operations, emissions)
         return f"{left} {value.operator} {right}"
+    if isinstance(value, LogicalValue):
+        own = _OR if value.operator == "||" else _AND
+        left = _operand(value.left, own, where, operations, emissions)
+        right = _operand(value.right, own + 1, where, operations, emissions)
+        return f"{left} {value.operator} {right}"
+    if isinstance(value, NotValue):
+        return "!" + _operand(value.operand, _NOT, where, operations, emissions)
+    if isinstance(value, TernaryValue):
+        condition = _operand(value.condition, _OR, where, operations, emissions)
+        if_true = _operand(value.if_true, _OR, where, operations, emissions)
+        if_false = _operand(value.if_false, _TERNARY, where, operations, emissions)
+        return f"{condition} ? {if_true} : {if_false}"
     if isinstance(value, OperationValue):
         return _method_call(value, where, operations, emissions)
+    if isinstance(value, CallValue):
+        arguments = _arguments(value.arguments, value.function_name, operations, emissions)
+        return f"{value.function_name}({arguments})"
     raise InvalidSemanticValueError(f"{where}: no C++ form for a {type(value).__name__}")
 
 
 def _operand(
     value: SemanticValue,
+    required: int,
     where: str,
     operations: SemanticOperationRegistry,
     emissions: CppEmissionTable,
-    wrapped: type | tuple[type, ...],
 ) -> str:
-    """`value`, parenthesized when it is one of the `wrapped` compound forms."""
+    """`value`, parenthesized when it binds more loosely than `required`."""
     text = _value(value, where, operations, emissions)
-    return f"({text})" if isinstance(value, wrapped) else text
+    return f"({text})" if _strength(value) < required else text
 
 
 def _method_call(
@@ -455,7 +557,7 @@ def _method_call(
     receiver = written[0]
     if isinstance(receiver_value, LiteralValue):
         receiver = f"String({receiver})"
-    elif isinstance(receiver_value, (ArithmeticValue, ComparisonValue)):
+    elif _strength(receiver_value) < _ATOM:
         receiver = f"({receiver})"
     return f"{receiver}.{emission.method_name}({', '.join(written[1:])})"
 

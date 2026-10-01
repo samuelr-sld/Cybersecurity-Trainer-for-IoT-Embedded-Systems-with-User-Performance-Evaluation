@@ -99,12 +99,14 @@ from pydantic import ValidationError
 
 from app import config
 from app.build.events import BuildEvent
-from app.build.service import BuildActionResult, default_service, end_session_sync
+from app.build.service import BuildActionResult, default_service
 from app.build_project_selection import select_build_project
 from app.build_provisioning_selection import select_build_provisioning
 from app.build_sessions import BuildSession, build_session_manager
 from app.build_validation_selection import select_build_validation
+from app.events.clock import utc_now
 from app.participants import resolve_participant
+from app.session_panel_guard import resume_panel_matches
 from app.models.build_messages import (
     BUILD_CLIENT_MESSAGE_ADAPTER,
     BuildClientMessage,
@@ -151,6 +153,27 @@ def _parse(raw: str) -> BuildClientMessage:
         return BUILD_CLIENT_MESSAGE_ADAPTER.validate_python(payload)
     except ValidationError as exc:
         raise ValueError("message does not match the protocol schema") from exc
+
+
+def _elapsed_seconds(session: BuildSession, at) -> int:
+    return max(0, int((at - session.created_at).total_seconds()))
+
+
+def _session_frame(session: BuildSession, resumed: bool) -> BuildSessionMessage:
+    """The `session` frame; on a resume it also carries the log so far."""
+    return BuildSessionMessage(
+        session_id=session.session_id,
+        resumed=resumed,
+        elapsed_seconds=_elapsed_seconds(session, utc_now()),
+        history=[
+            {
+                "event": event.type.value,
+                "data": dict(event.data),
+                "elapsed_seconds": _elapsed_seconds(session, event.occurred_at),
+            }
+            for event in (session.events if resumed else ())
+        ],
+    )
 
 
 async def _render_result(websocket: WebSocket, session: BuildSession, result: BuildActionResult) -> None:
@@ -228,23 +251,53 @@ async def build_websocket(websocket: WebSocket) -> None:
     # compile-time firmware copy with real, non-committed credentials
     # (`app/build_provisioning_selection.py`), off the same resolution and
     # with the same "choosing never runs one" guarantee.
-    selection = select_build_project()
-    session = await build_session_manager.create(
-        panel_id=selection.panel_id,
-        workspace=selection.workspace,
-        validation=select_build_validation(selection),
-        provisioning=select_build_provisioning(selection),
-        has_active_project=selection.has_active_project,
-        # Evaluation: the registered participant this session belongs to, or
-        # None — see `app/participants.py`. Never refuses the connection.
-        participant_id=resolve_participant(websocket.query_params.get("participant")),
+    #
+    # RELOAD-SAFE SESSIONS. A client that already has a session (it asked
+    # `?session=<id>` after a page reload) is re-attached to it — same
+    # workspace, same edits, same compile/flash/validation results, same
+    # recorder — instead of getting a new one. Anything that cannot be honoured
+    # (unknown or ended id, someone else's session) falls through to the normal
+    # new-session path, so a stale id can never corrupt or block a start.
+    participant_id = resolve_participant(websocket.query_params.get("participant"))
+    session = build_session_manager.resume(websocket.query_params.get("session"), participant_id)
+    if session is not None and not resume_panel_matches(session.panel_id):
+        session = None  # the session's panel is not the attached one: start normally
+    resumed = session is not None
+    if session is None:
+        selection = select_build_project()
+        session = await build_session_manager.create(
+            panel_id=selection.panel_id,
+            workspace=selection.workspace,
+            validation=select_build_validation(selection),
+            provisioning=select_build_provisioning(selection),
+            has_active_project=selection.has_active_project,
+            # Evaluation: the registered participant this session belongs to,
+            # or None — see `app/participants.py`. Never refuses the connection.
+            participant_id=participant_id,
+        )
+        described = selection.describe()
+    else:
+        described = "resumed"
+    # The connection now serving this session; the teardown below only detaches
+    # it while this token is still current.
+    token = build_session_manager.claim(session.session_id)
+    logger.info(
+        "build session %s: %s [%s]",
+        "resumed" if resumed else "opened",
+        session.session_id,
+        described,
     )
-    logger.info("build session opened: %s [%s]", session.session_id, selection.describe())
 
     try:
-        await send(websocket, BuildSessionMessage(session_id=session.session_id))
-        start_result = await default_service.start_session(session)
-        await _render_result(websocket, session, start_result)
+        await send(websocket, _session_frame(session, resumed))
+        if resumed:
+            # Not `start_session`: it would re-emit the bootstrap events into
+            # a session that has already had them. The snapshot is the whole
+            # of what a returning page needs.
+            await send(websocket, BuildStateMessage(data=session.snapshot()))
+        else:
+            start_result = await default_service.start_session(session)
+            await _render_result(websocket, session, start_result)
 
         while True:
             frame = await websocket.receive()
@@ -318,14 +371,17 @@ async def build_websocket(websocket: WebSocket) -> None:
         pass
     finally:
         # NOTHING HERE MAY AWAIT. Mirrors `app/websocket.py`'s Hack Mode
-        # teardown / `SessionManager.discard`: the server can cancel this
-        # task on a hard disconnect, and this `finally` then runs with a
-        # cancellation already delivered — the *first* `await` is not safe
-        # to depend on completing, even one with nothing to suspend on
-        # today, because that could change without anyone noticing the
-        # teardown had become unsafe. `end_session_sync` and `discard` are
-        # therefore plain synchronous calls, not the awaited
-        # `end_session`/`remove` this used to call.
-        end_session_sync(session)
-        build_session_manager.discard(session.session_id)
-        logger.info("build session closed: %s", session.session_id)
+        # teardown: the server can cancel this task on a hard disconnect, and
+        # this `finally` then runs with a cancellation already delivered.
+        #
+        # A DISCONNECT IS NOT THE END OF THE SESSION. The workspace, the
+        # student's edits, the retained compiled artifact and the recorder all
+        # belong to the session, not to this socket, so a reload must not
+        # discard them: `detach` keeps the session and starts the resume grace
+        # period. It is finished by `BuildSessionManager.end` — an explicit end
+        # request, or the grace period running out. A connection that has been
+        # superseded by a resume (or whose session was ended) owns nothing.
+        if build_session_manager.detach(session, token):
+            logger.info("build session detached: %s", session.session_id)
+        else:
+            logger.info("build connection closed (session not owned): %s", session.session_id)

@@ -35,6 +35,7 @@ from __future__ import annotations
 import ast
 import copy
 import pathlib
+from dataclasses import replace
 
 import pytest
 
@@ -67,6 +68,8 @@ from app.build.semantic import (
     SemanticSection,
     SemanticType,
     SymbolValue,
+    UnsupportedReason,
+    UnsupportedStatement,
 )
 from app.build.workspace import (
     ProgramApplyError,
@@ -109,6 +112,19 @@ def project(
         explore_section_ids=explore,
         security_region_id=None,
     )
+
+
+def first_pinmode(state: dict) -> dict:
+    """The first `pinmode` block in a section's body chain.
+
+    The chain now also holds read-only `preserved_source` blocks (Phase P1),
+    e.g. `setup()` opens with a drawn `Serial.begin(...)`, so "the first block"
+    is no longer necessarily an editable one.
+    """
+    block = state["blocks"]["blocks"][0]["inputs"]["DO"]["block"]
+    while block["type"] != "pinmode":
+        block = block["next"]["block"]
+    return block
 
 
 def workspace(**kwargs) -> BuildWorkspace:
@@ -180,7 +196,7 @@ def test_an_editable_section_opens_as_blocks_and_edits_as_blocks() -> None:
 
     # The student rearranges blocks. Here: one pinMode's MODE field.
     edited = copy.deepcopy(representation["workspace"])
-    first = edited["blocks"]["blocks"][0]["inputs"]["DO"]["block"]
+    first = first_pinmode(edited)
     assert first["fields"]["MODE"] == "INPUT_PULLUP"
     first["fields"]["MODE"] = "OUTPUT"
 
@@ -222,11 +238,12 @@ def test_source_the_toolbox_cannot_draw_survives_an_edit_at_its_own_position() -
     live = workspace()
     representation = live.section_blockly(SKETCH_NAME, DRAWABLE)
     carried = [record["text"] for record in representation["preserved"]]
-    assert any("Serial.begin(115200);" in text for text in carried)
-    assert any("WiFi.begin(" in text for text in carried)
+    # P2 draws the Serial/WiFi calls as blocks; what setup() still carries as
+    # preserved source is its two explanatory comments.
+    assert len(carried) == 2 and all(text.startswith("//") for text in carried)
 
     edited = copy.deepcopy(representation["workspace"])
-    edited["blocks"]["blocks"][0]["inputs"]["DO"]["block"]["fields"]["MODE"] = "OUTPUT"
+    first_pinmode(edited)["fields"]["MODE"] = "OUTPUT"
     live.apply_section_blockly(
         SKETCH_NAME, DRAWABLE, edited, representation["preserved"]
     )
@@ -234,8 +251,9 @@ def test_source_the_toolbox_cannot_draw_survives_an_edit_at_its_own_position() -
     source = live.region_source(SKETCH_NAME, DRAWABLE)
     for text in carried:
         assert text.splitlines()[0].strip() in source
-    # And still in the order they were in: Serial.begin before WiFi.begin.
-    assert source.index("Serial.begin") < source.index("WiFi.begin")
+    # And still in the order they were in: the "Started, not awaited" comment
+    # precedes the "Bound each MQTT connect" one.
+    assert source.index("Started, not awaited") < source.index("Bound each MQTT")
 
 
 def test_the_generated_cpp_is_an_output_of_the_blocks_not_an_input() -> None:
@@ -337,7 +355,7 @@ def test_editing_one_editable_section_does_not_disturb_the_other() -> None:
 
     representation = live.section_blockly(SKETCH_NAME, DRAWABLE)
     edited = copy.deepcopy(representation["workspace"])
-    edited["blocks"]["blocks"][0]["inputs"]["DO"]["block"]["fields"]["MODE"] = "OUTPUT"
+    first_pinmode(edited)["fields"]["MODE"] = "OUTPUT"
     live.apply_section_blockly(SKETCH_NAME, DRAWABLE, edited, representation["preserved"])
 
     assert live.region_source(SKETCH_NAME, "loop").split() == untouched.split()
@@ -665,7 +683,7 @@ def test_a_block_edit_over_the_socket_rewrites_the_firmware(monkeypatch) -> None
             representation = socket.receive_json()["data"]
 
             edited = copy.deepcopy(representation["workspace"])
-            edited["blocks"]["blocks"][0]["inputs"]["DO"]["block"]["fields"]["MODE"] = "OUTPUT"
+            first_pinmode(edited)["fields"]["MODE"] = "OUTPUT"
             socket.send_json(
                 {
                     "type": "edit_section_blocks",
@@ -859,6 +877,12 @@ def test_the_ir_now_has_a_comparison_expression_and_a_conditional_statement() ->
         "ComparisonValue",
         "ArithmeticValue",
         "OperationValue",
+        # P2: a function call used as a value (`millis()`).
+        "CallValue",
+        # P3: `&&` / `||`, `!x`, and `c ? a : b`.
+        "LogicalValue",
+        "NotValue",
+        "TernaryValue",
     }
     assert ComparisonValue(
         left=SymbolValue("message"), operator="==", right=LiteralValue("START", SemanticType.TEXT)
@@ -969,21 +993,60 @@ def _representation_for(section: SemanticSection) -> dict:
     return representation.to_representation()
 
 
-def test_a_naive_carry_through_of_the_old_branch_is_refused() -> None:
-    """Requirement 7's failure mode, submitted exactly as an unmodified
-    frontend round-trip would: the new authenticated STOP block, PLUS the old
-    unauthenticated `else if` fetched moments earlier and sent straight back.
+def test_the_old_unauthenticated_branch_is_now_visible_as_blocks() -> None:
+    """P3 turns the `if / else if` into ONE structured block chain.
+
+    Before P3 the `else if (message == "STOP")` branch was opaque preserved
+    source the student could neither see as blocks nor remove. It is now a
+    linked `ConditionalStatement`, so the vulnerable branch is on the canvas -
+    and the only thing left preserved in the function is its trailing comment.
     """
     live = security_workspace()
     current = _current_security_section(live)
-    start_branch, old_unauthenticated_branch = current.statements[0], current.statements[1]
+    chain = current.statements[0]
+    assert isinstance(chain, ConditionalStatement)
+    assert isinstance(chain.else_if, ConditionalStatement)
+    assert chain.else_if.condition.right.value == "STOP"
+
+    representation = live.section_blockly(SKETCH_NAME, SECURITY_SECTION)
+    assert [record["text"].lstrip()[:2] for record in representation["preserved"]] == ["//"]
+    assert representation["preserved"][0]["understoodByTheIr"] is False
+
+
+def test_a_comment_alone_does_not_block_editing_the_security_region() -> None:
+    """A comment has no behavior to hide, so it is not "opaque C++".
+
+    Without this, `applyCommand` - whose last line is an explanatory comment -
+    could never be edited as blocks at all.
+    """
+    live = security_workspace()
+    representation = live.section_blockly(SKETCH_NAME, SECURITY_SECTION)
+    live.apply_section_blockly(
+        SKETCH_NAME, SECURITY_SECTION, representation["workspace"], representation["preserved"]
+    )
+    source = live.region_source(SKETCH_NAME, SECURITY_SECTION)
+    assert "Any other payload reaches the callback" in source
+
+
+def test_a_naive_carry_through_of_an_opaque_fragment_is_refused() -> None:
+    """Requirement 7's failure mode, with a fragment the toolbox still cannot draw.
+
+    The student's new authenticated STOP block, PLUS an opaque statement fetched
+    moments earlier and sent straight back, is refused - the rule is unchanged,
+    only what counts as opaque has moved (the old `else if` no longer is).
+    """
+    live = security_workspace()
+    current = _current_security_section(live)
+    opaque = UnsupportedStatement(
+        text="while (busy) {\n    yield();\n  }", reason=UnsupportedReason.NOT_A_CALL
+    )
     modified = SemanticSection(
         section_id=SECURITY_SECTION,
         operation=current.operation,
-        statements=(start_branch, _authenticated_stop_statement(), old_unauthenticated_branch),
+        statements=(current.statements[0], _authenticated_stop_statement(), opaque),
     )
     representation = _representation_for(modified)
-    assert representation["preserved"], "the old branch must still be the one opaque fragment"
+    assert representation["preserved"], "the opaque statement must still be a fragment"
 
     with pytest.raises(SecurityRegionOwnershipError) as excinfo:
         live.apply_section_blockly(
@@ -993,25 +1056,25 @@ def test_a_naive_carry_through_of_the_old_branch_is_refused() -> None:
             representation["preserved"],
         )
     assert "security region" in str(excinfo.value)
-    assert "STOP" in str(excinfo.value)
+    assert "yield" in str(excinfo.value)
     # The rejection changed nothing: the committed vulnerability is still
-    # sitting there, in the text, exactly as it was — never silently applied.
+    # sitting there, in the text, exactly as it was - never silently applied.
     assert 'else if (message == "STOP")' in live.region_source(SKETCH_NAME, SECURITY_SECTION)
 
 
 def test_full_ownership_edit_drops_the_old_unauthenticated_branch() -> None:
     """The regression test for the exact failure mode (requirement 7).
 
-    Once the submission takes FULL ownership — no preserved material at all —
-    it is accepted, and the generated C++ has the new authenticated gate and
-    not one trace of the old bare comparison.
+    The student takes FULL ownership: the start branch WITHOUT its old
+    `else if`, plus the new authenticated STOP gate. It is accepted, and the
+    generated C++ has the new gate and not one trace of the old bare comparison.
     """
     live = security_workspace()
     current = _current_security_section(live)
     modified = SemanticSection(
         section_id=SECURITY_SECTION,
         operation=current.operation,
-        statements=(current.statements[0], _authenticated_stop_statement()),
+        statements=(replace(current.statements[0], else_if=None), _authenticated_stop_statement()),
     )
     representation = _representation_for(modified)
     assert representation["preserved"] == []
@@ -1027,7 +1090,7 @@ def test_full_ownership_edit_drops_the_old_unauthenticated_branch() -> None:
     assert "motorStart();" in source
     assert "motorStop();" in source
     assert '"STOP PANEL1-CMD-AUTH-K7"' in source
-    # The old, unauthenticated branch is gone — not hidden, not re-attached.
+    # The old, unauthenticated branch is gone - not hidden, not re-attached.
     assert "else if" not in source
     assert '"STOP"' not in source
 
@@ -1042,8 +1105,7 @@ def test_legitimate_preserved_material_outside_the_security_region_is_still_kept
     live = security_workspace(editable=(SECURITY_SECTION, DRAWABLE))
     representation = live.section_blockly(SKETCH_NAME, DRAWABLE)
     carried = [record["text"] for record in representation["preserved"]]
-    assert any("Serial.begin(115200);" in text for text in carried)
-    assert any("WiFi.begin(" in text for text in carried)
+    assert carried and all(text.startswith("//") for text in carried)
 
     live.apply_section_blockly(
         SKETCH_NAME, DRAWABLE, representation["workspace"], representation["preserved"]
@@ -1091,7 +1153,7 @@ def test_ir_understood_material_may_still_be_preserved_in_the_security_region() 
     """
     source = (
         "void setup() {\n}\n\nvoid loop() {\n}\n\n"
-        "static void chirp() {\n  pinMode(2, OUTPUT);\n  delay(BUZZER_CHIRP_MS);\n}\n"
+        "static void chirp() {\n  pinMode(2, OUTPUT);\n  digitalWrite(2, RUNNING);\n}\n"
     )
     document = analyze_source(source)
     project = build_project_from_document(
@@ -1115,4 +1177,4 @@ def test_ir_understood_material_may_still_be_preserved_in_the_security_region() 
 
     source_after = live.region_source("main.ino", "helper_chirp")
     assert "pinMode(2, INPUT_PULLUP);" in source_after
-    assert "delay(BUZZER_CHIRP_MS);" in source_after
+    assert "digitalWrite(2, RUNNING);" in source_after

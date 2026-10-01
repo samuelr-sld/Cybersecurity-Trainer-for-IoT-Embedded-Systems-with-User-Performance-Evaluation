@@ -24,6 +24,17 @@ export function withParticipant(url, participantId) {
   return `${url}${separator}participant=${encodeURIComponent(participantId)}`
 }
 
+/**
+ * Ask a mode WebSocket to re-attach to a session that is still running (the
+ * page was reloaded). The backend honours it only for a live session that
+ * belongs to the same participant; otherwise it starts a normal new one.
+ */
+export function withResumeSession(url, sessionId) {
+  if (!sessionId) return url
+  const separator = url.includes('?') ? '&' : '?'
+  return `${url}${separator}session=${encodeURIComponent(sessionId)}`
+}
+
 export class ApiError extends Error {
   constructor(message, status, { endpointMissing = false } = {}) {
     super(message)
@@ -84,4 +95,22 @@ export function listParticipants() {
 
 export function fetchEvaluation(participantId) {
   return request(`/api/evaluation/${encodeURIComponent(participantId)}`)
+}
+
+/** Is this Hack/Build session still running on the backend? */
+export function fetchSessionLive(mode, sessionId) {
+  return request(`/api/sessions/${mode}/${encodeURIComponent(sessionId)}`).then((body) => Boolean(body?.live))
+}
+
+/**
+ * End a session for good. A WebSocket closing never does this (a reload must
+ * be able to come back), so leaving a mode on purpose says so explicitly.
+ * Best effort: if the backend is unreachable its grace period ends the
+ * session anyway.
+ */
+export function endSession(mode, sessionId) {
+  return request(`/api/sessions/${mode}/${encodeURIComponent(sessionId)}/end`, {
+    method: 'POST',
+    keepalive: true,
+  }).catch(() => null)
 }

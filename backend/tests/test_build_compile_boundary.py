@@ -49,6 +49,8 @@ from app.build.semantic import (
     SemanticSection,
     SemanticType,
     SymbolValue,
+    UnsupportedReason,
+    UnsupportedStatement,
 )
 from app.build.service import default_service
 from app.build_project_selection import BuildProjectSelection, BuildProjectSource
@@ -227,8 +229,17 @@ def _submission(session, *statements) -> dict:
 
 
 def _original_unauthenticated_branch(session):
-    """The committed `else if (message == "STOP")` — opaque to the IR."""
-    return _current_security_section(session.workspace.full_source(SKETCH_NAME)).statements[1]
+    """The committed `else if (message == "STOP")`, carried back as OPAQUE source.
+
+    P3 draws the real `else if` as blocks, so the firmware itself no longer
+    holds it opaque. The hazard this fixture models is unchanged, though: a
+    client that resubmits that branch as text the toolbox never drew (a stale
+    or hand-built payload) must not get it past the ownership rule.
+    """
+    return UnsupportedStatement(
+        text='else if (message == "STOP") {' + chr(10) + '    motorStop();' + chr(10) + '  }',
+        reason=UnsupportedReason.NOT_A_CALL,
+    )
 
 
 def _incomplete(session) -> dict:

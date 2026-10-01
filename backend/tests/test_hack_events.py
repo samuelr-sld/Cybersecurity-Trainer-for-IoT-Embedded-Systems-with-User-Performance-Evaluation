@@ -556,6 +556,8 @@ def test_disconnect_stamps_the_session_as_ended(client: TestClient) -> None:
         _send(ws, "esptool.py read_flash 0x0 0x400000 firmware.bin")
         _drain(ws)
 
+    # Disconnect detaches; ending the session (explicit, or grace expiry) stamps it.
+    session_manager.end(session_id)
     header = get_default_store().session(session_id)
     assert header is not None
     assert header.ended_at is not None

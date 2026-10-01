@@ -1080,18 +1080,22 @@ th {
   padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 12px;
 }
 
-/* Build Mode — Blockly Phase 1 POC (see CLAUDE.md). `.code-workspace` fills
-   `.code-view` without triggering its own scrollbar (Blockly manages its
-   own pan/zoom; the CODE textarea scrolls itself) — a BLOCKS/CODE toggle
-   above a canvas that stays the dominant, large area either way. */
+/* `.code-workspace` fills the editor pane without triggering its own
+   scrollbar (Blockly manages its own pan/zoom) — originally the Phase 1
+   BLOCKS/CODE POC's canvas wrapper, now reused as-is for the open EDITABLE
+   section's workspace tab pane (see BuildMode.jsx `workspaceActive`), so
+   the canvas stays the dominant, large area there too. `.editor-mode-tabs`
+   below is the earlier BLOCKS/CODE toggle it does not use any more —
+   superseded by `.workspace-tabs`, left in place unused. */
 .code-workspace {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 8px;
 }
 
 .editor-mode-tabs {
@@ -1118,6 +1122,73 @@ th {
   border-color: var(--ok);
 }
 
+/* Build Mode — the Blockly workspace tab strip (BuildMode.jsx
+   `openWorkspaceTabs`): a browser-tab-style bar with a permanent, non-
+   closable CODE tab plus one closable tab per EDITABLE section a student
+   has opened. Deliberately its own rules rather than reusing `.tabs`
+   (the file switcher) or `.editor-mode-tabs` (the old BLOCKS/CODE toggle)
+   since it mixes a plain tab button with a label+close compound tab. */
+.workspace-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--soft);
+  flex-shrink: 0;
+}
+
+.workspace-tabs > button {
+  border: 0;
+  border-right: 1px solid var(--soft);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 8px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.workspace-tabs > button.active {
+  background: var(--white);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.workspace-tab {
+  display: flex;
+  align-items: stretch;
+  border-right: 1px solid var(--soft);
+  background: var(--panel);
+}
+
+.workspace-tab.active {
+  background: var(--white);
+}
+
+.workspace-tab-label {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 4px 8px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.workspace-tab.active .workspace-tab-label {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.workspace-tab-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 12px 8px 6px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.workspace-tab-close:hover {
+  color: var(--bad);
+}
+
 /* The large blank Blockly canvas — the dominant part of the screen per
    CLAUDE.md's ESP IDE-inspired goal. `position:relative`/`absolute` (rather
    than percentage heights) is the robust way to give a library-managed
@@ -1138,22 +1209,60 @@ th {
 .code-segment {
   font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.6;
   white-space: pre-wrap;
   margin: 0;
 }
 
+/* Rounded "card" chunks, one per firmware section — the read-only look the
+   reference design uses for C++ source. Plain punctuation/identifiers stay
+   `--ink` (not `--muted`) so the CppCode token colors below actually read as
+   color coding rather than everything being uniformly dim. */
 .code-segment.locked {
-  color: var(--muted);
+  color: var(--ink);
   background: var(--panel);
-  padding: 10px;
-  border-left: 3px solid var(--line);
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   user-select: text;
 }
 
 .code-segment.small {
   font-size: 11px;
-  padding: 8px;
+  padding: 10px 12px;
+}
+
+/* C++ syntax color coding (src/components/CppCode.jsx) — a small
+   regex-based tokenizer, not a parser; it only colors already-rendered
+   section text and never touches the underlying firmware/section model.
+   Palette follows a VS Code Dark+-style scheme against this screen's
+   existing dark IDE background. */
+.cpp-comment {
+  color: #7a8a99;
+}
+
+.cpp-string {
+  color: #ce9178;
+}
+
+.cpp-include {
+  color: #b5cea8;
+}
+
+.cpp-kw {
+  color: #c586c0;
+}
+
+.cpp-number {
+  color: #4fd6c4;
+}
+
+.cpp-const {
+  color: #9cdcfe;
+}
+
+.cpp-type {
+  color: #d7ad66;
 }
 
 /* Build Mode — the clickable section list (Phase B8 correction). A section
@@ -1272,6 +1381,13 @@ button.section-header.active {
 
 .code-section {
   border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.code-section:hover,
+.code-section:focus-visible {
+  border-color: var(--line);
+  outline: none;
 }
 
 .code-section.selected {
@@ -1381,8 +1497,18 @@ button.section-header.active {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  height: 160px;
   border-top: 2px solid var(--line);
+}
+
+.flash-terminal-toggle {
+  width: 100%;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.flash-terminal-body {
+  height: 130px;
 }
 
 .flash-terminal-header {

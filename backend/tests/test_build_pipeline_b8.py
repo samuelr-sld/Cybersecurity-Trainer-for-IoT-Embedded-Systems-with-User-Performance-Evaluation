@@ -1661,18 +1661,46 @@ def test_no_shipped_module_simulates_a_device() -> None:
             assert term not in body, f"{path.name} mentions {term!r}"
 
 
-def test_the_real_evidence_channel_refuses_rather_than_pretending() -> None:
-    """With no paho-mqtt and no broker, opening one raises — it never returns
-    a channel that would report a state nobody observed."""
+def test_the_real_evidence_channel_refuses_rather_than_pretending(monkeypatch) -> None:
+    """With no broker reachable, opening one raises — it never returns a
+    channel that would report a state nobody observed.
+
+    HERMETIC: the broker being unreachable is *stipulated* by replacing the
+    MQTT client with one whose TCP connect is refused, so the production
+    `open_mqtt_evidence` -> `MqttStateTopicEvidence.open` path runs unchanged
+    and the result does not depend on whether this machine happens to be on
+    the CyberTrainer network (where the real broker answers).
+    """
     from app.build.validation import mqtt_evidence
 
+    class RefusingClient:
+        def __init__(self, client_id: str) -> None:
+            self.client_id = client_id
+
+        def username_pw_set(self, username, password) -> None:
+            pass
+
+        def connect(self, host, port, keepalive) -> None:
+            raise ConnectionRefusedError("connection refused (test-stipulated)")
+
+        def loop_start(self) -> None:  # pragma: no cover - must never be reached
+            raise AssertionError("a refused connection must not start a network loop")
+
+    monkeypatch.setattr(mqtt_evidence, "available", lambda: True)
+    monkeypatch.setattr(mqtt_evidence, "_client_class", lambda: RefusingClient)
+
     criterion = remediation_spec_for(package()).criterion
-    if mqtt_evidence.available():  # pragma: no cover - depends on the environment
-        with pytest.raises(EvidenceChannelError):
-            mqtt_evidence.open_mqtt_evidence(criterion, FIXTURES)
-    else:
-        with pytest.raises(EvidenceChannelError, match="paho-mqtt"):
-            mqtt_evidence.open_mqtt_evidence(criterion, FIXTURES)
+    with pytest.raises(EvidenceChannelError, match="could not connect to the broker"):
+        mqtt_evidence.open_mqtt_evidence(criterion, FIXTURES)
+
+
+def test_the_evidence_channel_refuses_without_the_mqtt_library(monkeypatch) -> None:
+    from app.build.validation import mqtt_evidence
+
+    monkeypatch.setattr(mqtt_evidence, "available", lambda: False)
+    criterion = remediation_spec_for(package()).criterion
+    with pytest.raises(EvidenceChannelError, match="paho-mqtt"):
+        mqtt_evidence.open_mqtt_evidence(criterion, FIXTURES)
 
 
 def test_the_fake_panel_really_implements_the_production_protocol() -> None:

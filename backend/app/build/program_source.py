@@ -53,6 +53,13 @@ two generations of the same subset reports only a real change. What the check
 therefore guarantees is that a submitted program says the same thing about
 every locked section as the file it is derived from.
 
+AN EDIT MOVES ONLY WHAT IT EDITED. B6 lays out a whole file its own way, so
+the regenerated file is never handed back as-is: `_preserving_untouched_layout`
+keeps a section's ORIGINAL text byte for byte whenever B6 writes it exactly as
+it writes the unedited file, and gives a changed section its original leading
+and trailing gap. Only the interior of a section a student actually changed is
+B6's layout.
+
 PURE AND STDLIB-ONLY. Functions in, values out. No filesystem, no process, no
 `arduino-cli`, no session, no panel, no hardware, no clock, no randomness —
 the same discipline B1/B3/B6 hold themselves to. The one thing this module
@@ -61,6 +68,8 @@ compile belongs to `app/build/service.py`.
 """
 
 from __future__ import annotations
+
+from dataclasses import replace
 
 from app.build.discovery import DiscoveryError, analyze_source
 from app.build.document_project import (
@@ -227,7 +236,8 @@ def apply_program_to_file(
     if _skip_locked_check:
         return written
 
-    baseline = _locked_text(regenerated(firmware_file))
+    baseline_file = regenerated(firmware_file)
+    baseline = _locked_text(baseline_file)
     changed = sorted(
         region_id
         for region_id, text in _locked_text(written).items()
@@ -237,4 +247,47 @@ def apply_program_to_file(
         raise LockedRegionChangedError(
             f"{path}: region(s) are locked and cannot be changed: {', '.join(changed)}"
         )
-    return written
+    return _preserving_untouched_layout(firmware_file, baseline_file, written)
+
+
+def _gaps(text: str) -> tuple[str, str]:
+    """The whitespace a segment starts and ends with (its gap to its neighbours)."""
+    body = text.strip()
+    if not body:
+        return text, ""
+    start = text.index(body)
+    return text[:start], text[start + len(body):]
+
+
+def _preserving_untouched_layout(
+    original: FirmwareFile, baseline: FirmwareFile, written: FirmwareFile
+) -> FirmwareFile:
+    """`written`, with every section the program did not change left as it was.
+
+    B6 lays a whole file out in its own conventional style, so taking `written`
+    as-is re-lays-out every section — losing interior blank lines and
+    normalising the gaps between sections — even when a student edited one.
+    A section is UNTOUCHED when B6 writes it exactly as it writes the
+    unedited file (`baseline`, the same like-with-like comparison the locked
+    check uses); such a section keeps its ORIGINAL text byte for byte. A
+    section that did change takes B6's new body but keeps its original leading
+    and trailing gap, so an edit moves nothing but the edited statements.
+
+    If the composed file would not re-discover as the same regions, this falls
+    back to `written` rather than hand back a file whose sections moved.
+    """
+    composed: list = []
+    for old, base, new in zip(original.segments, baseline.segments, written.segments):
+        if new.text == base.text:
+            composed.append(old)
+            continue
+        lead, trail = _gaps(old.text)
+        composed.append(replace(new, text=lead + new.text.strip() + trail))
+    candidate = replace(written, segments=tuple(composed))
+    try:
+        rediscovered = _sectioned(candidate.render(), written.path, frozenset())
+    except ProgramSourceError:
+        return written
+    if [s.region_id for s in rediscovered.segments] != [s.region_id for s in written.segments]:
+        return written
+    return candidate

@@ -1,8 +1,12 @@
 """Hack Mode session lifecycle.
 
-One session per WebSocket connection, held in memory for the lifetime of that
-connection. Sessions are isolated: nothing is shared between connections, and
-a disconnect removes the session entirely.
+One session per Hack Mode entry, held in memory. Sessions are isolated:
+nothing is shared between them. A WebSocket disconnect DETACHES a session
+rather than ending it (a browser reload is a reconnection, not the end of a
+student's work): it stays alive for `config.SESSION_RESUME_GRACE_SECONDS`
+so the same client can resume it with `?session=<id>`, and is finished only
+by `SessionManager.end` — an explicit end request or that timeout. See
+`app/session_residency.py`.
 
 A session records who it is, when it started, the terminal geometry the
 client reported, its own `Scenario`, its own `SerialTransport` for real I/O
@@ -35,6 +39,7 @@ from app.events import HackEventRecorder
 from app.hardware import FirmwareArtifact, SerialTransport
 from app.pager import Pager
 from app.scenarios import Scenario, create_default_scenario
+from app.session_residency import Residency
 
 
 def _utc_now() -> datetime:
@@ -130,9 +135,19 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, HackSession] = {}
         self._lock = asyncio.Lock()
+        # Who is serving each session, and which detached ones are waiting to
+        # be resumed. A WebSocket disconnect detaches; it does not end.
+        self._residency = Residency()
+        # The panel attached when each session was created, held HERE and not
+        # on `HackSession` (which stays ignorant of panels). Resume compares it
+        # with the panel attached now; see `app/session_panel_guard.py`.
+        self._panels: dict[str, str | None] = {}
 
     async def create(
-        self, scenario: Scenario | None = None, participant_id: str | None = None
+        self,
+        scenario: Scenario | None = None,
+        participant_id: str | None = None,
+        panel_id: str | None = None,
     ) -> HackSession:
         """Create and register a session with a fresh unique id.
 
@@ -168,6 +183,7 @@ class SessionManager:
         session.recorder.start()
         async with self._lock:
             self._sessions[session.session_id] = session
+            self._panels[session.session_id] = panel_id
         return session
 
     async def get(self, session_id: str) -> HackSession | None:
@@ -195,7 +211,60 @@ class SessionManager:
         with `create`/`get`/`remove`. The lock exists to make multi-step
         async sequences atomic, and this is a single step.
         """
+        self._residency.forget(session_id)
+        self._panels.pop(session_id, None)
         return self._sessions.pop(session_id, None)
+
+    # -- attach / detach / resume (a reload is not the end of a session) -----
+
+    def resume(self, session_id: str | None, participant_id: str | None) -> HackSession | None:
+        """The live session a reconnecting client asks for, or None.
+
+        None covers every way the request cannot be honoured — no id, an
+        unknown or already-ended id, or a session that belongs to someone
+        else — and the caller then starts a normal new session. A plain dict
+        lookup with no await point, like `discard`/`is_live`.
+        """
+        if not session_id:
+            return None
+        session = self._sessions.get(session_id)
+        if session is None or session.participant_id != participant_id:
+            return None
+        return session
+
+    def panel_of(self, session_id: str) -> str | None:
+        """The panel id this session was created against (None: none resolved)."""
+        return self._panels.get(session_id)
+
+    def claim(self, session_id: str) -> object:
+        """Become the session's serving connection; returns the owner token."""
+        return self._residency.claim(session_id)
+
+    def is_current(self, session_id: str, token: object) -> bool:
+        return self._residency.is_current(session_id, token)
+
+    def detach(self, session: HackSession, token: object) -> bool:
+        """Keep the session alive after its connection is lost.
+
+        Everything the *connection* owned is released here (the serial port,
+        which would otherwise block Build Mode from flashing that board, and
+        a pager waiting on a keystroke from a terminal that no longer
+        exists). Everything the *session* owns — scenario, recorder, events —
+        is untouched. If nothing resumes it in time, `end` runs.
+        """
+        if not self._residency.is_current(session.session_id, token):
+            return False
+        session.serial.release()
+        session.pager = None
+        return self._residency.detach(session.session_id, token, lambda: self.end(session.session_id))
+
+    def end(self, session_id: str) -> HackSession | None:
+        """Finish a session for good. Synchronous, idempotent, never awaits."""
+        session = self.discard(session_id)
+        if session is not None:
+            session.serial.release()
+            session.recorder.finish()
+        return session
 
     def is_live(self, session_id: str) -> bool:
         """Whether this process is serving the session now (Evaluation read).

@@ -116,9 +116,14 @@ def test_hack_websocket_attributes_the_session_to_the_participant(
     _register(isolated_event_store)
     with client.websocket_connect(f"/ws/hack?participant={TEST_ID}") as ws:
         session_id = ws.receive_json()["session_id"]
+    # A closing socket only detaches; ending the session (explicitly or by the
+    # grace period) is what stamps it.
+    from app.sessions import session_manager
+
+    session_manager.end(session_id)
     record = isolated_event_store.session(session_id)
     assert record.participant_id == TEST_ID
-    assert record.ended_at is not None  # teardown stamped it
+    assert record.ended_at is not None  # ending the session stamped it
 
 
 def test_hack_websocket_without_or_with_unknown_participant_stays_unattributed(
@@ -364,6 +369,9 @@ def test_api_evaluation_reflects_a_real_hack_websocket_session(
     client.post("/api/participants", json={"participant_id": TEST_ID, "full_name": TEST_NAME})
     with client.websocket_connect(f"/ws/hack?participant={TEST_ID}") as ws:
         session_id = ws.receive_json()["session_id"]
+    from app.sessions import session_manager
+
+    session_manager.end(session_id)  # detached until ended; now it is over
 
     listing = client.get("/api/participants").json()["participants"]
     assert listing[0]["participant_id"] == TEST_ID
