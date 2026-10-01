@@ -21,14 +21,29 @@ def _split_origins(raw: str) -> list[str]:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
+# --- production frontend (single-origin deployment) -----------------------
+#
+# Directory holding the PREBUILT production frontend (the `dist/` that
+# `npm run build` produces). When set, the backend serves it at `/` — see
+# app/frontend.py — so the whole trainer is one origin
+# (e.g. http://192.168.50.1:8000) and the browser needs no CORS at all.
+#
+# OPT-IN, NEVER A DEFAULT. Empty (the default) means "API only", which is the
+# development flow: Vite serves the UI on :5173 and this backend answers only
+# /api, /ws and /health. A default of `<repo>/dist` would make a dev machine
+# with a stale build start answering `/` with it. The frontend is built
+# elsewhere and only *read* here; building it is never part of startup.
+FRONTEND_DIST_DIR: str = os.getenv("TRAINER_FRONTEND_DIST", "")
+
 # --- CORS -----------------------------------------------------------------
 #
 # DEVELOPMENT ONLY. Vite serves the React app on :5173 while FastAPI runs
 # separately on :8000, so the browser treats them as different origins. This
-# list is an explicit allowlist of local dev origins — it is NOT a production
-# configuration. A deployment must set TRAINER_ALLOWED_ORIGINS to the real
-# frontend origin(s); wildcard origins are never appropriate here because the
-# Hack Mode channel is per-student session state.
+# list is an explicit allowlist of local dev origins. A deployment that
+# serves the frontend from this backend (TRAINER_FRONTEND_DIST above) is
+# same-origin and does not use it. TRAINER_ALLOWED_ORIGINS is only for a
+# frontend served from a DIFFERENT origin; wildcard origins are never
+# appropriate here because the Hack Mode channel is per-student session state.
 DEFAULT_ALLOWED_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -182,6 +197,25 @@ HARDWARE_STARTUP_DETECT: bool = os.getenv("TRAINER_HARDWARE_STARTUP_DETECT", "1"
     "False",
     "no",
 }
+
+# Whether the application lifespan runs the serial-port presence watcher
+# (`app/hardware/presence.py`). It enumerates the OS's serial ports every
+# `HARDWARE_PRESENCE_INTERVAL_SECONDS` — a few milliseconds, nothing opened,
+# nothing probed — and drops a port's cached panel identity when the port
+# disappears, so a board swapped for another behind the same USB bridge (same
+# port name, same descriptors) between two 10 s polls is not still reported
+# as the old one. On by default. Set TRAINER_HARDWARE_PRESENCE_WATCH=0 to
+# disable it; mode entry still re-reads the board's identity itself. The test
+# suite disables it (see tests/conftest.py).
+HARDWARE_PRESENCE_WATCH: bool = os.getenv("TRAINER_HARDWARE_PRESENCE_WATCH", "1") not in {
+    "0",
+    "false",
+    "False",
+    "no",
+}
+HARDWARE_PRESENCE_INTERVAL_SECONDS: float = float(
+    os.getenv("TRAINER_HARDWARE_PRESENCE_INTERVAL_SECONDS", "1")
+)
 
 # Canonical Linux/training serial path — see app/hardware/serial_alias.py.
 # The trainer deploys to a Raspberry Pi, so the courseware and Hack Mode

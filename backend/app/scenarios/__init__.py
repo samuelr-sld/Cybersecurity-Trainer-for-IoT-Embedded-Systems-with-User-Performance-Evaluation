@@ -17,6 +17,8 @@ Responsibility split:
     events.py         `ScenarioEvent` domain events (Phase 2E seam)
     payloads.py       safe parsing of MQTT publish payloads
     environmental.py  `EnvironmentalMonitoringScenario` — the simulation
+    environmental_sensing.py  `EnvironmentalSensingScenario` — Panel 2's
+                      neutral foundation target (no objectives yet)
     registry.py       `ScenarioRegistry` — `scenario_id -> Scenario`
                       selection (Phase 2D.3), the seam a `PanelPackage`'s
                       declared `scenario_id` resolves through
@@ -41,6 +43,7 @@ from app.scenarios.base import (
     ScenarioOutcome,
 )
 from app.scenarios.environmental import EnvironmentalMonitoringScenario
+from app.scenarios.environmental_sensing import EnvironmentalSensingScenario
 from app.scenarios.smart_home import SmartHomeMQTTScenario
 from app.scenarios.events import ScenarioEvent, ScenarioEventType
 from app.scenarios.registry import (
@@ -79,6 +82,7 @@ __all__ = [
     "EXIT_OK",
     "EXIT_USAGE",
     "EnvironmentalMonitoringScenario",
+    "EnvironmentalSensingScenario",
     "SmartHomeMQTTScenario",
     "Scenario",
     "ScenarioEvent",

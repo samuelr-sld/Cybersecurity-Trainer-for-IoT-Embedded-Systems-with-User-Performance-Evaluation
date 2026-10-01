@@ -24,8 +24,9 @@ Cybersecurity Trainer.
 No OS command execution, no PTY, no shell, no real nmap, no real MQTT broker,
 no ESP32 or serial/`esptool` access, no database, no persistence, and no
 evaluation metrics. The IoT target is a deterministic in-memory simulation.
-The React frontend is **not** wired to this backend yet — Hack Mode still uses
-its client-side mock transport (Phase 2D-B). No scoring/evaluation pipeline
+The React frontend connects to this backend over `/ws/*` and `/api/*`, and the
+backend can serve the frontend's production build itself (see "Production
+deployment" below). No scoring/evaluation pipeline
 exists yet (Phase 2E); `event` frames are transported, not persisted or
 graded.
 
@@ -50,9 +51,73 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Host, port, and allowed origins can be overridden with the `TRAINER_HOST`,
-`TRAINER_PORT`, and `TRAINER_ALLOWED_ORIGINS` environment variables (see
-`app/config.py`).
+The bind address and port are **uvicorn's own `--host` / `--port` arguments**;
+`TRAINER_HOST` / `TRAINER_PORT` in `app/config.py` are not read by anything.
+`TRAINER_ALLOWED_ORIGINS` (CORS) only matters for a frontend served from a
+different origin, such as Vite on `:5173` during development.
+
+## Production deployment (Raspberry Pi, single origin)
+
+In production the backend serves the frontend's **prebuilt** production build
+itself, so the whole trainer is one origin — `http://192.168.50.1:8000` on the
+`CyberTrainer` network — with no second HTTP server, no frontend port and no
+CORS. The React app derives every API/WebSocket URL from the page's own
+hostname plus port 8000, so nothing needs to be configured in the frontend.
+
+```bash
+cd ~/Embedded-IoT-Cybersecurity-Trainer/backend
+TRAINER_FRONTEND_DIST=/home/arvis/Embedded-IoT-Cybersecurity-Trainer/dist \
+  .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+- `TRAINER_FRONTEND_DIST` is the directory holding the build's `index.html`
+  (the `dist/` that `npm run build` produces, built on a development machine —
+  the Pi has no Node). It is **opt-in**: unset (the development default) the
+  backend serves only `/api`, `/ws` and `/health`. If it is set to a directory
+  without an `index.html` the backend still starts, logs a warning naming the
+  path, and serves no frontend. The backend never builds the frontend.
+- On the Pi that directory is `<repo>/dist` (git-ignored), so the running
+  service depends on nothing outside the repository; the offline provisioning
+  bundle is an install-time artifact only. **Publishing a new UI build** is
+  replacing the contents of `<repo>/dist` with the new `dist/` — the files are
+  read per request, so no restart is needed provided `dist/index.html` existed
+  when the service started (if it did not, the frontend was never mounted and
+  one restart is needed).
+- The mount is registered after every real route (`app/frontend.py`), so
+  `/api/*`, `/ws/*`, `/health` and `/docs` are unchanged, and an unknown path
+  still answers FastAPI's `{"detail": "Not Found"}`.
+- `--host 0.0.0.0` exposes the API on every interface the Pi has. Today only
+  the `CyberTrainer` AP interface is up; the API has no authentication, so do
+  not connect another network to the Pi without re-checking this.
+
+### Running it as a service (systemd)
+
+`deploy/cybertrainer-backend.service` runs the command above as user `arvis`
+from the repository's `backend/.venv`, restarts it if it exits, and reads
+optional deployment settings and lab secrets from
+`/etc/cybertrainer/backend.env`. That file is **optional** (`EnvironmentFile=-`):
+the service starts without it, and it is where `TRAINER_LAB_*` values go when
+they are provisioned (systemd reads it as root, so `root:root 0600` keeps them
+from the `arvis` account). The backend's own `backend/lab.env.local` loader
+still works and is not referenced by the unit; a variable set by the unit's
+environment file wins over `lab.env.local`.
+
+```bash
+sudo install -m 0644 deploy/cybertrainer-backend.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cybertrainer-backend     # only when you mean to deploy
+journalctl -u cybertrainer-backend -f
+```
+
+Boot order is `CyberTrainer AP -> Mosquitto -> backend`: the unit is ordered
+after `network-online.target` (reached once NetworkManager has activated the AP)
+and `mosquitto.service`, and Mosquitto's own unit is ordered after
+`network-online.target` because the broker binds `192.168.50.1`, which exists
+only while the AP is up. The broker is `Wants=`, not `Requires=`, so the backend
+still starts without it.
+
+Starting the backend (by hand or as a service) runs one device detection, which
+reads the ESP32's MAC and resets the board once. It writes no flash.
 
 ### Lab environment (Panel 1 live MQTT / Build validation)
 
@@ -297,7 +362,10 @@ injection, and hostile MQTT payloads all stay inert.
 The CORS configuration in `app/main.py` is **development-oriented**: it
 allowlists the local Vite dev origins because the frontend (`:5173`) and the
 backend (`:8000`) run as separate origins during development. A deployment
-must set `TRAINER_ALLOWED_ORIGINS` explicitly.
+that serves the frontend from the backend (see "Production deployment") is one
+origin and does not use CORS; `TRAINER_ALLOWED_ORIGINS` is only needed for a
+frontend served from a different origin. The WebSocket endpoints do no `Origin`
+check.
 
 ## Tests
 
@@ -427,6 +495,27 @@ Control System) is integrated as `backend/panels/smart-home-mqtt-control/`
 is **not** implemented: the complete Panel 1 attack/remediation/evaluation
 lifecycle, any Panel 2 activity, and all metric computation — later phases
 this seam exists to feed.
+
+**Panel 2 (Environmental Monitoring System) is a foundation module**, and its
+package (`backend/panels/environmental-monitoring/`) says so in data:
+
+- *Hack Mode.* Its `scenario_id` (`environmental-sensing`) resolves to
+  `EnvironmentalSensingScenario` (`app/scenarios/environmental_sensing.py`), a
+  neutral target — no vulnerability, objectives, events or target facts; every
+  tool answers that no activity is defined, and its `state` snapshot is
+  `{"foundation": true, "objectives": []}`. Registering it is what stops Panel 2
+  from falling back to the legacy MQTT/BME280 default scenario, and what lets
+  Hack-mode preparation succeed for it. `tests/test_panel2_scenario.py`.
+- *Build Mode.* The real sketch is opened through the same generic
+  B1–B8/Blockly pipeline as Panel 1; no Panel-2 build code exists. Because a
+  foundation panel has firmware but no remediation to carry a section policy,
+  a package may declare one in an optional `build` block
+  (`BuildDeclaration`: `editable_section_ids` / `explore_section_ids`). A package
+  declares its policy there **or** in `remediation`, never both. Panel 2 opens
+  `setup`, `loop`, `helper_updateDisplay` and `helper_showError`; the
+  configuration runs (`global`, `global_2`: pins, OLED, 31.0 C threshold,
+  intervals) stay locked. No security region, no validator, no remediation text.
+  `tests/test_panel2_build.py`, including real `arduino-cli` compiles.
 
 ## Build Mode — Phase 3A + 3B + 3C, Phase 1 (Build Mode POC)
 

@@ -30,10 +30,20 @@ them. Every other real detection in this file runs against a *private*
 cannot leak into a test that assumes a cold, NOT_CHECKED monitor.
 
 SKIPS CLEANLY, NEVER FAILS, WITH NO BOARD ATTACHED. `hil_monitor` below is
-the one gate: every test in this file depends on it, directly or through
+the first gate: every test in this file depends on it, directly or through
 another fixture, so the whole module skips with one clear reason when no
 ESP32 answers `arduino-cli board list` on this machine. The rest of the
 backend test suite never depends on this file passing.
+
+PANEL-SPECIFIC TESTS ARE GATED ON WHICH BOARD IT IS, NOT JUST THAT ONE IS
+THERE. `panel_one_monitor` is the second gate (`tests/hil_gating.py`): the
+tests that assert Panel 1's identity, package, scenario or serial banner
+depend on it and skip unless the attached chip's MAC is Panel 1's — so a
+different panel, or an unregistered module, skips them instead of failing them
+for not being Panel 1. Panel-agnostic tests (USB detection, MAC reading, the
+esptool and serial seams) depend only on `hil_monitor` and run on any board.
+The gate compares the physical MAC, never the registry's answer, so a
+regression in Panel 1's own binding still FAILS rather than hiding as a skip.
 
 WHAT THIS FILE DOES NOT COVER, HONESTLY. There are no motor/relay/LED/buzzer
 peripherals on the bench for this phase, so nothing here claims physical
@@ -67,17 +77,16 @@ from app.scenario_selection import ScenarioSource, SessionScenarioSelector
 from app.scenarios import create_default_scenario
 from app.scenarios.smart_home import SmartHomeMQTTScenario
 from app.sessions import HackSession
+from tests.hil_gating import PANEL_ONE_ID, PANEL_ONE_MAC, panel_one_skip_reason
 
 pytestmark = pytest.mark.hardware
 
-# Panel 1's registered board (app/hardware/panels.py::BUILT_IN_PANELS) and the
-# Smart Home scenario's own target defaults
-# (app/scenarios/smart_home_state.py::MotorControlTarget) — the same
-# constants tests/test_smart_home_scenario.py uses. Not a fake/test-only MAC:
-# it is this project's known development board, asserted against reality
-# below rather than assumed.
-PANEL_ONE_ID = "smart-home-mqtt-control"
-PANEL_ONE_MAC = "20:9b:a9:88:0b:e4"
+# PANEL_ONE_ID / PANEL_ONE_MAC (imported above) name Panel 1's registered board
+# (app/hardware/panels.py::BUILT_IN_PANELS) — not a fake/test-only MAC, but this
+# project's known development board, asserted against reality below rather than
+# assumed. The constants below are the Smart Home scenario's own target defaults
+# (app/scenarios/smart_home_state.py::MotorControlTarget), the same ones
+# tests/test_smart_home_scenario.py uses.
 BROKER = "192.168.50.1"
 BROKER_PORT = 1883
 COMMAND_TOPIC = "cybertrainer/smart-home/motor/control"
@@ -152,21 +161,47 @@ def hil_monitor():
     return monitor
 
 
+@pytest.fixture(scope="module")
+def panel_one_monitor(hil_monitor):
+    """`hil_monitor`, but only when the attached board IS Panel 1.
+
+    The second gate (see the module docstring and `tests/hil_gating.py`):
+    skips every dependent test, with the reason, when the chip's MAC read by
+    `hil_monitor` is absent or is any MAC other than Panel 1's — another
+    panel, or an unregistered module. Reads the already-cached snapshot, so it
+    triggers no second detection and no second MAC probe (a probe resets the
+    board).
+
+    Module-scoped, like `hil_monitor`, so a function-scoped fixture that
+    drives the real board (`primed_shared_monitor`) is never set up for a
+    test this gate is about to skip.
+    """
+    reason = panel_one_skip_reason(hil_monitor.snapshot())
+    if reason is not None:
+        pytest.skip(reason)
+    return hil_monitor
+
+
 @pytest.fixture
-def hil_resources(hil_monitor) -> PanelResourceService:
-    """The panel-resource chain over `hil_monitor`. No I/O of its own."""
-    identification = PanelIdentificationService(monitor=hil_monitor)
+def hil_resources(panel_one_monitor) -> PanelResourceService:
+    """The panel-resource chain over Panel 1's monitor. No I/O of its own.
+
+    Gated on `panel_one_monitor`, and so is everything built on it
+    (`hil_package`, `hil_selection`): every consumer asserts something about
+    Panel 1's package or scenario.
+    """
+    identification = PanelIdentificationService(monitor=panel_one_monitor)
     return PanelResourceService(identification=identification)
 
 
 @pytest.fixture
 def hil_package(hil_resources):
-    """The real, loaded `PanelPackage` for whatever is actually attached.
+    """The real, loaded `PanelPackage` for the attached Panel 1.
 
-    Fails the test (not skips) if the attached board is not the registered,
-    packaged Panel 1: every other fixture in this file assumes the known
-    development board is what answers, and a silent skip here would hide a
-    real regression in the panel binding rather than reporting one.
+    Skipped, via `panel_one_monitor`, when the attached board is not Panel 1.
+    Once Panel 1's MAC IS what answers, this FAILS (never skips) unless the
+    chain resolves to READY: a silent skip there would hide a real regression
+    in the panel binding rather than reporting one.
     """
     resources = hil_resources.resolve()
     assert resources.status is PanelResourceStatus.READY, resources.detail
@@ -175,7 +210,7 @@ def hil_package(hil_resources):
 
 @pytest.fixture
 def hil_selection(hil_resources):
-    """The real `ScenarioSelection` for whatever is actually attached."""
+    """The real `ScenarioSelection` for the attached Panel 1."""
     return SessionScenarioSelector(resources=hil_resources).select()
 
 
@@ -240,8 +275,8 @@ def test_mac_identification_reads_the_real_chip(hil_monitor) -> None:
 # --- 3: PanelRegistry resolution -----------------------------------------
 
 
-def test_panel_registry_resolves_the_identified_board(hil_monitor) -> None:
-    identification = PanelIdentificationService(monitor=hil_monitor).identify()
+def test_panel_registry_resolves_the_identified_board(panel_one_monitor) -> None:
+    identification = PanelIdentificationService(monitor=panel_one_monitor).identify()
     assert identification.status is PanelIdentificationStatus.IDENTIFIED, (
         f"connected board MAC {identification.mac!r} is not registered to any "
         "panel (see app/hardware/panels.py::BUILT_IN_PANELS). This assertion "
@@ -563,7 +598,7 @@ def test_real_session_activity_feeds_the_existing_metric_functions(
 
 
 def test_the_real_websocket_endpoint_uses_the_real_panel_and_hardware(
-    primed_shared_monitor, client: TestClient
+    panel_one_monitor, primed_shared_monitor, client: TestClient
 ) -> None:
     """PRECONDITION -> hardware detection -> MAC -> PanelRegistry -> package
     -> SmartHomeMQTTScenario -> HackSession -> command dispatch -> event

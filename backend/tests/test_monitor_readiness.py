@@ -540,7 +540,7 @@ def test_a_primed_unreadable_mac_stays_unidentified(
 def test_the_default_scenario_is_unchanged() -> None:
     scenario = create_default_scenario()
     assert isinstance(scenario, EnvironmentalMonitoringScenario)
-    assert scenario.scenario_id == DEFAULT_SCENARIO_ID == "environmental-monitoring"
+    assert scenario.scenario_id == DEFAULT_SCENARIO_ID == "legacy-environmental-monitoring"
 
 
 def test_the_no_hardware_flow_still_gets_environmental_monitoring(

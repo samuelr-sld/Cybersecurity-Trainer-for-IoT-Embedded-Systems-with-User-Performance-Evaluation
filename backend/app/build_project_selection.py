@@ -271,8 +271,9 @@ class BuildProjectSelector:
             # exactly as it reads the project's identity and board. There is
             # no default, no inference from a section's kind, and above all
             # no table here mapping a panel to a set of editable functions.
-            # A package that declares no remediation, or one that declares it
-            # in prose only, yields the same read-only project B2 produced.
+            # A package that declares no remediation and no `build` block, or
+            # one that declares its remediation in prose only, yields the
+            # same read-only project B2 produced.
             **self._policy_for(package),
         )
 
@@ -280,7 +281,8 @@ class BuildProjectSelector:
     def _policy_for(package: PanelPackage) -> dict[str, object]:
         """The panel's declared section policy, as `load_sketch_project` args.
 
-        Every value comes from `package.remediation`; an absent declaration
+        Every value comes from `package.remediation` or, for a panel with no
+        remediation activity, `package.build`; a package declaring neither
         gives the empty, conservative arguments B2 always passed. Whether the
         named sections actually exist in this firmware is checked downstream
         by `app/build/document_project.py`, which holds the document and can
@@ -289,16 +291,30 @@ class BuildProjectSelector:
         session.
         """
         remediation = package.remediation
-        if remediation is None:
+        if remediation is not None and remediation.declares_section_policy:
             return {
-                "editable_section_ids": (),
-                "explore_section_ids": (),
+                "editable_section_ids": remediation.editable_section_ids,
+                "explore_section_ids": remediation.explore_section_ids,
+                "security_region_id": remediation.security_section_id,
+            }
+        # No remediation policy, but a panel may still declare which of its
+        # own sections Build Mode opens (`BuildDeclaration` — a foundation
+        # package with real firmware and no vulnerability to fix, or one whose
+        # remediation is described in prose only). It names no security
+        # region, because a panel with no remediation policy has none, and
+        # `PanelPackage` guarantees this block and a remediation policy never
+        # both exist, so there is still exactly one list to read.
+        build = package.build
+        if build is not None:
+            return {
+                "editable_section_ids": build.editable_section_ids,
+                "explore_section_ids": build.explore_section_ids,
                 "security_region_id": None,
             }
         return {
-            "editable_section_ids": remediation.editable_section_ids,
-            "explore_section_ids": remediation.explore_section_ids,
-            "security_region_id": remediation.security_section_id,
+            "editable_section_ids": (),
+            "explore_section_ids": (),
+            "security_region_id": None,
         }
 
     def _fallback(

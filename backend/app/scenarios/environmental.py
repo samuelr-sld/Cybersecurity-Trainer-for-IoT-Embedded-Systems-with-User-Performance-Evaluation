@@ -48,7 +48,11 @@ def _short(value: str) -> str:
 class EnvironmentalMonitoringScenario(Scenario):
     """In-memory simulation of the Environmental Monitoring target."""
 
-    scenario_id = "environmental-monitoring"
+    #: Renamed from `environmental-monitoring` so that id is free for the real
+    #: Panel 2 (Environmental Monitoring System) and can never resolve to this
+    #: legacy MQTT/BME280 simulation. The implementation is unchanged; this
+    #: remains the engine's default scenario (`DEFAULT_SCENARIO_ID`).
+    scenario_id = "legacy-environmental-monitoring"
 
     def __init__(self) -> None:
         self._state = ScenarioState()

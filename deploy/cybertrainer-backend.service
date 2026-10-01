@@ -1,0 +1,62 @@
+# CyberTrainer backend (FastAPI + uvicorn) for the Raspberry Pi.
+#
+# NOT installed or enabled by anything in this repository. To deploy:
+#   sudo install -m 0644 deploy/cybertrainer-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cybertrainer-backend
+# See backend/README.md ("Production deployment").
+#
+# SECRETS DO NOT BELONG IN THIS FILE. Lab credentials (TRAINER_LAB_*) go in
+# the OPTIONAL environment file below. The leading "-" on EnvironmentFile
+# means a missing file is ignored, so the service starts without it - and the
+# backend still loads backend/lab.env.local itself if that exists (a variable
+# set here wins over it). systemd reads the file as root, so root:root 0600 is
+# enough; the service user never needs to read it.
+
+[Unit]
+Description=CyberTrainer backend (FastAPI + uvicorn)
+Documentation=file:///home/arvis/Embedded-IoT-Cybersecurity-Trainer/backend/README.md
+# Boot order: CyberTrainer AP up -> Mosquitto -> this backend.
+# network-online.target is reached only once NetworkManager has activated the
+# CyberTrainer access point (NetworkManager-wait-online), and mosquitto.service
+# is ordered after it because the broker binds 192.168.50.1, an address that
+# exists only while the AP is up. Ordering only: the backend does not need the
+# broker to start (without it, live MQTT is simply unavailable), so the broker
+# is Wants=, not Requires=.
+After=network-online.target mosquitto.service
+Wants=network-online.target mosquitto.service
+
+[Service]
+Type=simple
+User=arvis
+Group=arvis
+# /dev/ttyUSB0 is root:dialout 0660. Explicit, though arvis is already in
+# dialout, so the access does not silently depend on account membership.
+SupplementaryGroups=dialout
+WorkingDirectory=/home/arvis/Embedded-IoT-Cybersecurity-Trainer/backend
+
+# HOME must be arvis's: the ESP32 core, its bundled esptool and arduino-cli's
+# data live under ~/.arduino15, and the backend finds them from HOME
+# (app/hardware/identity.py). Set explicitly so it is visible here, not implied.
+Environment=HOME=/home/arvis
+# The prebuilt frontend served at "/" (single origin, no CORS). <repo>/dist is a
+# git-ignored, replaceable artifact: publishing a new UI build means replacing
+# that directory's contents - nothing in this unit changes, and no restart is
+# needed as long as dist/index.html existed when the service started (if it did
+# not, the frontend was never mounted: restart once after providing it).
+# To serve a build from elsewhere, set TRAINER_FRONTEND_DIST in the optional
+# environment file below; a value there overrides this one.
+Environment=TRAINER_FRONTEND_DIST=/home/arvis/Embedded-IoT-Cybersecurity-Trainer/dist
+EnvironmentFile=-/etc/cybertrainer/backend.env
+
+ExecStart=/home/arvis/Embedded-IoT-Cybersecurity-Trainer/backend/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Restart whenever the process exits for any reason.
+Restart=always
+RestartSec=3
+# Stop kills the whole control group, so an in-flight arduino-cli/esptool
+# cannot outlive the backend and keep /dev/ttyUSB0 open.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

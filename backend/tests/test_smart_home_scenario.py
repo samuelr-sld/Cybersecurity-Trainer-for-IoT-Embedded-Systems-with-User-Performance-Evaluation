@@ -97,14 +97,14 @@ def test_package_scenario_id_resolves_to_the_smart_home_scenario() -> None:
 
 
 def test_environmental_still_resolves_to_the_environmental_scenario() -> None:
-    scenario = default_scenario_registry.create("environmental-monitoring")
+    scenario = default_scenario_registry.create("legacy-environmental-monitoring")
     assert isinstance(scenario, EnvironmentalMonitoringScenario)
     assert not isinstance(scenario, SmartHomeMQTTScenario)
 
 
 def test_the_two_ids_resolve_to_different_classes() -> None:
     smart = default_scenario_registry.create(PANEL_ONE_ID)
-    env = default_scenario_registry.create("environmental-monitoring")
+    env = default_scenario_registry.create("legacy-environmental-monitoring")
     assert type(smart) is not type(env)
 
 

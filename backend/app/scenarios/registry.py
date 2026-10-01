@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Callable
 
 from app.scenarios.base import Scenario
 from app.scenarios.environmental import EnvironmentalMonitoringScenario
+from app.scenarios.environmental_sensing import EnvironmentalSensingScenario
 from app.scenarios.smart_home import SmartHomeMQTTScenario
 
 if TYPE_CHECKING:  # pragma: no cover - type-only, no runtime coupling
@@ -152,12 +153,20 @@ def build_default_scenario_registry() -> ScenarioRegistry:
     so a test gets an independent table and cannot leak a registration into
     another test.
 
-    Two ids resolve, each to its own dedicated implementation:
+    Three ids resolve, each to its own dedicated implementation:
 
-      * ``environmental-monitoring`` — the default id `create_default_scenario`
-        returns, resolving to `EnvironmentalMonitoringScenario` (a simulated
-        BME280 telemetry target whose vulnerability is an unauthenticated
-        publish topic).
+      * ``legacy-environmental-monitoring`` — the default id
+        `create_default_scenario` returns (renamed from
+        ``environmental-monitoring``, which now belongs to Panel 2's panel id
+        and is no scenario id at all), resolving to
+        `EnvironmentalMonitoringScenario` (a simulated BME280 telemetry
+        target whose vulnerability is an unauthenticated publish topic).
+      * ``environmental-sensing`` — the id Panel 2's foundation package
+        declares, resolving to `EnvironmentalSensingScenario`: a neutral
+        target with no vulnerability, objectives or target facts, whose only
+        job is to make Panel 2 resolve to ITSELF. Before it was registered
+        this id resolved to nothing, so Panel 2 fell back to the default
+        above — the MQTT/BME280 target of a different panel.
       * ``smart-home-mqtt-control`` — the id Panel 1's package declares,
         resolving to `SmartHomeMQTTScenario` (Phase 2D.5). Panel 1 is the
         Smart Home MQTT Control System: an ESP32 motor controller whose
@@ -172,5 +181,6 @@ def build_default_scenario_registry() -> ScenarioRegistry:
     """
     registry = ScenarioRegistry()
     registry.register(DEFAULT_SCENARIO_ID, EnvironmentalMonitoringScenario)
+    registry.register(EnvironmentalSensingScenario.scenario_id, EnvironmentalSensingScenario)
     registry.register("smart-home-mqtt-control", SmartHomeMQTTScenario)
     return registry

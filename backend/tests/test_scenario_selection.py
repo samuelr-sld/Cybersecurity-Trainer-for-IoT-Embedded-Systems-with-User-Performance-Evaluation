@@ -51,7 +51,7 @@ PANEL_ONE_PACKAGE_ID = "smart-home-mqtt-control"
 def test_create_default_scenario_still_returns_environmental() -> None:
     scenario = create_default_scenario()
     assert isinstance(scenario, EnvironmentalMonitoringScenario)
-    assert scenario.scenario_id == DEFAULT_SCENARIO_ID == "environmental-monitoring"
+    assert scenario.scenario_id == DEFAULT_SCENARIO_ID == "legacy-environmental-monitoring"
 
 
 def test_create_default_scenario_returns_a_fresh_instance_each_call() -> None:
@@ -66,6 +66,19 @@ def test_default_id_resolves_through_the_shared_registry() -> None:
     assert DEFAULT_SCENARIO_ID in default_scenario_registry
     resolved = default_scenario_registry.create(DEFAULT_SCENARIO_ID)
     assert isinstance(resolved, EnvironmentalMonitoringScenario)
+
+
+def test_environmental_monitoring_id_resolves_to_no_scenario() -> None:
+    """`environmental-monitoring` is Panel 2's PANEL id, not a scenario id.
+
+    The legacy MQTT/BME280 default used to answer to it; it was renamed
+    (`legacy-environmental-monitoring`) so the id is free for Panel 2 and can
+    never silently resolve to that simulation.
+    """
+    assert "environmental-monitoring" not in default_scenario_registry
+    assert "environmental-monitoring" not in default_scenario_registry.scenario_ids()
+    with pytest.raises(UnknownScenarioError):
+        default_scenario_registry.create("environmental-monitoring")
 
 
 # --- B: Panel 1 resolves ----------------------------------------------------

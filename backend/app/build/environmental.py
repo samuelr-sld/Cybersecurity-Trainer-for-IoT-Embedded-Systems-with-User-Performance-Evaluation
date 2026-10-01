@@ -219,8 +219,8 @@ def create_environmental_monitoring_project() -> BuildProject:
         segments=(FileSegment(RegionKind.LOCKED, "locked_wifi_secrets", _WIFI_SECRETS_H),),
     )
     return BuildProject(
-        project_id="environmental-monitoring-default",
-        scenario_id="environmental-monitoring",
+        project_id="legacy-environmental-monitoring-default",
+        scenario_id="legacy-environmental-monitoring",
         module_id="mqtt_telemetry_trust",
         firmware_name="Environmental Monitor Firmware",
         board=BoardInfo(name="ESP32 Dev Module", mcu="ESP32", fqbn="esp32:esp32:esp32"),

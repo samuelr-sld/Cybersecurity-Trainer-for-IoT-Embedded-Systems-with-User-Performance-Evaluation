@@ -35,9 +35,9 @@ shows the MAC itself. Inventing a plausible panel for an unknown board would
 make the header lie about which station a student is sitting at.
 
 THE FIVE-PANEL SCOPE. All five panels have a definition so a module can be
-bound to any of them without a code change. Only one physical board is
-bound today — the ESP32 on this project's development machine, whose MAC was
-read from its OTP ROM with `esptool read_mac`.
+bound to any of them without a code change. Two physical boards are bound
+today — Panel 1's and Panel 2's ESP32 modules, each with the MAC read from its
+OTP ROM with `esptool read_mac`.
 
 IDENTITY HERE, EXPERIMENT ELSEWHERE (Phase 2D.1). A definition answers only
 "which panel is this board?". What that panel's experiment IS — its
@@ -55,7 +55,9 @@ package, so exactly one place answers "which firmware belongs to this
 panel?" instead of two that could disagree.
 
 `package_id=None` is the honest "no courseware integrated yet" state, and it
-is what four of the five panels carry: only Panel 1 has a package on `main`.
+is what three of the five panels carry: only Panels 1 and 2 have a package on
+`main` (Panel 2's is a foundation package — firmware and identity, no
+activity).
 """
 
 from __future__ import annotations
@@ -262,8 +264,8 @@ def parse_panel_bindings(raw: str, known_panel_ids: Iterable[str]) -> dict[str, 
 
 
 #: The finalized five-panel scope. Display names are the ones the hardware
-#: header already shows. See the module docstring for why only one module is
-#: bound and why no panel has firmware yet.
+#: header already shows. See the module docstring for which modules are bound
+#: and which panels have a package yet.
 BUILT_IN_PANELS: tuple[PanelDefinition, ...] = (
     PanelDefinition(
         panel_id="smart-home-mqtt-control",
@@ -278,6 +280,13 @@ BUILT_IN_PANELS: tuple[PanelDefinition, ...] = (
     PanelDefinition(
         panel_id="environmental-monitoring",
         display_name="ENVIRONMENTAL MONITORING SYSTEM",
+        # The ESP32-D0WD-V3 module assigned to this panel (CP210x bridge, COM3
+        # on the development machine), read from its OTP ROM with `esptool
+        # read_mac` through the same probe `DeviceMonitor` uses.
+        mac_addresses=("20:50:0d:4d:4e:a8",),
+        # The foundation package — identity and firmware only, no training
+        # activity yet — see `backend/panels/environmental-monitoring/panel.json`.
+        package_id="environmental-monitoring",
     ),
     PanelDefinition(
         panel_id="emergency-exit-lighting",

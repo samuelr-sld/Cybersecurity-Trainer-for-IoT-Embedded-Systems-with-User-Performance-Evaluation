@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "panel_id": "environmental-monitoring",
+  "scenario": {
+    "scenario_id": "environmental-sensing",
+    "title": "Environmental Monitoring System",
+    "summary": "An ESP32 environmental monitor reads a DHT11 temperature and humidity sensor, shows the readings on an SSD1306 OLED, and drives an LED alert and an L293D fan when the temperature reaches 31 C. It has no Wi-Fi or MQTT and reports over USB serial. This package establishes the panel's firmware and hardware identity only; no training activity or vulnerability is defined yet."
+  },
+  "firmware": {
+    "firmware_id": "environmental-monitoring-firmware",
+    "source": {
+      "kind": "sketch_directory",
+      "reference": "firmware/environmental_monitoring"
+    },
+    "board": {
+      "fqbn": "esp32:esp32:esp32"
+    },
+    "compilation": {
+      "build_properties": []
+    },
+    "serial": {
+      "baud_rate": 115200
+    }
+  },
+  "build": {
+    "editable_section_ids": [
+      "setup",
+      "loop",
+      "helper_updateDisplay",
+      "helper_showError"
+    ]
+  }
+}

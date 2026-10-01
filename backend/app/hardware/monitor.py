@@ -146,7 +146,10 @@ class DeviceMonitor:
         #: once per poll — the difference between resetting the ESP32 every
         #: few seconds and resetting it when it appears. Cleared whenever
         #: the device goes away, so an unplug cannot leave a stale identity
-        #: attached to a port a different board might later occupy.
+        #: attached to a port a different board might later occupy. A poll
+        #: only sees an unplug that lasts across one, so `forget_identity`
+        #: lets a faster watcher (`app/hardware/presence.py`) clear it too,
+        #: and `refresh(reverify_identity=True)` re-reads it on demand.
         self._mac_by_port: dict[str, str] = {}
         #: Non-zero while something else owns the serial port (a flash).
         self._probe_holds = 0
@@ -200,6 +203,7 @@ class DeviceMonitor:
         *,
         fqbn: str | None = None,
         max_age_seconds: float | None = None,
+        reverify_identity: bool = False,
     ) -> DeviceState:
         """Re-detect the attached ESP32 and publish the result.
 
@@ -219,9 +223,30 @@ class DeviceMonitor:
         the same board platform, so a Build Mode check against one project's
         FQBN can never be silently served by a detection run for a different
         platform.
+
+        `reverify_identity` re-reads the board's MAC instead of trusting the
+        one cached for its port, and implies a fresh detection (a cached
+        verdict cannot be re-verified). THE CACHE IS KEYED BY PORT NAME, and a
+        port name is not a board: two boards behind identical USB bridges
+        (every generic CP210x devkit reports `10C4:EA60`, serial `0001`) get the
+        SAME port, so a board swapped for another between two polls is
+        indistinguishable from the original by anything `board list` says.
+        Callers about to ACT on which panel this is — mode preparation picks the
+        firmware it flashes from it — must not rely on a cache that cannot see
+        that, so they ask for a re-read. It costs one MAC probe (a bootloader
+        reset), which is why it is opt-in and never part of a poll.
+
+        If a probe is held off (a flash owns the port) the cached identity is
+        kept rather than discarded: losing it would not make it more accurate,
+        only absent, and nothing may probe now. A probe that fails leaves the
+        board unidentified; it never falls back to the stale MAC.
         """
         target = fqbn or self._target_fqbn
-        max_age = self._cache_seconds if max_age_seconds is None else max_age_seconds
+        max_age = (
+            0.0
+            if reverify_identity
+            else (self._cache_seconds if max_age_seconds is None else max_age_seconds)
+        )
 
         async with self._lock:
             cached = self._reusable(target, max_age)
@@ -240,6 +265,16 @@ class DeviceMonitor:
                 request_type(fqbn=target, timeout_seconds=self._timeout_seconds)
             )
             state = self.publish(outcome, fqbn=target)
+            if (
+                reverify_identity
+                and self._probe_holds == 0
+                and state.connected
+                and state.port
+            ):
+                # Drop the cached MAC (and what `publish` just attached from
+                # it) so `_resolve_identity` below has to read the board.
+                self.forget_identity(state.port)
+                state = self._state
             # Identity is resolved only here, never in `publish`: reading a
             # MAC drives the board into its bootloader and holds the port,
             # which must never happen as a side effect of someone else's
@@ -329,6 +364,30 @@ class DeviceMonitor:
             yield
         finally:
             self._probe_holds -= 1
+
+    def forget_identity(self, port: str | None = None) -> None:
+        """Stop trusting the identity attached to `port` (all ports if None).
+
+        Drops the cached MAC AND clears `mac`/`panel` on the shared state when
+        it is for that port, so a reader of `snapshot()` sees "a board is there,
+        nobody knows which" at once rather than the previous board's name. The
+        board itself is unchanged: still present, still on its port. The next
+        `refresh()` finds no cached MAC for it and reads one, exactly as for a
+        board that has just been plugged in.
+
+        Synchronous and I/O-free like `publish`, so a watcher can call it from
+        anywhere; it NEVER probes. Called when something learns the device
+        behind a port may have changed — a port that vanished and came back
+        (`app/hardware/presence.py`), or a caller that is about to re-read it
+        (`refresh(reverify_identity=True)`).
+        """
+        if port is None:
+            self._mac_by_port.clear()
+        else:
+            self._mac_by_port.pop(port, None)
+        state = self._state
+        if state.mac is not None and (port is None or state.port == port):
+            self._state = replace(state, mac=None, panel=None)
 
     def reset(self) -> None:
         """Forget everything detected so far. Used by tests, never in serving.

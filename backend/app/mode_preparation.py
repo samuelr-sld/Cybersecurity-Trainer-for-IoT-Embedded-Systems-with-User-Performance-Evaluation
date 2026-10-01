@@ -341,10 +341,15 @@ class _PreparationRun:
 
     async def _detect(self) -> dict[str, Any]:
         monitor = self._service._monitor
-        # A FRESH detection, never the cache: the whole point is to confirm
-        # what is plugged in right now. `refresh` resolves the MAC through
-        # the monitor's own per-port cache and probe rules.
-        state = await monitor.refresh(max_age_seconds=0)
+        # A FRESH detection AND a fresh identity read, never the caches: the
+        # whole point is to confirm what is plugged in right now, and the
+        # panel decided here selects the firmware that gets flashed. The
+        # monitor caches a MAC per PORT, and a board swapped for another
+        # behind the same kind of USB bridge reuses the port, so a cached MAC
+        # could name the previous board and this stage would restore the
+        # WRONG panel's firmware onto the new one. One extra MAC read (a
+        # reset) here, right before the flash that resets the board anyway.
+        state = await monitor.refresh(max_age_seconds=0, reverify_identity=True)
         if state.status is not DeviceStatus.CONNECTED or not state.port:
             raise _StageFailed(
                 _DEVICE_FAILURES.get(state.status, "no ESP32 is connected"), state.detail

@@ -78,6 +78,7 @@ from app.hardware.panels import PanelDefinition
 from app.panels.models import (
     AuthorizationCriterion,
     AuthorizationProbe,
+    BuildDeclaration,
     CommandAuthorization,
     EvaluationDeclaration,
     EvaluationMetric,
@@ -524,6 +525,32 @@ def _remediation(block: Any) -> RemediationDeclaration | None:
         raise PanelPackageInvalidError(f"invalid remediation declaration: {error}") from error
 
 
+def _build(block: Any) -> BuildDeclaration | None:
+    """Parse the optional `build` block — see `BuildDeclaration`.
+
+    Absent for every panel that declares its Build Mode section policy in
+    `remediation` (Panel 1) or declares none. Present for a panel that ships
+    real firmware to open as Blockly but defines no remediation to carry the
+    policy (Panel 2's foundation package). Both lists are optional inside the
+    block, but an empty block is refused: it would classify nothing.
+    """
+    if block is None:
+        return None
+    data = _as_mapping(block, "build")
+    _reject_unknown(data, ("editable_section_ids", "explore_section_ids"), "build")
+    try:
+        return BuildDeclaration(
+            editable_section_ids=_as_str_tuple(
+                data.get("editable_section_ids", []), "build.editable_section_ids"
+            ),
+            explore_section_ids=_as_str_tuple(
+                data.get("explore_section_ids", []), "build.explore_section_ids"
+            ),
+        )
+    except ValueError as error:
+        raise PanelPackageInvalidError(f"invalid build declaration: {error}") from error
+
+
 class PanelPackageLoader:
     """Loads panel packages from one trusted, backend-owned root.
 
@@ -610,6 +637,7 @@ class PanelPackageLoader:
                 "evaluation",
                 "firmware",
                 "remediation",
+                "build",
                 "parameters",
             ),
             f"package {package_id!r}",
@@ -628,6 +656,7 @@ class PanelPackageLoader:
                 evaluation=_evaluation(data.get("evaluation", {})),
                 firmware=firmware,
                 remediation=_remediation(data.get("remediation")),
+                build=_build(data.get("build")),
                 parameters=_as_mapping(data.get("parameters", {}), "parameters"),
                 directory=directory,
             )

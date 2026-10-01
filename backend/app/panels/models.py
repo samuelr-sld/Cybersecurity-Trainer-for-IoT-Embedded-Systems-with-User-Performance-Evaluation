@@ -814,6 +814,77 @@ class RemediationDeclaration:
         """Whether this declaration states a criterion a validator can run."""
         return self.criterion is not None
 
+    @property
+    def declares_section_policy(self) -> bool:
+        """Whether this remediation names any Build Mode section policy.
+
+        A remediation described in prose only names none, and then the panel's
+        policy (if it has one) lives in `PanelPackage.build` instead. Asked in
+        one place so `PanelPackage` (which forbids two policies) and
+        `BuildProjectSelector` (which reads the one that exists) cannot disagree
+        about what "this remediation carries a policy" means.
+        """
+        return bool(
+            self.editable_section_ids
+            or self.explore_section_ids
+            or self.security_section_id is not None
+        )
+
+
+@dataclass(frozen=True)
+class BuildDeclaration:
+    """WHICH of a panel's own firmware sections Build Mode opens for editing.
+
+    A panel's decision, stated as data, and independent of any remediation
+    activity. Phase B8 put the section policy inside `RemediationDeclaration`
+    because the one panel that had a policy also had a vulnerability to fix,
+    and the policy was written for that activity. A panel can still need the
+    policy first: a FOUNDATION panel (Panel 2, the Environmental Monitoring
+    System) ships real firmware that a student can open as Blockly, edit,
+    compile and flash, while defining no vulnerability and no remediation. The
+    only way to say "these sections are the editable ones" through
+    `RemediationDeclaration` would be to write a vulnerability, a goal and a
+    validation requirement the panel does not have — invented courseware, and
+    exactly what a foundation package must not carry. So the policy gets its
+    own optional block, and the remediation keeps meaning remediation.
+
+    SAME VOCABULARY, SAME RULES. The ids are B1's own discovered section ids
+    (`setup`, `loop`, `helper_updateDisplay`, `global`), checked against this
+    panel's firmware downstream where the document is available
+    (`app/build/document_project.py` rejects an id the firmware lacks). Neither
+    list names a security region, because a panel with no remediation has none:
+    `security_section_id` stays a remediation field. Anything unnamed is LOCKED,
+    the same conservative default every project has (`app/build/policy.py`).
+
+    ONE SOURCE OF TRUTH PER PANEL. A package declares its section policy in
+    this block or in `remediation`, never both (`PanelPackage` enforces it), so
+    there are never two lists that could disagree about whether a section is
+    editable. A panel that later gains a remediation moves its ids there.
+    """
+
+    editable_section_ids: tuple[str, ...] = ()
+    explore_section_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("editable_section_ids", "explore_section_ids"):
+            ids = getattr(self, name)
+            for section_id in ids:
+                if not isinstance(section_id, str) or not re.fullmatch(
+                    _SECTION_ID_PATTERN, section_id
+                ):
+                    raise ValueError(f"build {name} contains an invalid section id: {section_id!r}")
+            if len(set(ids)) != len(ids):
+                raise ValueError(f"build {name} repeats a section id")
+        overlap = sorted(set(self.editable_section_ids) & set(self.explore_section_ids))
+        if overlap:
+            raise ValueError(
+                "build declares section(s) as both editable and explore: " + ", ".join(overlap)
+            )
+        if not self.editable_section_ids and not self.explore_section_ids:
+            # A block that classifies nothing says nothing; leaving the block
+            # out is the honest way to declare no policy.
+            raise ValueError("build declares no editable or explore sections")
+
 
 #: What a `parameters` value may be. Scalars only: a static parameter is one
 #: configured fact, and forbidding containers keeps the field from growing
@@ -838,6 +909,11 @@ class PanelPackage:
     `remediation` is the Phase 2E.3 Build Mode analogue: None for a panel
     whose remediation activity has not been declared yet, the same honest
     "not yet provisioned" state `firmware` uses.
+
+    `build` is the section policy of a panel that has firmware to open in
+    Build Mode but no remediation activity to declare it through — see
+    `BuildDeclaration`. None for every panel that declares its policy in
+    `remediation` (Panel 1) or declares none.
     """
 
     schema_version: int
@@ -848,6 +924,7 @@ class PanelPackage:
     evaluation: EvaluationDeclaration = field(default_factory=EvaluationDeclaration)
     firmware: FirmwareConfiguration | None = None
     remediation: RemediationDeclaration | None = None
+    build: BuildDeclaration | None = None
     parameters: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
     #: The directory this package was loaded from. Set by the loader; it is
     #: how `firmware_sketch_path` resolves a relative sketch reference. A
@@ -881,6 +958,17 @@ class PanelPackage:
             self.remediation, RemediationDeclaration
         ):
             raise ValueError("package remediation must be a RemediationDeclaration")
+        if self.build is not None:
+            if not isinstance(self.build, BuildDeclaration):
+                raise ValueError("package build must be a BuildDeclaration")
+            if self.remediation is not None and self.remediation.declares_section_policy:
+                # One list per panel: two declarations of which sections are
+                # editable could disagree, and the loser would silently not
+                # apply. See `BuildDeclaration`.
+                raise ValueError(
+                    "package declares its Build Mode section policy in both `build` and "
+                    "`remediation`; declare it in exactly one"
+                )
         for key, value in self.parameters.items():
             if not isinstance(key, str) or not key.strip():
                 raise ValueError(f"parameter name must be a non-empty string: {key!r}")

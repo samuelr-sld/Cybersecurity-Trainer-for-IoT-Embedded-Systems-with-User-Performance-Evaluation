@@ -43,7 +43,7 @@ def _default_selection() -> ScenarioSelection:
     return ScenarioSelection(
         scenario=EnvironmentalMonitoringScenario(),
         source=ScenarioSource.DEFAULT,
-        scenario_id="environmental-monitoring",
+        scenario_id="legacy-environmental-monitoring",
         panel_status=PanelResourceStatus.NOT_CONNECTED,
         panel_id=None,
         package=None,
@@ -156,7 +156,7 @@ def test_a_non_live_capable_scenario_is_left_simulated() -> None:
     selection = ScenarioSelection(
         scenario=EnvironmentalMonitoringScenario(),
         source=ScenarioSource.PANEL_PACKAGE,
-        scenario_id="environmental-monitoring",
+        scenario_id="legacy-environmental-monitoring",
         panel_status=PanelResourceStatus.READY,
         panel_id=PANEL_ONE_ID,
         package=_package(),

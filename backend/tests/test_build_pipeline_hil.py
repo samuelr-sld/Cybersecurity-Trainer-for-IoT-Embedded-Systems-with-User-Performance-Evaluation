@@ -25,6 +25,15 @@ whatever program that board was running. Set `TRAINER_HIL_ALLOW_FLASH=1` to
 permit it; without that, the flash test skips with that reason even with a
 board attached and everything else ready.
 
+AND, EVEN WHEN FLASHING IS PERMITTED, ONLY PANEL 1 IS EVER FLASHED. Every flash
+here writes PANEL 1's firmware, so the board must actually be Panel 1: the
+chip's MAC is read through the production `DeviceMonitor` and must be Panel
+1's (`tests/hil_gating.py`). A different panel or an unregistered module
+skips — flashing Panel 1's firmware onto it would destroy whatever it was
+running. The read happens only after the opt-in check, so an ordinary HIL run
+never probes (and thereby resets) the board. The compile tests need no such
+gate: they compile to a temp directory and never touch the attached board.
+
 PHASE B8 ADDED A FIFTH GATE, AND A TEST THAT CAN ACTUALLY FAIL. Panel 1 now
 declares a machine-checkable remediation criterion, so the real validator can
 run — but only against the real training network. It needs the MQTT client
@@ -48,6 +57,7 @@ The rest of the backend suite never depends on this file passing.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import shutil
 from pathlib import Path
@@ -72,8 +82,10 @@ from app.build.validation import (
 from app.build_project_selection import BuildProjectSelection, BuildProjectSource
 from app.build_sessions import BuildSession
 from app.build_validation_selection import select_build_validation
+from app.hardware import DeviceMonitor
 from app.panels import default_panel_package_loader
 from app.panels.service import PanelResourceStatus
+from tests.hil_gating import panel_one_skip_reason
 
 pytestmark = pytest.mark.hardware
 
@@ -241,11 +253,7 @@ def test_generated_source_compiles_with_the_real_toolchain(
 
 
 def test_the_real_pipeline_reaches_a_real_flash(panel_one_workspace_source) -> None:
-    if os.getenv("TRAINER_HIL_ALLOW_FLASH") != "1":
-        pytest.skip(
-            "flashing overwrites whatever firmware is on the attached board; "
-            "set TRAINER_HIL_ALLOW_FLASH=1 to permit it"
-        )
+    skip_unless_flashing_is_permitted()
 
     async def scenario() -> None:
         session = BuildSession(session_id="hil-flash", workspace=fresh_workspace())
@@ -285,11 +293,34 @@ def panel_one_plan():
     return package, plan
 
 
+@functools.cache
+def _not_panel_one_reason() -> str | None:
+    """Why the attached board must not receive Panel 1's firmware, or None.
+
+    One real detection with the real MAC probe (the same `DeviceMonitor()`
+    `tests/test_hardware_in_the_loop.py` uses), cached so the flashing tests
+    share a single read rather than resetting the board once each. Only ever
+    reached after the `TRAINER_HIL_ALLOW_FLASH` opt-in, where the board is
+    about to be reset by a flash anyway.
+    """
+    state = asyncio.run(DeviceMonitor().refresh(fqbn=FQBN))
+    return panel_one_skip_reason(state)
+
+
 def skip_unless_flashing_is_permitted() -> None:
+    """Skip unless flashing is opted into AND the attached board is Panel 1.
+
+    The opt-in is checked first so that nothing touches the board — not even
+    the identity probe — in a run that was never going to flash it.
+    """
     if os.getenv("TRAINER_HIL_ALLOW_FLASH") != "1":
         pytest.skip(
-            "this test flashes the attached board; set TRAINER_HIL_ALLOW_FLASH=1 to permit it"
+            "flashing overwrites whatever firmware is on the attached board; "
+            "set TRAINER_HIL_ALLOW_FLASH=1 to permit it"
         )
+    reason = _not_panel_one_reason()
+    if reason is not None:
+        pytest.skip(f"refusing to flash Panel 1's firmware: {reason}")
 
 
 async def compiled_and_flashed(session_id: str, plan) -> BuildSession:

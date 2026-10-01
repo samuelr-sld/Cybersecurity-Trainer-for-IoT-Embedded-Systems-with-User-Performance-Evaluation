@@ -300,11 +300,13 @@ def test_built_in_package_references_are_identifiers_not_paths() -> None:
             assert re.fullmatch(IDENTIFIER_PATTERN, panel.package_id), panel.panel_id
 
 
-def test_only_panel_one_has_a_package_on_main() -> None:
-    """Exactly one built-in panel references a package today (Panel 1). The
-    other four honestly carry `package_id=None` — courseware not yet written."""
+def test_only_panels_one_and_two_have_a_package_on_main() -> None:
+    """Exactly two built-in panels reference a package today: Panel 1 (the full
+    Smart Home activity) and Panel 2 (a foundation package — firmware and
+    identity only). The other three honestly carry `package_id=None` —
+    courseware not yet written."""
     with_package = [p.panel_id for p in BUILT_IN_PANELS if p.package_id is not None]
-    assert with_package == ["smart-home-mqtt-control"]
+    assert with_package == ["smart-home-mqtt-control", "environmental-monitoring"]
 
 
 # --- E: firmware configuration ---------------------------------------------

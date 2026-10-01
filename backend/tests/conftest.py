@@ -88,6 +88,21 @@ def no_startup_device_detection(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def no_presence_watcher(monkeypatch: pytest.MonkeyPatch):
+    """Stop `TestClient(app)` from starting the serial-port presence watcher.
+
+    The lifespan (`app/main.py`) runs `PortPresenceWatcher` against the
+    process-wide monitor, polling the machine's REAL serial ports. In a test
+    run that would race the singleton the other fixtures reset and could
+    withdraw a fake board's identity mid-test because a real port came or went
+    on the developer's machine. Tests that are ABOUT the watcher build their
+    own with an injected enumerator and a private monitor
+    (`tests/test_identity_swap.py`).
+    """
+    monkeypatch.setattr(config, "HARDWARE_PRESENCE_WATCH", False)
+
+
+@pytest.fixture(autouse=True)
 def no_stale_uploader_reaping(monkeypatch: pytest.MonkeyPatch):
     """Stop the flasher's pre-flash port cleanup from killing real processes.
 

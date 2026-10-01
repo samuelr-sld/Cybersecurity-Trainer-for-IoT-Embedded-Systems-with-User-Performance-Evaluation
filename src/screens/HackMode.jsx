@@ -6,6 +6,7 @@ import HardwareHeaderStatus from '../components/HardwareHeaderStatus'
 import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE } from '../hardware/deviceState'
 import { GUIDED_STEPS } from '../data'
 import { PROMPT_DISPLAY, applyPromptFrame, initialPromptState } from '../hackTerminal/terminalPromptModel'
+import { foundationSummary, hasActivityTarget } from '../hackTerminal/targetDeviceModel'
 
 // Phase 2C: the backend's real-tool toolbox (backend/app/commands/registry.py)
 // in the order the learning progression uses them — understand the device
@@ -432,7 +433,12 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participa
           </section>
           <section className="panel dashed">
             <h3>TARGET DEVICE</h3>
-            {scenarioState ? (
+            {scenarioState && !hasActivityTarget(scenarioState) ? (
+              // A foundation panel (its package defines no activity yet): the
+              // snapshot carries no target/discovery skeleton, so say what it
+              // says and read nothing else. See targetDeviceModel.js.
+              <p>{foundationSummary(scenarioState)}</p>
+            ) : scenarioState ? (
               <>
                 <p>Status: {scenarioState.target.device_status.toUpperCase()}</p>
                 {scenarioState.motor ? (

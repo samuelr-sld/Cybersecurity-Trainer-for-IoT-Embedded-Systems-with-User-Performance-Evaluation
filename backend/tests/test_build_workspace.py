@@ -49,7 +49,7 @@ def workspace() -> BuildWorkspace:
 
 def test_environmental_monitoring_project_loads_correctly(workspace: BuildWorkspace) -> None:
     project = workspace.project
-    assert project.scenario_id == "environmental-monitoring"
+    assert project.scenario_id == "legacy-environmental-monitoring"
     assert project.security_region_id == SECURITY_REGION_ID
     assert {f.path for f in project.files} == {
         "main.ino",
