@@ -886,6 +886,93 @@ class BuildDeclaration:
             raise ValueError("build declares no editable or explore sections")
 
 
+@dataclass(frozen=True)
+class HackGuideSection:
+    """One headed block of the Hack Mode scenario guide.
+
+    Plain prose a student reads, nothing more: `paragraphs` are displayed
+    verbatim as text and are never evaluated, templated or turned into a
+    command. See `HackDeclaration`.
+    """
+
+    heading: str
+    paragraphs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_text(self.heading, "hack guide section heading")
+        if not self.paragraphs:
+            raise ValueError(f"hack guide section {self.heading!r} has no paragraphs")
+        for paragraph in self.paragraphs:
+            _require_text(paragraph, f"hack guide section {self.heading!r} paragraph")
+
+
+@dataclass(frozen=True)
+class HackHint:
+    """One static, contextual nudge shown beside the Hack Mode terminal.
+
+    A hint is guidance text, deliberately NOT an action: it carries no command
+    to run and nothing in the UI can run it. A command a student might type is
+    simply written inside `text` between backticks, which the page renders as
+    code. `objective_id` optionally ties the hint to the `evaluation.objectives`
+    entry it helps with, so the page can mark it done once the RECORDED events
+    complete that objective — the same rule the Objectives panel uses, never a
+    claim the hint itself makes.
+    """
+
+    hint_id: str
+    text: str
+    objective_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_identifier(self.hint_id, "hack hint id")
+        _require_text(self.text, f"hack hint {self.hint_id!r} text")
+        if self.objective_id is not None:
+            _require_identifier(self.objective_id, f"hack hint {self.hint_id!r} objective id")
+
+
+@dataclass(frozen=True)
+class HackDeclaration:
+    """What Hack Mode tells a student about THIS panel's scenario.
+
+    Its own block, separate from everything Build Mode reads. Build Mode's
+    brief is about a remediation (`RemediationDeclaration`); Hack Mode's is
+    about the situation a student is dropped into and where to start. Folding
+    the two together would force a panel with no vulnerability (a foundation
+    panel such as Panel 2) to invent one just to have a guide.
+
+    * `guide` — the scenario guide: what the system is, what the task is and
+      how to work. Sections of static prose. A foundation panel's guide
+      describes the system and states plainly that no activity is defined yet.
+    * `hints` — static contextual hints, in the order a student meets them. A
+      panel with no training activity declares NONE: the page then says so
+      rather than suggesting an attack.
+
+    Static display data only. The block adds no command, no event and no
+    scenario behaviour, and it never states a target network fact (an address,
+    a topic, a credential) — those are the executable scenario's to reveal as
+    the student discovers them, exactly as the module docstring says.
+    """
+
+    guide: tuple[HackGuideSection, ...] = ()
+    hints: tuple[HackHint, ...] = ()
+
+    def __post_init__(self) -> None:
+        for section in self.guide:
+            if not isinstance(section, HackGuideSection):
+                raise ValueError(f"not a HackGuideSection: {section!r}")
+        seen: set[str] = set()
+        for hint in self.hints:
+            if not isinstance(hint, HackHint):
+                raise ValueError(f"not a HackHint: {hint!r}")
+            if hint.hint_id in seen:
+                raise ValueError(f"duplicate hack hint id: {hint.hint_id!r}")
+            seen.add(hint.hint_id)
+        if not self.guide and not self.hints:
+            # A block that says nothing says nothing; leaving it out is the
+            # honest way to declare no Hack Mode guidance.
+            raise ValueError("hack declares neither a guide nor hints")
+
+
 #: What a `parameters` value may be. Scalars only: a static parameter is one
 #: configured fact, and forbidding containers keeps the field from growing
 #: into a nested mini-language that starts to look like code.
@@ -914,6 +1001,10 @@ class PanelPackage:
     Build Mode but no remediation activity to declare it through — see
     `BuildDeclaration`. None for every panel that declares its policy in
     `remediation` (Panel 1) or declares none.
+
+    `hack` is what Hack Mode shows a student about this panel — its scenario
+    guide and contextual hints (`HackDeclaration`). None for a panel that
+    declares no Hack Mode guidance: the page then says there is none.
     """
 
     schema_version: int
@@ -925,6 +1016,7 @@ class PanelPackage:
     firmware: FirmwareConfiguration | None = None
     remediation: RemediationDeclaration | None = None
     build: BuildDeclaration | None = None
+    hack: HackDeclaration | None = None
     parameters: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
     #: The directory this package was loaded from. Set by the loader; it is
     #: how `firmware_sketch_path` resolves a relative sketch reference. A
@@ -969,6 +1061,19 @@ class PanelPackage:
                     "package declares its Build Mode section policy in both `build` and "
                     "`remediation`; declare it in exactly one"
                 )
+        if self.hack is not None:
+            if not isinstance(self.hack, HackDeclaration):
+                raise ValueError("package hack must be a HackDeclaration")
+            # A hint may name the objective it helps with, and that name must
+            # exist: a dangling reference would render as a hint that can
+            # never be marked done.
+            objective_ids = {item.objective_id for item in self.evaluation.objectives}
+            for hint in self.hack.hints:
+                if hint.objective_id is not None and hint.objective_id not in objective_ids:
+                    raise ValueError(
+                        f"hack hint {hint.hint_id!r} names unknown objective "
+                        f"{hint.objective_id!r}"
+                    )
         for key, value in self.parameters.items():
             if not isinstance(key, str) or not key.strip():
                 raise ValueError(f"parameter name must be a non-empty string: {key!r}")

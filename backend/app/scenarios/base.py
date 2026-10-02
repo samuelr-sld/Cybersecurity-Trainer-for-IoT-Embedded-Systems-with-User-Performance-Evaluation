@@ -104,6 +104,27 @@ class ScenarioOutcome:
         return cls(lines=lines, success=False, exit_code=EXIT_USAGE, fields_correct=False)
 
 
+def readout_row(
+    row_id: str, label: str, value: str | None, *, revealed: bool
+) -> dict[str, Any]:
+    """One line of a scenario's own TARGET DEVICE readout.
+
+    A scenario that has an activity target describes what the student may
+    currently know about it as a list of these under `snapshot()["readout"]`,
+    so the page renders rows without knowing what kind of device it is (a
+    motor, a sensor, anything). `revealed` is the scenario's own gating: a
+    fact the student has not discovered yet is sent as `value=None` and the page
+    shows it as not yet discovered, rather than the page holding a per-device
+    list of which facts to hide.
+    """
+    return {
+        "id": row_id,
+        "label": label,
+        "value": value if revealed else None,
+        "revealed": bool(revealed),
+    }
+
+
 class Scenario(ABC):
     """What a training target must be able to do, simulated or physical.
 
@@ -173,4 +194,9 @@ class Scenario(ABC):
         serialise this into a state frame so the frontend can draw the target
         device panel (temperature, humidity, pressure, status, spoof/attack
         flags). It is data only and contains no terminal text.
+
+        A scenario with an activity target also puts a `readout` list in it
+        (see `readout_row`): the rows its TARGET DEVICE panel shows, already
+        gated by what the student has discovered. A scenario with no activity
+        (a foundation panel) sends `foundation: true` and no `readout`.
         """

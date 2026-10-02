@@ -75,7 +75,7 @@ def test_register_and_sign_in_round_trip(isolated_event_store) -> None:
     record = service.register(f"  {TEST_ID} ", "  Test   Student One ")
     assert record.participant_id == TEST_ID
     assert record.full_name == TEST_NAME
-    assert service.sign_in(TEST_ID, "test student one").participant_id == TEST_ID
+    assert service.sign_in(TEST_ID).participant_id == TEST_ID
 
 
 def test_duplicate_registration_is_refused(isolated_event_store) -> None:
@@ -90,12 +90,10 @@ def test_malformed_student_numbers_are_rejected(isolated_event_store, pid) -> No
         ParticipantService(isolated_event_store).register(pid, TEST_NAME)
 
 
-def test_sign_in_requires_matching_name(isolated_event_store) -> None:
+def test_sign_in_of_an_unregistered_number_is_refused(isolated_event_store) -> None:
     _register(isolated_event_store)
     with pytest.raises(ParticipantNotFoundError):
-        ParticipantService(isolated_event_store).sign_in(TEST_ID, "Wrong Name")
-    with pytest.raises(ParticipantNotFoundError):
-        ParticipantService(isolated_event_store).sign_in("UNKNOWN-1", TEST_NAME)
+        ParticipantService(isolated_event_store).sign_in("UNKNOWN-1")
 
 
 def test_resolve_participant_never_guesses(isolated_event_store) -> None:
@@ -346,11 +344,11 @@ def test_api_register_sign_in_and_empty_evaluation(client) -> None:
     body = {"participant_id": TEST_ID, "full_name": TEST_NAME}
     assert client.post("/api/participants", json=body).status_code == 201
     assert client.post("/api/participants", json=body).status_code == 409
-    assert client.post("/api/participants/sign-in", json=body).json()["participant_id"] == TEST_ID
+    signed_in = client.post("/api/participants/sign-in", json={"participant_id": TEST_ID})
+    assert signed_in.json()["participant_id"] == TEST_ID
+    assert signed_in.json()["full_name"] == TEST_NAME
     assert (
-        client.post(
-            "/api/participants/sign-in", json={**body, "full_name": "Nope"}
-        ).status_code
+        client.post("/api/participants/sign-in", json={"participant_id": "UNKNOWN-1"}).status_code
         == 404
     )
     assert client.post(

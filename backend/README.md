@@ -147,7 +147,7 @@ Never commit real values; the token is deliberately not in any tracked file.
 `GET http://127.0.0.1:8000/health`
 
 ```json
-{ "status": "ok", "service": "iot-cybersecurity-trainer", "protocol_version": 3 }
+{ "status": "ok", "service": "iot-cybersecurity-trainer", "protocol_version": 7, "build_protocol_version": 7 }
 ```
 
 ## WebSocket endpoint
@@ -175,7 +175,7 @@ sent as strings), and oversized frames are rejected.
 ### Server -> client
 
 ```json
-{ "type": "session", "session_id": "...", "protocol_version": 3 }
+{ "type": "session", "session_id": "...", "protocol_version": 7, "resumed": false, "scenario": {}, "state": {} }
 { "type": "output",  "data": "..." }
 { "type": "action",  "action": "clear" }
 { "type": "error",   "message": "..." }
@@ -184,6 +184,26 @@ sent as strings), and oversized frames are rejected.
 ```
 
 On connect the server sends one `session` frame, then an `output` banner.
+
+Since protocol v7 the `session` frame also carries the scenario the attached
+panel declared, so a screen is correct before the first command and never
+waits for a first event:
+
+- `scenario` — the static briefing built by `app/hack_briefing.py` from the
+  panel's package (`panel.json`): `kind` (`activity` / `foundation` /
+  `unspecified`), `panel_id`, `scenario_id`, `title`, `objectives`
+  (`{id, label, required_events}` — the package's `evaluation.objectives`),
+  `outcomes`, `hints` (`{id, text, objective_id}`) and `guide`
+  (`{heading, paragraphs}`). Hints and the guide come from the package's
+  optional `hack` block (`HackDeclaration`), which is separate from Build
+  Mode's `remediation`. `unspecified` (every field empty) means no package
+  named this session's scenario. A resumed session is told the same briefing.
+- `state` — `Scenario.snapshot()` at attach, the same payload a `state` frame
+  carries. A scenario with an activity target includes a `readout` list
+  (`{id, label, value, revealed}`; an undiscovered fact has `value: null`).
+
+Objective progress is not sent: a client derives it from the recorded `event`
+frames against each objective's `required_events`.
 
 An `input` frame is routed through the command router and its structured
 result rendered back as frames, in this order:

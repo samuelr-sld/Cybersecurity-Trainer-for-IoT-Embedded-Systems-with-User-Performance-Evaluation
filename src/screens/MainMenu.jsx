@@ -4,6 +4,8 @@ import Logo from '../components/Logo'
 import { APP_VERSION } from '../appInfo'
 import { fetchEvaluation } from '../api/trainerApi'
 import useBackendStatus, { BACKEND_STATUS } from '../hooks/useBackendStatus'
+import useHardwareStatus from '../hooks/useHardwareStatus'
+import { menuHardwareView } from '../hardware/menuHardwareModel'
 import {
   SESSION_STATUS_LABEL,
   SESSION_STATUS_TONE,
@@ -66,6 +68,17 @@ function ContinueStrip({ last, onHack, onBuild }) {
   )
 }
 
+// One `LABEL: ● value` readout in the head's status column. The text is always
+// the status; the dot only reinforces it (status is never colour alone).
+function MenuStat({ label, field }) {
+  return (
+    <span className="stat">
+      {label}: <span className={`dot ${field.tone}`} aria-hidden="true" />
+      <span className={`stat-value${field.tone === 'is-ok' ? ' stat-ok' : ''}`}>{field.label}</span>
+    </span>
+  )
+}
+
 function ModeTile({ icon, title, text, tags, onClick }) {
   return (
     <button type="button" className="tile" onClick={onClick}>
@@ -85,6 +98,10 @@ function ModeTile({ icon, title, text, tags, onClick }) {
 
 export default function MainMenu({ student, onHack, onBuild, onEval, onMenu }) {
   const hub = useBackendStatus()
+  // Read-only: the backend's shared device state, polled only while this menu is
+  // on screen. The panel is the backend's MAC -> registry verdict, not the port.
+  const { report, unreachable } = useHardwareStatus()
+  const hardware = menuHardwareView(report, unreachable)
   const [last, setLast] = useState(null)
 
   useEffect(() => {
@@ -117,6 +134,8 @@ export default function MainMenu({ student, onHack, onBuild, onEval, onMenu }) {
           </div>
           <Logo width={62} />
           <div className="menu-status">
+            <MenuStat label="PANEL" field={hardware.panel} />
+            <MenuStat label="USB" field={hardware.usb} />
             <span className="stat">
               HUB:{' '}
               <span className={`dot ${hub === BACKEND_STATUS.ONLINE ? 'is-ok' : hub === BACKEND_STATUS.OFFLINE ? 'is-bad' : ''}`} aria-hidden="true" />

@@ -166,8 +166,12 @@ def test_the_package_declares_no_remediation_or_activity(package) -> None:
 
 def test_the_manifest_has_exactly_the_foundation_blocks() -> None:
     manifest = json.loads((PANELS / PANEL_TWO_ID / "panel.json").read_text(encoding="utf-8"))
-    assert set(manifest) == {"schema_version", "panel_id", "scenario", "firmware", "build"}
+    # `hack` is the Hack Mode scenario guide (the system, and the statement that
+    # no activity is defined). It is guidance text only: still no learning,
+    # workflow, evaluation or remediation, and -- pinned here -- no hints.
+    assert set(manifest) == {"schema_version", "panel_id", "scenario", "firmware", "build", "hack"}
     assert set(manifest["build"]) == {"editable_section_ids"}
+    assert set(manifest["hack"]) == {"guide"}
 
 
 def test_a_package_may_not_declare_the_policy_in_both_places(tmp_path: pathlib.Path) -> None:

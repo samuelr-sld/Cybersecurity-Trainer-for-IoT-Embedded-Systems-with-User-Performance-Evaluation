@@ -29,5 +29,23 @@
       "helper_updateDisplay",
       "helper_showError"
     ]
+  },
+  "hack": {
+    "guide": [
+      {
+        "heading": "The system",
+        "paragraphs": [
+          "The Environmental Monitoring System is an ESP32 environmental monitor. A DHT11 sensor measures temperature and relative humidity every two seconds, and an SSD1306 OLED display shows the readings.",
+          "When the temperature reaches 31.0 C the system blinks an alert LED and runs a fan through an L293D motor driver. It is not network-connected; it reports its readings over USB serial at 115200 baud."
+        ]
+      },
+      {
+        "heading": "Current state of this panel",
+        "paragraphs": [
+          "No cybersecurity training activity is defined for this panel yet. It has no objectives and no hints in Hack Mode.",
+          "The terminal and its tools remain available, but no objectives are tracked for this panel. Build Mode can still open, edit and flash its firmware."
+        ]
+      }
+    ]
   }
 }

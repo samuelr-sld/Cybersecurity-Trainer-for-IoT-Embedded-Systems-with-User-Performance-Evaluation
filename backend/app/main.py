@@ -15,6 +15,7 @@ from app import (
     build_websocket,
     config,
     evaluation_api,
+    hardware_api,
     preparation_websocket,
     session_api,
     websocket,
@@ -125,6 +126,7 @@ def create_app(*, frontend_dist: str | None = None) -> FastAPI:
     application.include_router(build_websocket.router)
     application.include_router(preparation_websocket.router)
     application.include_router(evaluation_api.router)
+    application.include_router(hardware_api.router)
     application.include_router(session_api.router)
 
     @application.get("/health")

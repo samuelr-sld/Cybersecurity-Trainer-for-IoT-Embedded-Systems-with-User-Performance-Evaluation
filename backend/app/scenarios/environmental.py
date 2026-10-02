@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.scenarios.base import Scenario, ScenarioOutcome
+from app.scenarios.base import Scenario, ScenarioOutcome, readout_row
 from app.scenarios.events import ScenarioEvent, ScenarioEventType
 from app.scenarios.payloads import is_reading, parse_env_payload
 from app.scenarios.state import ScenarioState
@@ -493,4 +493,30 @@ class EnvironmentalMonitoringScenario(Scenario):
             "completion": {
                 "attack_successful": state.completion.attack_successful,
             },
+            # The TARGET DEVICE rows, gated by discovery so the page holds no
+            # per-device knowledge (see `readout_row`). Display only.
+            "readout": [
+                readout_row(
+                    "status", "Status", str(state.target.device_status).upper(), revealed=True
+                ),
+                readout_row(
+                    "broker",
+                    "Broker",
+                    f"{state.target.ip_address}:{state.target.mqtt_port}",
+                    revealed=state.discovery.broker_discovered,
+                ),
+                readout_row(
+                    "topic",
+                    "Topic",
+                    state.target.mqtt_topic,
+                    revealed=state.discovery.topic_discovered,
+                ),
+                readout_row(
+                    "telemetry",
+                    "Telemetry",
+                    f"{state.environment.temperature}°C"
+                    + (" (SPOOFED)" if state.attack.spoof_active else ""),
+                    revealed=state.discovery.mqtt_observed,
+                ),
+            ],
         }

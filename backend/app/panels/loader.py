@@ -84,6 +84,9 @@ from app.panels.models import (
     EvaluationMetric,
     EvidenceChannel,
     ExpectedFinding,
+    HackDeclaration,
+    HackGuideSection,
+    HackHint,
     LabIdentity,
     LearningContent,
     ObjectiveDeclaration,
@@ -551,6 +554,52 @@ def _build(block: Any) -> BuildDeclaration | None:
         raise PanelPackageInvalidError(f"invalid build declaration: {error}") from error
 
 
+def _hack(block: Any) -> HackDeclaration | None:
+    """Parse the optional `hack` block — see `HackDeclaration`.
+
+    Absent for a panel that declares no Hack Mode guidance. Every field is
+    plain display text read as data; nothing here interprets a hint, and the
+    block has no field that could name something to run.
+    """
+    if block is None:
+        return None
+    data = _as_mapping(block, "hack")
+    _reject_unknown(data, ("guide", "hints"), "hack")
+    sections = []
+    for entry in _as_list(data.get("guide", []), "hack.guide"):
+        section = _as_mapping(entry, "hack guide section")
+        _reject_unknown(section, ("heading", "paragraphs"), "hack guide section")
+        sections.append(
+            (
+                _require(section, "heading", "hack guide section"),
+                _as_str_tuple(
+                    _require(section, "paragraphs", "hack guide section"),
+                    "hack guide section paragraphs",
+                ),
+            )
+        )
+    hints = []
+    for entry in _as_list(data.get("hints", []), "hack.hints"):
+        hint = _as_mapping(entry, "hack hint")
+        _reject_unknown(hint, ("hint_id", "text", "objective_id"), "hack hint")
+        hints.append(
+            (
+                _require(hint, "hint_id", "hack hint"),
+                _require(hint, "text", "hack hint"),
+                hint.get("objective_id"),
+            )
+        )
+    try:
+        return HackDeclaration(
+            guide=tuple(HackGuideSection(heading=h, paragraphs=p) for h, p in sections),
+            hints=tuple(
+                HackHint(hint_id=i, text=t, objective_id=o) for i, t, o in hints
+            ),
+        )
+    except ValueError as error:
+        raise PanelPackageInvalidError(f"invalid hack declaration: {error}") from error
+
+
 class PanelPackageLoader:
     """Loads panel packages from one trusted, backend-owned root.
 
@@ -638,6 +687,7 @@ class PanelPackageLoader:
                 "firmware",
                 "remediation",
                 "build",
+                "hack",
                 "parameters",
             ),
             f"package {package_id!r}",
@@ -657,6 +707,7 @@ class PanelPackageLoader:
                 firmware=firmware,
                 remediation=_remediation(data.get("remediation")),
                 build=_build(data.get("build")),
+                hack=_hack(data.get("hack")),
                 parameters=_as_mapping(data.get("parameters", {}), "parameters"),
                 directory=directory,
             )

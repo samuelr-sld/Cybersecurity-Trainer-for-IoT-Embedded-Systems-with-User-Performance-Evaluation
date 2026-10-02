@@ -82,10 +82,12 @@ export function registerParticipant({ id, name }) {
   })
 }
 
-export function signInParticipant({ id, name }) {
+// Sign-in names the student number only; the backend returns the participant
+// (and so the name) it stored at registration.
+export function signInParticipant({ id }) {
   return request('/api/participants/sign-in', {
     method: 'POST',
-    body: JSON.stringify({ participant_id: id, full_name: name }),
+    body: JSON.stringify({ participant_id: id }),
   })
 }
 
@@ -109,6 +111,19 @@ export async function fetchHealth(signal) {
   } catch {
     return false
   }
+}
+
+/**
+ * The attached panel and USB port (GET /api/hardware/status), read from the
+ * backend's shared device layer. The panel verdict is the backend's own
+ * MAC -> registry lookup; the page never derives it from the port. Read-only:
+ * it opens no session and compiles, flashes and records nothing.
+ */
+export function fetchHardwareStatus(signal) {
+  // No Content-Type: a body-less GET without it is a "simple" request, so the
+  // dev setup (page on :5173, API on :8000) does not add a CORS preflight to
+  // every poll. Production is single-origin and never had one.
+  return request('/api/hardware/status', { signal, cache: 'no-store', headers: {} })
 }
 
 /** Is this Hack/Build session still running on the backend? */

@@ -243,6 +243,67 @@
       ]
     }
   },
+  "hack": {
+    "guide": [
+      {
+        "heading": "The system",
+        "paragraphs": [
+          "The Smart Home MQTT Control System is an ESP32 smart-home controller. It drives a small DC motor through an L293D driver and has local START and STOP push-buttons, a green LED for running, a red LED for stopped, and a buzzer that chirps when the state changes.",
+          "It joins the lab's Wi-Fi network and connects to an MQTT broker that requires a username and password. The device accepts START and STOP commands remotely on an MQTT control topic and reports what it is doing on a state topic."
+        ]
+      },
+      {
+        "heading": "Your task",
+        "paragraphs": [
+          "You are a security tester with authorization to assess this device in the lab. Work out how the device is controlled, then show whether a client that is allowed onto the broker can also command the motor.",
+          "Signing in to a broker proves who a client is. It does not, by itself, prove that the client may send each command. Your job is to find out whether this device checks."
+        ]
+      },
+      {
+        "heading": "How to work",
+        "paragraphs": [
+          "Everything happens in the terminal. Type `help` to list the tools. They run inside the trainer's controlled command set; nothing runs on the host shell.",
+          "The Objectives panel and the Activity Log fill in from what the trainer records as you work, and your commands and the events they cause are saved for your evaluation.",
+          "Test only this panel and the lab network. This is an authorized lab exercise."
+        ]
+      }
+    ],
+    "hints": [
+      {
+        "hint_id": "read-the-firmware",
+        "objective_id": "extract-firmware",
+        "text": "Start with the device itself: its firmware holds how it is configured. Read the application image from flash into a file with `esptool.py read_flash 0x10000 0x10000 firmware.bin`."
+      },
+      {
+        "hint_id": "search-the-strings",
+        "objective_id": "analyze-firmware",
+        "text": "A firmware image is mostly machine code. Print its readable text with `strings -n 8 firmware.bin`, then narrow it down with `grep` for words a networked device would need, such as mqtt."
+      },
+      {
+        "hint_id": "find-broker-and-topics",
+        "objective_id": "discover-broker-and-topic",
+        "text": "Look for where the device connects and what it listens on: a broker address and port, and the topic names it uses for commands."
+      },
+      {
+        "hint_id": "check-the-broker",
+        "text": "Confirm the broker is reachable before you rely on it, for example with `nmap -p <port> <broker address>`."
+      },
+      {
+        "hint_id": "watch-the-traffic",
+        "objective_id": "observe-mqtt-communication",
+        "text": "Listen before you speak. Subscribe to the topics you found with `mosquitto_sub -h <host> -t <topic>` to see the messages the device exchanges."
+      },
+      {
+        "hint_id": "test-authorization",
+        "objective_id": "demonstrate-unauthorized-command",
+        "text": "A broker login is not permission to give orders. Publish a command to the device's control topic with `mosquitto_pub -h <host> -t <topic> -m <payload>` and check whether the motor obeys. What you saw in the traffic tells you what a valid payload looks like."
+      },
+      {
+        "hint_id": "command-syntax",
+        "text": "Unsure how to use a tool? Type `help` to list the tools and how to call them."
+      }
+    ]
+  },
   "parameters": {
     "device_role": "smart-home-actuator",
     "mqtt_transport": "tcp"

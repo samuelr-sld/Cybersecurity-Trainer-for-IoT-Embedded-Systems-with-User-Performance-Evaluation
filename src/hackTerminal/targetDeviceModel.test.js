@@ -1,57 +1,78 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { foundationSummary, hasActivityTarget } from './targetDeviceModel.js'
+import { TARGET_KIND, describeTarget } from './targetDeviceModel.js'
 
-// Representative snapshots, with the keys the backend scenarios actually send
-// (backend/app/scenarios/environmental.py, smart_home.py, environmental_sensing.py).
+// Snapshots in the shape the backend scenarios send. Only `readout` matters to
+// this page; the rest of a snapshot is deliberately not read.
+const readoutRow = (id, label, value, revealed) => ({ id, label, value: revealed ? value : null, revealed })
 
-const legacyTelemetry = {
-  scenario_id: 'legacy-environmental-monitoring',
-  target: { ip_address: '192.168.10.10', mqtt_port: 1883, mqtt_topic: 't', device_status: 'online' },
-  environment: { temperature: 28, humidity: 65, pressure: 1008 },
-  discovery: { broker_discovered: false, topic_discovered: false, mqtt_observed: false },
-  attack: { spoof_attempted: false, spoof_successful: false, spoof_active: false },
-}
-
-const smartHome = {
-  scenario_id: 'smart-home-mqtt-control',
-  target: { broker_host: 'h', broker_port: 1883, command_topic: 'c', device_status: 'online' },
-  motor: { running: false, last_command: null },
-  discovery: { broker_discovered: false, topic_discovered: false, mqtt_observed: false },
-  attack: { spoof_attempted: false, spoof_successful: false, spoof_active: false },
+const undiscovered = {
+  scenario_id: 'any-activity',
+  target: { broker_host: 'must-not-be-read' },
+  motor: { running: true },
+  readout: [
+    readoutRow('status', 'Status', 'ONLINE', true),
+    readoutRow('broker', 'Broker', 'h:1', false),
+    readoutRow('thing', 'Thing', 'x', false),
+  ],
 }
 
 const foundation = {
-  scenario_id: 'environmental-sensing',
+  scenario_id: 'a-foundation',
   foundation: true,
   objectives: [],
-  summary: 'The Environmental Monitoring System is a foundation module; no training activity is defined for it yet.',
+  summary: 'This is a foundation module; no training activity is defined for it yet.',
 }
 
-test('both activity scenarios still carry the target skeleton the panel reads', () => {
-  assert.equal(hasActivityTarget(legacyTelemetry), true)
-  assert.equal(hasActivityTarget(smartHome), true)
-})
-
-test('a foundation snapshot has no activity target, so the panel never dereferences one', () => {
-  assert.equal(hasActivityTarget(foundation), false)
-})
-
-test('a snapshot nobody anticipated degrades to the neutral display, not an exception', () => {
-  for (const odd of [null, undefined, {}, { target: {} }, { discovery: {} }, 'x', 0]) {
-    assert.equal(hasActivityTarget(odd), false)
-    assert.equal(typeof foundationSummary(odd), 'string')
+test('before the session frame there is no snapshot: pending, not "none"', () => {
+  for (const snapshot of [null, undefined, 'x', 3]) {
+    assert.equal(describeTarget(snapshot).kind, TARGET_KIND.PENDING)
   }
 })
 
-test('the foundation summary is the backend text when present', () => {
-  assert.equal(foundationSummary(foundation), foundation.summary)
+test('a scenario that states a readout is rendered row by row, with undiscovered facts withheld', () => {
+  const result = describeTarget(undiscovered)
+  assert.equal(result.kind, TARGET_KIND.ROWS)
+  assert.deepEqual(
+    result.rows.map((r) => [r.id, r.label, r.revealed, r.value]),
+    [
+      ['status', 'Status', true, 'ONLINE'],
+      ['broker', 'Broker', false, ''],
+      ['thing', 'Thing', false, ''],
+    ],
+  )
 })
 
-test('the foundation summary falls back to the generic fact, and states no objective', () => {
-  for (const snapshot of [{}, { summary: '' }, { summary: '   ' }, { summary: 7 }]) {
-    const text = foundationSummary(snapshot)
-    assert.match(text, /no training activity/i)
-    assert.doesNotMatch(text, /mqtt|broker|bme280|spoof|attack/i)
+test('the page reads nothing but the readout: no motor, broker or telemetry sniffing', () => {
+  // `target` and `motor` are present and would have drawn a motor panel before.
+  const result = describeTarget(undiscovered)
+  assert.ok(result.rows.every((r) => !JSON.stringify(r).includes('must-not-be-read')))
+})
+
+test('a revealed row without a value is treated as withheld, never shown as "null"', () => {
+  const mixed = describeTarget({
+    readout: [{ id: 'a', label: 'A', revealed: true, value: null }, readoutRow('b', 'B', 'ok', true)],
+  })
+  assert.deepEqual(
+    mixed.rows.map((r) => [r.id, r.revealed]),
+    [
+      ['a', false],
+      ['b', true],
+    ],
+  )
+})
+
+test('a foundation scenario shows its own summary and no rows', () => {
+  const result = describeTarget(foundation)
+  assert.equal(result.kind, TARGET_KIND.NONE)
+  assert.deepEqual(result.rows, [])
+  assert.equal(result.summary, foundation.summary)
+})
+
+test('a snapshot nobody anticipated degrades to the neutral display instead of throwing', () => {
+  for (const snapshot of [{}, { scenario_id: 'future' }, { readout: 'nope' }, { readout: [] }, { readout: [null, 5] }]) {
+    const result = describeTarget(snapshot)
+    assert.equal(result.kind, TARGET_KIND.NONE, JSON.stringify(snapshot))
+    assert.equal(result.summary, 'No training activity is defined for this panel yet.')
   }
 })

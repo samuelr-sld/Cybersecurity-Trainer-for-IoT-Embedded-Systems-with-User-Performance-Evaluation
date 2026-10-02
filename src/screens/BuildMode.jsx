@@ -252,7 +252,7 @@ const SWITCH_BLOCKED_NOTICE =
 // auto-scroll into view" — see the activityLogRef/onScroll wiring below.
 const ACTIVITY_LOG_AUTOSCROLL_THRESHOLD_PX = 32
 
-export default function BuildMode({ onBack, onMenu, participantId }) {
+export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   const [state, setState] = useState(null)
   const [events, setEvents] = useState([])
   const [activeFile, setActiveFile] = useState(null)
@@ -957,7 +957,7 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
               Connect a panel over USB and wait for it to be identified to load its firmware here.
             </p>
             <div className="prep-actions">
-              <button type="button" className="btn" onClick={onBack}>
+              <button type="button" className="btn" onClick={onQuit}>
                 <Icon name="arrow-left" size={14} />
                 Back to menu
               </button>
@@ -1045,6 +1045,21 @@ export default function BuildMode({ onBack, onMenu, participantId }) {
         onMenu={onMenu}
         actions={
           <>
+            <div className="session-actions is-inline" role="group" aria-label="Session">
+              <button
+                type="button"
+                className="btn"
+                title="End this session and start a new one from the baseline"
+                onClick={onReset}
+              >
+                <Icon name="refresh" size={14} />
+                Reset
+              </button>
+              <button type="button" className="btn" title="End this session and return to the main menu" onClick={onQuit}>
+                <Icon name="arrow-left" size={14} />
+                Quit
+              </button>
+            </div>
             <div className="seg-group is-compact" role="group" aria-label="Editor mode">
               <button
                 type="button"

@@ -67,7 +67,7 @@ test('fetchEvaluation requests exactly the given participant id', () =>
 
 test('a backend without the API is reported as outdated, not as an unknown student', () =>
   withFetch(404, { detail: 'Not Found' }, async () => {
-    await assert.rejects(signInParticipant({ id: 'x', name: 'y' }), (error) => {
+    await assert.rejects(signInParticipant({ id: 'x' }), (error) => {
       assert.ok(error instanceof ApiError)
       assert.equal(error.endpointMissing, true)
       assert.match(error.message, /restart the backend/)

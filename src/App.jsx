@@ -8,7 +8,7 @@ import ModePreparation from './screens/ModePreparation'
 import Dashboard from './screens/Dashboard'
 import MenuDrawer from './components/MenuDrawer'
 import Logo from './components/Logo'
-import { endSession, fetchSessionLive, registerParticipant, signInParticipant } from './api/trainerApi'
+import { fetchSessionLive, registerParticipant, signInParticipant } from './api/trainerApi'
 import {
   forgetActiveMode,
   forgetSession,
@@ -16,6 +16,7 @@ import {
   recallSession,
   rememberActiveMode,
 } from './session/activeSession'
+import { createModeLifecycle, endRememberedSession } from './session/modeLifecycle'
 import './App.css'
 
 // Students are registered participants held by the backend
@@ -32,14 +33,6 @@ function toStudent(participant) {
 // the mode again (see the effects in App below).
 function restoredMode() {
   return recallActiveMode()
-}
-
-// Leaving a mode on purpose ends its backend session. Closing the socket never
-// does (a reload must be able to come back), so this is the explicit request.
-function endRememberedSession(mode) {
-  const sessionId = recallSession(mode)
-  forgetSession(mode)
-  if (sessionId) endSession(mode, sessionId)
 }
 
 export default function App() {
@@ -85,24 +78,53 @@ export default function App() {
     }
   }, [restored])
 
+  // Every entry into Hack Mode or Build Mode goes through the preparation
+  // screen, which restores the panel's vulnerable baseline firmware
+  // (backend/app/mode_preparation.py). The 'hack' / 'build' screens are only
+  // ever set by its `onReady`, so a failed preparation cannot open a mode.
+  function prepareMode(mode) {
+    setPreparation((current) => ({ mode, attempt: (current?.attempt ?? 0) + 1 }))
+    setScreen('prepare')
+  }
+
+  // QUIT and RESET (src/session/modeLifecycle.js). Both end the CURRENT
+  // backend session first; QUIT then shows the menu, RESET enters the same
+  // mode again through `prepareMode` — so the new session starts, as every one
+  // does, from the restored baseline, on a freshly mounted mode screen that
+  // inherits nothing of the old one. A reload is neither: it ends nothing and
+  // resumes. The screen effect below reports every screen change to it, which
+  // is how it knows the student has already left by another route.
+  const [lifecycle] = useState(() =>
+    createModeLifecycle({
+      endMode: endRememberedSession,
+      toMenu: () => setScreen('menu'),
+      restartMode: prepareMode,
+      screen,
+    }),
+  )
+
   // Keep the reload pointer in step with the screen, and end the backend
   // session when the student leaves a mode on purpose (any screen change away
-  // from hack/build: BACK, the menu drawer, the Hack -> Build link, sign-out).
-  // A reload runs none of this — the page is simply gone — which is exactly
-  // why it does not end the session.
+  // from hack/build: QUIT, RESET, the menu drawer, the Hack -> Build link,
+  // sign-out). Closing the socket never ends a session — a reload must be able
+  // to come back — so leaving is this explicit request. A reload runs none of
+  // this: the page is simply gone, which is exactly why it does not end the
+  // session. Ending is idempotent (`endRememberedSession` forgets the pointer
+  // first), so QUIT/RESET having already ended it makes this a no-op.
   const previousScreen = useRef(screen)
   useEffect(() => {
     const previous = previousScreen.current
     previousScreen.current = screen
+    lifecycle.screenChanged(screen)
     if (previous !== screen && (previous === 'hack' || previous === 'build')) {
-      endRememberedSession(previous)
+      void endRememberedSession(previous)
     }
     if ((screen === 'hack' || screen === 'build') && student) {
       rememberActiveMode(screen, student)
     } else if (screen !== 'resuming') {
       forgetActiveMode()
     }
-  }, [screen, student])
+  }, [screen, student, lifecycle])
 
   // Back to the sign-in screen with nobody signed in.
   function goSignIn() {
@@ -113,15 +135,6 @@ export default function App() {
     setEvalStudent(null)
     setError('')
     setMenuOpen(false)
-  }
-
-  // Every entry into Hack Mode or Build Mode goes through the preparation
-  // screen, which restores the panel's vulnerable baseline firmware
-  // (backend/app/mode_preparation.py). The 'hack' / 'build' screens are only
-  // ever set by its `onReady`, so a failed preparation cannot open a mode.
-  function prepareMode(mode) {
-    setPreparation((current) => ({ mode, attempt: (current?.attempt ?? 0) + 1 }))
-    setScreen('prepare')
   }
 
   function enterAsStudent(participant) {
@@ -205,7 +218,8 @@ export default function App() {
         <HackMode
           participantId={student?.id}
           onMenu={() => setMenuOpen(true)}
-          onBack={() => setScreen('menu')}
+          onQuit={() => lifecycle.quit('hack')}
+          onReset={() => lifecycle.reset('hack')}
           onBuild={() => prepareMode('build')}
         />
       )
@@ -215,7 +229,8 @@ export default function App() {
         <BuildMode
           participantId={student?.id}
           onMenu={() => setMenuOpen(true)}
-          onBack={() => setScreen('menu')}
+          onQuit={() => lifecycle.quit('build')}
+          onReset={() => lifecycle.reset('build')}
         />
       )
     }
@@ -243,15 +258,19 @@ export default function App() {
           setError('')
           setScreen('professor-access')
         }}
-        onEnter={({ id, name }) => {
-          if (!id.trim() || !name.trim()) {
-            setError('Student number and full name are required.')
+        onEnter={({ id }) => {
+          if (!id.trim()) {
+            setError('Student number is required.')
             return
           }
-          signInParticipant({ id, name })
+          signInParticipant({ id })
             .then(enterAsStudent)
             .catch((e) =>
-              setError(e.status === 404 && !e.endpointMissing ? 'No matching student. Register first.' : e.message),
+              setError(
+                e.status === 404 && !e.endpointMissing
+                  ? 'No student is registered with that number. Register first.'
+                  : e.message,
+              ),
             )
         }}
         onRegister={({ id, name }) => {

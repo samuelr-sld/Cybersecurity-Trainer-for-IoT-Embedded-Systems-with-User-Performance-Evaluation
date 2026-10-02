@@ -184,6 +184,7 @@ from app.models.messages import (
     SessionMessage,
     StateMessage,
 )
+from app.hack_briefing import briefing_for
 from app.hack_live_mqtt import configure_live_mqtt
 from app.pager import PAGER_PROMPT, Pager, PagerAction
 from app.participants import resolve_participant
@@ -655,10 +656,14 @@ async def hack_websocket(websocket: WebSocket) -> None:
         # instead of the in-memory simulation. Still a lookup + in-memory
         # wiring; it opens NOTHING here and never raises.
         configure_live_mqtt(selection)
+        # What the screen shows about this scenario, built once from the
+        # package that named it and stored with the session so a reload is
+        # told the same thing. Pure data: a function of the package, no I/O.
         session = await session_manager.create(
             scenario=selection.scenario,
             participant_id=participant_id,
             panel_id=selection.panel_id,
+            briefing=briefing_for(selection.package),
         )
         described = selection.describe()
     else:
@@ -688,7 +693,18 @@ async def hack_websocket(websocket: WebSocket) -> None:
     receiving: asyncio.Future | None = None
 
     try:
-        await channel.send(SessionMessage(session_id=session.session_id, resumed=resumed))
+        # Protocol v7: the session frame itself carries the scenario briefing
+        # and the target's state at attach, so the page is correct before the
+        # first command and never waits for a first event to learn what it is
+        # looking at. Both are reads — nothing is run, recorded or emitted.
+        await channel.send(
+            SessionMessage(
+                session_id=session.session_id,
+                resumed=resumed,
+                scenario=session_manager.briefing_of(session.session_id),
+                state=session.scenario.snapshot(),
+            )
+        )
         if resumed:
             await _replay_session(channel, session)
         else:

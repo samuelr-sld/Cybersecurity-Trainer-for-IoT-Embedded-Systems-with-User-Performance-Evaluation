@@ -244,9 +244,10 @@ class ParticipantRecord:
     `participant_id` is the student number the Student Access screen already
     collects; it is what `HackSessionRecord.participant_id` and
     `BuildSessionRecord.participant_id` store. There is deliberately no
-    password: the platform's established access model is "student number +
-    full name" on a closed, offline classroom network, and this record makes
-    that identity durable rather than inventing an authentication scheme.
+    password: the platform's established access model is a student number
+    (registered once together with a full name, then used alone to sign in) on
+    a closed, offline classroom network, and this record makes that identity
+    durable rather than inventing an authentication scheme.
     """
 
     participant_id: str

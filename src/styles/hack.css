@@ -1,4 +1,4 @@
-/* Hack Mode: objectives + log, the real xterm terminal, toolbox + target. */
+/* Hack Mode: objectives + log, the real xterm terminal, hints + target. */
 
 .hack-body {
   min-height: 0;
@@ -57,17 +57,24 @@
 
 /* --- objectives ------------------------------------------------------------------------ */
 
+/* Objective text is the package's own sentence, so it wraps: top-align the
+   marker and space the items so neighbouring objectives never run together. */
 .objectives {
   display: flex;
   flex-direction: column;
+  gap: 10px;
 }
 
 .objective {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  min-height: 30px;
-  font: 500 14px/1.25 var(--font-sans);
+  font: 500 13px/1.35 var(--font-sans);
+}
+
+.objective .icon {
+  flex: none;
+  margin-top: 2px;
 }
 
 .objective.is-done {
@@ -186,38 +193,85 @@
   font: 400 12px/1 var(--font-sans);
 }
 
-/* --- toolbox and target ------------------------------------------------------------------- */
+/* --- hints and target ---------------------------------------------------------------------- */
 
-.tool-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+/* Static, contextual guidance beside the terminal. Scrolls inside its card so a
+   long list never pushes the target readout off a 768px screen. */
+.hint-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  list-style: none;
 }
 
-.tool-chip {
-  min-height: var(--touch-target);
-  padding: 0 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-field);
+.hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font: 400 13px/1.5 var(--font-sans);
+  color: var(--text-soft);
+}
+
+.hint .icon {
+  flex: none;
+  margin-top: 3px;
+  color: var(--info);
+}
+
+.hint.is-done {
+  color: var(--muted);
+}
+
+.hint.is-done .icon {
+  color: var(--success);
+}
+
+/* Commands inside a hint or the guide, shown as code. Display only. */
+.hint code,
+.guide-section code {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
   background: var(--base);
   color: var(--text);
-  text-align: left;
-  font: 500 12px/1 var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  transition:
-    background 0.12s,
-    border-color 0.12s;
+  font: 500 12px/1.5 var(--font-mono);
+  overflow-wrap: anywhere;
 }
 
-.tool-chip:hover {
-  background: var(--raised);
-  border-color: var(--line-hover);
+/* A target fact the student has not discovered yet. */
+.kv-unknown {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-style: italic;
 }
 
-.tool-chip:active {
-  background: #000;
+/* --- scenario guide -------------------------------------------------------------------------- */
+
+.guide-section h3 {
+  margin-bottom: 6px;
+  font: 700 14px/1.3 var(--font-sans);
+}
+
+.guide-section p,
+.guide-section li {
+  font: 400 14px/1.6 var(--font-sans);
+  color: var(--text-soft);
+}
+
+.guide-section p + p {
+  margin-top: 8px;
+}
+
+.guide-section ul {
+  padding-left: 20px;
+  list-style: disc;
+}
+
+.guide-section li + li {
+  margin-top: 4px;
 }
 
 .kv {

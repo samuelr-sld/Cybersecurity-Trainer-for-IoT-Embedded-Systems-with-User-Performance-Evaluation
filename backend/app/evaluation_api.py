@@ -1,7 +1,7 @@
 """HTTP endpoints for participants and the Evaluation page.
 
     POST /api/participants            register {participant_id, full_name}
-    POST /api/participants/sign-in    sign in  {participant_id, full_name}
+    POST /api/participants/sign-in    sign in  {participant_id}  -> stored participant
     GET  /api/participants            registered participants + session counts
     GET  /api/evaluation/{id}         one participant's sessions and metrics
 
@@ -31,10 +31,17 @@ from app.sessions import session_manager
 router = APIRouter(prefix="/api")
 
 
-class ParticipantBody(BaseModel):
+class SignInBody(BaseModel):
+    """Sign-in names a student number and nothing else."""
+
     model_config = ConfigDict(extra="forbid")
 
     participant_id: str
+
+
+class ParticipantBody(SignInBody):
+    """Registration is the one place a full name is supplied."""
+
     full_name: str
 
 
@@ -63,9 +70,9 @@ def register_participant(body: ParticipantBody) -> dict:
 
 
 @router.post("/participants/sign-in")
-def sign_in_participant(body: ParticipantBody) -> dict:
+def sign_in_participant(body: SignInBody) -> dict:
     try:
-        record = ParticipantService().sign_in(body.participant_id, body.full_name)
+        record = ParticipantService().sign_in(body.participant_id)
     except ParticipantNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except StoreError as error:

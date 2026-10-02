@@ -5,9 +5,11 @@ import Icon from '../components/Icon'
 import { sentenceCase } from '../text'
 
 // A student is a registered participant: a full name plus a student number
-// (backend/app/participants.py). There is no password — the number is the
-// identity, and the backend validates both.
+// (backend/app/participants.py). Registration supplies both; after that the
+// number alone is the identity — sign-in asks for it and nothing else, and the
+// backend returns the name it stored. There is no password.
 const NUMBER_HINT = 'Letters, digits and hyphens, up to 32 characters.'
+const LOGIN_NUMBER_HINT = 'The student number you registered with.'
 
 export default function StudentAccess({ error, onMenu, onInstructor, onEnter, onRegister, onDismissError }) {
   const [mode, setMode] = useState('login')
@@ -24,10 +26,12 @@ export default function StudentAccess({ error, onMenu, onInstructor, onEnter, on
     onDismissError?.()
   }
 
+  // Sign-in hands over the number alone, so a name typed during registration
+  // can never travel with it.
   function submit(event) {
     event.preventDefault()
     if (registering) onRegister(form)
-    else onEnter(form)
+    else onEnter({ id: form.id })
   }
 
   return (
@@ -41,20 +45,22 @@ export default function StudentAccess({ error, onMenu, onInstructor, onEnter, on
         <p className="auth-sub">
           {registering
             ? 'Your progress is saved to this account.'
-            : 'Welcome back. Sign in to resume your training.'}
+            : 'Welcome back. Enter your student number to resume your training.'}
         </p>
 
         <div className="auth-fields">
-          <Field
-            large
-            id="student-name"
-            label="Full name"
-            icon="user"
-            placeholder="Enter your full name"
-            autoComplete="name"
-            value={form.name}
-            onChange={(event) => update('name', event.target.value)}
-          />
+          {registering ? (
+            <Field
+              large
+              id="student-name"
+              label="Full name"
+              icon="user"
+              placeholder="Enter your full name"
+              autoComplete="name"
+              value={form.name}
+              onChange={(event) => update('name', event.target.value)}
+            />
+          ) : null}
           <Field
             large
             id="student-number"
@@ -62,7 +68,7 @@ export default function StudentAccess({ error, onMenu, onInstructor, onEnter, on
             icon="id-card"
             placeholder="e.g. 2023-123456"
             autoComplete="off"
-            hint={NUMBER_HINT}
+            hint={registering ? NUMBER_HINT : LOGIN_NUMBER_HINT}
             value={form.id}
             onChange={(event) => update('id', event.target.value)}
           />

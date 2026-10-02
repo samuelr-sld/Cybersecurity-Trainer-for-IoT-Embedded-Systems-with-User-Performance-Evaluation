@@ -11,7 +11,7 @@ Client -> server
     {"type": "hardware_status"}
 
 Server -> client
-    {"type": "session",  "session_id": "..."}
+    {"type": "session",  "session_id": "...", "scenario": {}, "state": {}}
     {"type": "output",   "data": "..."}
     {"type": "action",   "action": "clear"}
     {"type": "action",   "action": "pager_start" | "pager_end"}
@@ -70,7 +70,17 @@ from app import config
 #   while a pager is waiting for a single raw keystroke, and a long `strings`
 #   dump would still arrive as one unpaged block. No frame or field was
 #   removed and no existing value changed meaning.
-PROTOCOL_VERSION = 6
+# 7 (Hack Mode scenario briefing): the `session` frame gains `scenario` and
+#   `state`, so a screen knows the attached panel's scenario the instant it
+#   opens instead of waiting for a first event. `scenario` is the panel
+#   package's static briefing (title, objectives, hints, guide — see
+#   `app/hack_briefing.py`); `state` is `Scenario.snapshot()` at attach time,
+#   the same payload a `state` frame carries. Both are additive and optional
+#   — a version-6 client ignores them and still renders every frame — but the
+#   bump is deliberate for the same reason as version 5: a version-6 client
+#   has no way to show objectives before the first `state` frame, so it would
+#   still wait for one. No frame was removed and no field changed meaning.
+PROTOCOL_VERSION = 7
 
 
 class _Frame(BaseModel):
@@ -160,6 +170,18 @@ class SessionMessage(_Frame):
     #: running (the client asked with `?session=<id>` after a reload). False
     #: for a brand-new session, including when the requested one was gone.
     resumed: bool = False
+    #: The scenario briefing for this session (protocol v7): which scenario it
+    #: is, its measurable objectives with the events that complete them, its
+    #: static hints and its scenario guide, all taken from the attached
+    #: panel's package by `app/hack_briefing.py`. Static for the life of the
+    #: session, so a reload gets exactly what the first connection got. None
+    #: only for a session created without one (never by `/ws/hack` itself).
+    scenario: dict[str, Any] | None = None
+    #: The scenario's own `snapshot()` at the moment this connection attached
+    #: (protocol v7) — exactly what a `state` frame carries, sent here so the
+    #: page has the target's state before any command runs. A resumed session
+    #: still gets its replayed `state` frame as well; the two agree.
+    state: dict[str, Any] | None = None
 
 
 class OutputMessage(_Frame):

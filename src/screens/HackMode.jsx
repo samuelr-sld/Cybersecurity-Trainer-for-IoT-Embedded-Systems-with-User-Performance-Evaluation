@@ -1,41 +1,25 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader'
 import HackTerminal from '../components/HackTerminal'
 import Icon from '../components/Icon'
+import RichText from '../components/RichText'
+import ScenarioGuide from '../components/ScenarioGuide'
 import StatusBar from '../components/StatusBar'
 import useHackSocket, { CONNECTION_STATUS } from '../hooks/useHackSocket'
 import HardwareHeaderStatus from '../components/HardwareHeaderStatus'
 import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE, usbRepresentations } from '../hardware/deviceState'
 import { PROMPT_DISPLAY, applyPromptFrame, initialPromptState } from '../hackTerminal/terminalPromptModel'
-import { foundationSummary, hasActivityTarget } from '../hackTerminal/targetDeviceModel'
-import { OBJECTIVE_STATE, deriveObjectives, objectiveProgress } from '../hackTerminal/objectivesModel'
+import { TARGET_KIND, describeTarget } from '../hackTerminal/targetDeviceModel'
+import {
+  BRIEFING_KIND,
+  OBJECTIVE_STATE,
+  hintsWithProgress,
+  objectiveProgress,
+  objectiveStates,
+  readBriefing,
+} from '../hackTerminal/briefingModel'
 import { hackEventLabel } from '../hackTerminal/eventLabels'
 import { copyToClipboard } from '../hackTerminal/clipboard'
-
-// Phase 2C: the backend's real-tool toolbox (backend/app/commands/registry.py)
-// in the order the learning progression uses them — understand the device
-// (esptool.py -> strings -> grep), then reach it over the network or the
-// MQTT protocol. `mqtt-explorer` was removed with Phase 2C: it was never a
-// real tool, and its topic-browsing role is covered by `mosquitto_sub`.
-const TOOLS = [
-  {
-    id: 'esptool',
-    name: 'esptool.py',
-    action: 'extract',
-    // 64 KiB from the app-partition offset (0x10000), NOT the full 4 MiB
-    // flash: a whole-flash read is minutes long and dumps the bootloader,
-    // ESP-IDF/Arduino libraries, the second OTA slot and SPIFFS, which is
-    // what buries the handful of config strings this exercise wants. The
-    // app image (where the sketch's own string literals live) starts at
-    // 0x10000; a 64 KiB window there is a fast, readable slice.
-    command: 'esptool.py read_flash 0x10000 0x10000 firmware.bin',
-  },
-  { id: 'strings', name: 'strings', action: 'inspect', command: 'strings -n 8 firmware.bin' },
-  { id: 'grep', name: 'grep', action: 'search', command: 'grep mqtt firmware.bin' },
-  { id: 'nmap', name: 'nmap', action: 'scan', command: 'nmap' },
-  { id: 'sub', name: 'mosquitto_sub', action: 'listen', command: 'mosquitto_sub' },
-  { id: 'pub', name: 'mosquitto_pub', action: 'publish', command: 'mosquitto_pub' },
-]
 
 function nowStamp() {
   return new Date().toLocaleTimeString('en-GB', { hour12: false })
@@ -77,6 +61,27 @@ const OBJECTIVE_ICON = {
   [OBJECTIVE_STATE.PENDING]: 'status-pending',
 }
 
+// What a panel says when it has nothing to list. The three honest situations
+// are the briefing's own kind (see hackTerminal/briefingModel.js): the
+// connection has not delivered one yet, the panel defines no activity, or no
+// package named a scenario at all. `what` is 'objectives' or 'hints'.
+function briefingNote(briefing, status, what) {
+  if (briefing === null) {
+    return status === CONNECTION_STATUS.CONNECTING
+      ? 'Loading the scenario…'
+      : 'The scenario is unavailable: the backend is not connected.'
+  }
+  if (briefing.kind === BRIEFING_KIND.FOUNDATION) {
+    return what === 'hints'
+      ? 'No hints: this panel has no defined cybersecurity training activity.'
+      : 'No cybersecurity training objectives are defined for this panel yet.'
+  }
+  if (briefing.kind === BRIEFING_KIND.UNSPECIFIED) {
+    return 'No scenario information is available for this session.'
+  }
+  return what === 'hints' ? 'This scenario declares no hints.' : 'This scenario declares no objectives.'
+}
+
 function Row({ label, children }) {
   return (
     <div className="kv-row">
@@ -86,60 +91,37 @@ function Row({ label, children }) {
   )
 }
 
-// The TARGET DEVICE readout. The scenario owns the snapshot's shape, so this
-// branches on which shape arrived, never on a panel id.
-function TargetDevice({ scenarioState, panelName }) {
-  if (!scenarioState) {
-    return <p className="empty-line">No contact with the target yet — begin recon.</p>
+// The TARGET DEVICE readout. The scenario describes its own target (rows of
+// label / value / revealed under `readout`), so this renders what it is told
+// and knows nothing about what kind of device that is — no motor, broker or
+// telemetry fields are read here, and no panel id is consulted. See
+// hackTerminal/targetDeviceModel.js.
+function TargetDevice({ scenarioState, scenarioTitle, panelName }) {
+  const target = describeTarget(scenarioState)
+  if (target.kind === TARGET_KIND.PENDING) {
+    return <p className="empty-line">Waiting for the session to start…</p>
   }
-  if (!hasActivityTarget(scenarioState)) {
-    // A foundation panel (its package defines no activity yet): the snapshot
-    // carries no target/discovery skeleton, so say what it says and read
-    // nothing else. See targetDeviceModel.js.
-    return <p className="empty-line">{foundationSummary(scenarioState)}</p>
-  }
-  const { target, discovery } = scenarioState
-  const attack = scenarioState.attack || {}
-  const unknown = 'UNKNOWN — recover from firmware'
   return (
-    <dl className="kv">
-      {panelName ? <Row label="Panel">{panelName}</Row> : null}
-      <Row label="Status">{String(target.device_status).toUpperCase()}</Row>
-      {scenarioState.motor ? (
-        // Smart Home MQTT Control (Panel 1, Phase 2E.1): the snapshot shape is
-        // scenario-owned and genuinely different from the Environmental
-        // target's (motor/broker_host vs environment/ip_address).
-        <>
-          <Row label="Broker">
-            {discovery.broker_discovered ? `${target.broker_host}:${target.broker_port}` : unknown}
+    <>
+      <dl className="kv">
+        {panelName ? <Row label="Panel">{panelName}</Row> : null}
+        {/* The package's own scenario title (never a raw scenario id), shown
+            only when it adds something to the panel name above. */}
+        {scenarioTitle && scenarioTitle.toLowerCase() !== (panelName || '').toLowerCase() ? (
+          <Row label="Scenario">{scenarioTitle}</Row>
+        ) : null}
+        {target.rows.map((row) => (
+          <Row key={row.id} label={row.label}>
+            {row.revealed ? row.value : <span className="kv-unknown">Not yet discovered</span>}
           </Row>
-          <Row label="Command topic">{discovery.topic_discovered ? target.command_topic : unknown}</Row>
-          {discovery.mqtt_observed ? (
-            <Row label="Motor">
-              {scenarioState.motor.running ? 'RUNNING' : 'STOPPED'}
-              {attack.spoof_active ? ' (SPOOFED)' : ''}
-            </Row>
-          ) : null}
-        </>
-      ) : (
-        <>
-          <Row label="Broker">
-            {discovery.broker_discovered ? `${target.ip_address}:${target.mqtt_port}` : unknown}
-          </Row>
-          <Row label="Topic">{discovery.topic_discovered ? target.mqtt_topic : unknown}</Row>
-          {discovery.mqtt_observed ? (
-            <Row label="Telemetry">
-              {scenarioState.environment.temperature}°C
-              {attack.spoof_active ? ' (SPOOFED)' : ''}
-            </Row>
-          ) : null}
-        </>
-      )}
-    </dl>
+        ))}
+      </dl>
+      {target.kind === TARGET_KIND.NONE ? <p className="empty-line">{target.summary}</p> : null}
+    </>
   )
 }
 
-export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
+export default function HackMode({ onQuit, onReset, onBuild, onMenu, participantId }) {
   const termRef = useRef(null)
   const inputBufferRef = useRef('')
 
@@ -170,6 +152,13 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
   // for a new session — no extra teardown code needed.
   const [scenarioEvents, setScenarioEvents] = useState([])
   const [scenarioState, setScenarioState] = useState(null)
+
+  // The scenario briefing from the backend's `session` frame (protocol v7):
+  // which scenario this is, its objectives, hints and guide, declared by the
+  // attached panel's package. null only until that first frame arrives; from
+  // then on the screen is correct without any scenario event having happened.
+  const [briefing, setBriefing] = useState(null)
+  const [guideOpen, setGuideOpen] = useState(false)
 
   // Shared ESP32 presence, from backend/app/hardware/ — the SAME
   // process-wide device state Build Mode reads, not a Hack-Mode-owned
@@ -209,14 +198,20 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
 
   const { status, sendInput, sendResize, sendHardwareStatus } = useHackSocket({
     participantId,
-    onSession: () => {
+    onSession: (message) => {
       // A `session` frame only ever arrives once per connection (right after
       // accept — see backend/app/websocket.py), so this is defensive rather
       // than something that fires mid-session: it guarantees a brand new
       // session can never inherit a stale event/state carried over in this
       // component's own state.
+      //
+      // It is also where the screen learns what it is looking at. The frame
+      // carries the scenario briefing and the target's state at attach, so
+      // objectives, hints and the target readout are right immediately — a
+      // resumed session then replays its events on top of that.
       setScenarioEvents([])
-      setScenarioState(null)
+      setScenarioState(message?.state ?? null)
+      setBriefing(readBriefing(message?.scenario))
     },
     // The backend's welcome banner arrives as an ordinary `output` frame
     // like any other, so it needs no special case: `applyPrompt` draws the
@@ -302,8 +297,20 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
   const device = status === CONNECTION_STATUS.CONNECTED ? hardware : UNKNOWN_HARDWARE
   const port = usbRepresentations(device)[0]
 
-  const objectives = deriveObjectives(scenarioState)
-  const progress = objectiveProgress(objectives.items)
+  // Objective progress is read from the EVENTS the backend recorded, against
+  // the events each objective declares it needs — the same rule Attack
+  // Completion Rate counts by. Never from a flag, a snapshot or a hint.
+  const eventTypes = useMemo(() => scenarioEvents.map((entry) => entry.event), [scenarioEvents])
+  const objectiveItems = useMemo(
+    () => (briefing ? objectiveStates(briefing.objectives, eventTypes) : []),
+    [briefing, eventTypes],
+  )
+  const progress = objectiveProgress(objectiveItems)
+  const hints = useMemo(
+    () => (briefing ? hintsWithProgress(briefing.hints, objectiveItems) : []),
+    [briefing, objectiveItems],
+  )
+  const connecting = briefing === null && status === CONNECTION_STATUS.CONNECTING
 
   // Activity Log: a new entry scrolls into view only if the reader was already
   // at/near the bottom.
@@ -321,27 +328,11 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
     [],
   )
 
-  // The single path a completed command line takes to the backend, whether
-  // it came from the terminal's own Enter key or a tool button below —
-  // there is no second, mock execution path.
+  // The single path a completed command line takes to the backend: the
+  // terminal's own Enter key. There is no launcher button and no second,
+  // mock execution path — a student types a command, exactly as on a real shell.
   function submitCommand(line) {
     sendInput(line)
-  }
-
-  function runTool(tool) {
-    // A tool button is a shortcut for typing a command line, so it makes no
-    // sense while a pager has the terminal's input — the backend would just
-    // ignore it as an unrecognised pager keystroke (see
-    // backend/app/pager.py's `PagerAction.from_input`), leaving a command
-    // echoed on screen that never ran. Page through or quit (q/Ctrl+C) first.
-    if (pagerActiveRef.current) return
-    // Tool buttons must send exactly what typing the command and pressing
-    // Enter would: this locally echoes it right after the prompt already on
-    // screen (mirroring the character-by-character echo `handleTerminalInput`
-    // does for real typing) and then sends it through the same
-    // `submitCommand` — one echo mechanism, one submission path.
-    writeOutput(`${tool.command}\r\n`)
-    submitCommand(tool.command)
   }
 
   // Local terminal line discipline: the browser still owns character echo,
@@ -429,8 +420,19 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
         title="Hack Mode"
         badge="Authorized lab only"
         onMenu={onMenu}
+        actions={
+          <button
+            type="button"
+            className="btn"
+            title="What this system is, your task and how to work"
+            onClick={() => setGuideOpen(true)}
+          >
+            <Icon name="info" size={14} />
+            Scenario guide
+          </button>
+        }
         meta={
-          objectives.kind === 'list' ? (
+          progress.total > 0 ? (
             <>
               <span>
                 Objectives {progress.done} / {progress.total}
@@ -454,9 +456,9 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
         <aside className="hack-col hack-col-left">
           <section className="card hack-card" aria-label="Objectives">
             <h2 className="hack-card-title">Objectives</h2>
-            {objectives.kind === 'list' ? (
+            {objectiveItems.length > 0 ? (
               <ul className="objectives">
-                {objectives.items.map((item) => (
+                {objectiveItems.map((item) => (
                   <li key={item.id} className={`objective is-${item.state}`}>
                     <Icon name={OBJECTIVE_ICON[item.state]} size={14} />
                     <span>{item.label}</span>
@@ -470,12 +472,11 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
                   </li>
                 ))}
               </ul>
-            ) : objectives.kind === 'none' ? (
-              <p className="empty-line">
-                <Icon name="info" size={14} /> No training objectives are defined for this panel yet.
-              </p>
             ) : (
-              <p className="empty-line">Objectives appear once the target reports its state.</p>
+              <p className="empty-line">
+                {briefing === null ? null : <Icon name="info" size={14} />}
+                {briefingNote(briefing, status, 'objectives')}
+              </p>
             )}
           </section>
 
@@ -503,10 +504,21 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
             </ul>
           </section>
 
-          <button type="button" className="btn btn-block" onClick={onBack}>
-            <Icon name="arrow-left" size={14} />
-            Back to menu
-          </button>
+          <div className="session-actions" role="group" aria-label="Session">
+            <button
+              type="button"
+              className="btn"
+              title="End this session and start a new one from the baseline"
+              onClick={onReset}
+            >
+              <Icon name="refresh" size={14} />
+              Reset
+            </button>
+            <button type="button" className="btn" title="End this session and return to the main menu" onClick={onQuit}>
+              <Icon name="arrow-left" size={14} />
+              Quit
+            </button>
+          </div>
         </aside>
 
         <section className="card hack-terminal" aria-label="Terminal">
@@ -544,32 +556,40 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
             <HackTerminal ref={termRef} onInput={handleTerminalInput} onResize={handleTerminalResize} />
           </div>
           <div className="terminal-foot">
-            <span>Commands run only through the trainer&apos;s real-tool toolbox. Type help to list them.</span>
+            <span>Commands run only through the trainer&apos;s controlled command set. Type help to list them.</span>
           </div>
         </section>
 
         <aside className="hack-col hack-col-right">
-          <section className="card hack-card" aria-label="Toolbox">
-            <h2 className="hack-card-title">Toolbox</h2>
-            <div className="tool-grid">
-              {TOOLS.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className="tool-chip"
-                  title={`${t.action}: runs ${t.command}`}
-                  aria-label={`${t.name} — ${t.action}`}
-                  onClick={() => runTool(t)}
-                >
-                  {t.name}
-                </button>
-              ))}
-            </div>
+          <section className="card hack-card is-grow" aria-label="Hints">
+            <h2 className="hack-card-title">Hints</h2>
+            {hints.length > 0 ? (
+              <ol className="hint-list">
+                {hints.map((hint) => (
+                  <li key={hint.id} className={`hint${hint.done ? ' is-done' : ''}`}>
+                    <Icon name={hint.done ? 'status-done' : 'info'} size={14} />
+                    <p>
+                      <RichText text={hint.text} />
+                      {hint.done ? <span className="sr-only"> — objective complete</span> : null}
+                    </p>
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="empty-line">
+                {briefing === null ? null : <Icon name="info" size={14} />}
+                {briefingNote(briefing, status, 'hints')}
+              </p>
+            )}
           </section>
 
           <section className="card hack-card" aria-label="Target device">
             <h2 className="hack-card-title">Target Device</h2>
-            <TargetDevice scenarioState={scenarioState} panelName={device.panel} />
+            <TargetDevice
+              scenarioState={scenarioState}
+              scenarioTitle={briefing?.title}
+              panelName={device.panel}
+            />
           </section>
 
           <button type="button" className="btn btn-primary btn-block hack-proceed" onClick={onBuild}>
@@ -585,6 +605,10 @@ export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
             top bar is the only difference between the two screens. */}
         <HardwareHeaderStatus hardware={device} />
       </StatusBar>
+
+      {guideOpen ? (
+        <ScenarioGuide briefing={briefing} connecting={connecting} onClose={() => setGuideOpen(false)} />
+      ) : null}
     </div>
   )
 }

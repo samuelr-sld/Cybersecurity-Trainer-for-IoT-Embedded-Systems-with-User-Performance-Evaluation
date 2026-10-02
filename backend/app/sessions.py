@@ -142,12 +142,19 @@ class SessionManager:
         # on `HackSession` (which stays ignorant of panels). Resume compares it
         # with the panel attached now; see `app/session_panel_guard.py`.
         self._panels: dict[str, str | None] = {}
+        # The scenario briefing the student was shown when each session was
+        # created (see `app/hack_briefing.py`), held HERE for the same reason
+        # as `_panels`: it is a plain JSON mapping, opaque to this module, and
+        # `HackSession` stays ignorant of packages. A reload re-attaches to the
+        # session and is told exactly what the first connection was.
+        self._briefings: dict[str, dict] = {}
 
     async def create(
         self,
         scenario: Scenario | None = None,
         participant_id: str | None = None,
         panel_id: str | None = None,
+        briefing: dict | None = None,
     ) -> HackSession:
         """Create and register a session with a fresh unique id.
 
@@ -174,6 +181,11 @@ class SessionManager:
         already resolved to a registered participant (or None) by the
         connection lifecycle via `app/participants.py`. It is stored, never
         looked up, here.
+
+        `briefing` is the scenario briefing the connection lifecycle already
+        built from the attached panel's package. It is stored, never
+        interpreted or built, here; None (every pre-briefing caller) means the
+        session has none.
         """
         session = HackSession(
             session_id=str(uuid.uuid4()),
@@ -184,6 +196,8 @@ class SessionManager:
         async with self._lock:
             self._sessions[session.session_id] = session
             self._panels[session.session_id] = panel_id
+            if briefing is not None:
+                self._briefings[session.session_id] = briefing
         return session
 
     async def get(self, session_id: str) -> HackSession | None:
@@ -213,6 +227,7 @@ class SessionManager:
         """
         self._residency.forget(session_id)
         self._panels.pop(session_id, None)
+        self._briefings.pop(session_id, None)
         return self._sessions.pop(session_id, None)
 
     # -- attach / detach / resume (a reload is not the end of a session) -----
@@ -235,6 +250,10 @@ class SessionManager:
     def panel_of(self, session_id: str) -> str | None:
         """The panel id this session was created against (None: none resolved)."""
         return self._panels.get(session_id)
+
+    def briefing_of(self, session_id: str) -> dict | None:
+        """The scenario briefing this session was created with (None: none)."""
+        return self._briefings.get(session_id)
 
     def claim(self, session_id: str) -> object:
         """Become the session's serving connection; returns the owner token."""

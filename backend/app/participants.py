@@ -5,17 +5,18 @@
         -> resolve_participant() -> HackSession / BuildSession.participant_id
         -> hack_sessions / build_sessions.participant_id -> Evaluation
 
-THE SMALLEST IDENTITY THE PLATFORM ALREADY HAD. The Student Access screen has
-always asked for a student number and a full name, and nothing else; before
-this module that pair lived only in React state and never reached the
-backend, so every recorded session had `participant_id = None` and EAC could
-never be computed. This module makes that same pair durable in the existing
-SQLite store. It adds no password, token, or authentication framework: the
+THE SMALLEST IDENTITY THE PLATFORM ALREADY HAD. A student REGISTERS once with
+a full name and a student number; this module stores that pair in the
+existing SQLite store. After that the student number alone is the identity:
+SIGN-IN takes only the number and retrieves the stored name. (Sign-in used to
+ask for the name too and compare it; that comparison is gone, so registration
+is the only place a name is ever supplied and the stored one is never
+overwritten.) It adds no password, token, or authentication framework: the
 trainer runs on an isolated, offline classroom network, and the identity's
 job is attributing recorded sessions to the right student, not access
 control. A client could name another registered student's number — exactly
-as it could type it into the existing sign-in form — and that limitation is
-stated rather than hidden.
+as it could type it into the sign-in form — and that limitation is stated
+rather than hidden.
 
 NEVER GUESSED. `resolve_participant` returns a participant id only when the
 supplied value is well-formed AND registered. Anything else — absent,
@@ -52,7 +53,7 @@ class ParticipantExistsError(ParticipantError):
 
 
 class ParticipantNotFoundError(ParticipantError):
-    """Sign-in named no registered participant with that number and name."""
+    """Sign-in named a student number nobody has registered."""
 
 
 def normalize_participant_id(raw: object) -> str | None:
@@ -104,13 +105,15 @@ class ParticipantService:
             raise ParticipantExistsError("that student number is already registered")
         return record
 
-    def sign_in(self, participant_id: object, full_name: object) -> ParticipantRecord:
-        pid = normalize_participant_id(participant_id)
-        name = normalize_full_name(full_name)
-        record = None if pid is None else self._store().participant(pid)
-        if record is None or name is None or record.full_name.lower() != name.lower():
+    def sign_in(self, participant_id: object) -> ParticipantRecord:
+        """The stored participant for a student number. No name is asked for:
+        registration is where the number is bound to a name, and sign-in
+        retrieves that binding. A malformed number cannot have been registered,
+        so it is answered exactly like an unknown one."""
+        record = self.get(participant_id)
+        if record is None:
             raise ParticipantNotFoundError(
-                "no registered student matches that student number and full name"
+                "no student is registered with that student number"
             )
         return record
 

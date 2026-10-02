@@ -51,7 +51,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from app.scenarios.base import Scenario, ScenarioOutcome
+from app.scenarios.base import Scenario, ScenarioOutcome, readout_row
 from app.scenarios.events import ScenarioEvent, ScenarioEventType
 from app.scenarios.smart_home_state import SmartHomeState
 
@@ -876,4 +876,31 @@ class SmartHomeMQTTScenario(Scenario):
             "completion": {
                 "attack_successful": state.completion.attack_successful,
             },
+            # What the TARGET DEVICE panel shows, gated by discovery here so the
+            # page holds no per-device knowledge. Display only: computed from
+            # the same state the keys above report, it changes no behaviour.
+            "readout": [
+                readout_row(
+                    "status", "Status", str(state.target.device_status).upper(), revealed=True
+                ),
+                readout_row(
+                    "broker",
+                    "Broker",
+                    f"{state.target.broker_host}:{state.target.broker_port}",
+                    revealed=state.discovery.broker_discovered,
+                ),
+                readout_row(
+                    "command_topic",
+                    "Command topic",
+                    state.target.command_topic,
+                    revealed=state.discovery.topic_discovered,
+                ),
+                readout_row(
+                    "motor",
+                    "Motor",
+                    ("RUNNING" if state.motor.running else "STOPPED")
+                    + (" (SPOOFED)" if state.attack.spoof_active else ""),
+                    revealed=state.discovery.mqtt_observed,
+                ),
+            ],
         }

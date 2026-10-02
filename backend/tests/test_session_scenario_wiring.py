@@ -205,13 +205,22 @@ def test_an_unprimed_monitor_selection_reports_not_checked(no_board) -> None:
     assert selection.panel_id is None
 
 
-def test_banner_and_session_frames_are_unchanged(client: TestClient, no_board) -> None:
-    """Selection sends nothing: the first two frames are exactly what they
-    were before this phase, in the same order."""
+def test_banner_and_session_frames_keep_their_order(client: TestClient, no_board) -> None:
+    """Selection sends no frame of its own: the first two frames are still the
+    session frame and then the banner, in that order. Protocol v7 only ADDED
+    `scenario` and `state` to the session frame (see
+    tests/test_hack_briefing.py); no frame was added or reordered."""
     with client.websocket_connect("/ws/hack") as ws:
         session_frame = ws.receive_json()
         assert session_frame["type"] == "session"
-        assert set(session_frame) == {"type", "session_id", "protocol_version", "resumed"}
+        assert set(session_frame) == {
+            "type",
+            "session_id",
+            "protocol_version",
+            "resumed",
+            "scenario",
+            "state",
+        }
         banner = ws.receive_json()
         assert banner["type"] == "output"
         assert "hack mode channel established" in banner["data"]
