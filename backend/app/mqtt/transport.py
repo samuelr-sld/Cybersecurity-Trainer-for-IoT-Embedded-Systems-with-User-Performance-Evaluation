@@ -117,8 +117,12 @@ class MqttTransport(Protocol):
         """Subscribe to a topic. Raises `MqttTransportError` on rejection."""
         ...
 
-    def publish(self, topic: str, payload: str) -> None:
+    def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
         """Publish one payload and wait for the broker to acknowledge it.
+
+        `retain` asks the broker to keep this as the topic's last-known
+        message, delivered immediately to a client that subscribes later —
+        ordinary MQTT retain semantics, not something this wrapper invents.
 
         Raises `MqttTransportError` if the publish is rejected or not
         acknowledged within the settings' publish timeout.
@@ -230,10 +234,10 @@ class PahoMqttTransport:
                 f"the broker rejected a subscription to {topic!r} (code {code})"
             )
 
-    def publish(self, topic: str, payload: str) -> None:
+    def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
         if self._client is None:
             raise MqttTransportError("cannot publish before connect()")
-        info = self._client.publish(topic, payload, qos=1)
+        info = self._client.publish(topic, payload, qos=1, retain=retain)
         try:
             info.wait_for_publish(timeout=self._settings.publish_timeout_seconds)
         except Exception as error:  # noqa: BLE001

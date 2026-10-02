@@ -132,6 +132,17 @@ class LiveMqttLink:
         report exactly that state. Returns what actually happened; never
         raises for a transport failure (that is one of the reportable
         outcomes), and always closes the connection.
+
+        Published retained. The real device never republishes a command it
+        receives (only its own state, on `state_topic`), and this publish
+        itself is gone from the wire the instant the broker delivers it — so
+        a `mosquitto_sub` on `topic` started even a moment later would
+        otherwise see no legitimate way to ever observe this command, no
+        matter how many times it is reissued. Retaining it is ordinary MQTT
+        behaviour (the broker genuinely holds this exact message as the
+        topic's last-known value), not a fabricated observation: a later
+        subscriber really is being told the truth about what was last
+        published here.
         """
         try:
             transport = self.transport_factory(self.settings)
@@ -142,7 +153,7 @@ class LiveMqttLink:
         try:
             transport.subscribe(self.state_topic)
             try:
-                transport.publish(topic, payload)
+                transport.publish(topic, payload, retain=True)
             except MqttTransportError as error:
                 return LivePublishOutcome(
                     connected=True, published=False, observed_state=None, error=str(error)

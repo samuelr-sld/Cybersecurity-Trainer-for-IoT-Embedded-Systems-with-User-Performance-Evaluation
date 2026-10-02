@@ -51,6 +51,7 @@ class FakeTransport:
         self._publish_error = publish_error
         self._inbox = list(inbox or [])
         self.published: list[tuple[str, str]] = []
+        self.retained: list[tuple[str, str]] = []
         self.subscribed: list[str] = []
         self.closed = False
 
@@ -61,10 +62,12 @@ class FakeTransport:
     def subscribe(self, topic: str) -> None:
         self.subscribed.append(topic)
 
-    def publish(self, topic: str, payload: str) -> None:
+    def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
         if self._publish_error:
             raise MqttTransportError(self._publish_error)
         self.published.append((topic, payload))
+        if retain:
+            self.retained.append((topic, payload))
 
     def next_message(self, timeout: float):
         if self._inbox:
@@ -122,6 +125,20 @@ def test_scenario_is_live_capable_and_uses_the_injected_transport() -> None:
     # It really published through the injected transport, not the simulation.
     assert fake.published == [(CONTROL_TOPIC, "START")]
     assert fake.closed is True
+
+
+def test_forged_command_is_published_retained() -> None:
+    """The real device never republishes a command on `CONTROL_TOPIC` (only
+    its own state, on `STATE_TOPIC`), and a one-shot publish/observe pair
+    cannot overlap in time unless something else is publishing concurrently.
+    Retaining the forged command is what lets a `mosquitto_sub` run AFTER
+    the attack still see it — this is the fix for objective 4 never
+    completing against a live broker (see hackmode-panel1-attack-sequence
+    memory / the 2026-10 live-MQTT session)."""
+    scenario = SmartHomeMQTTScenario()
+    fake = _attach(scenario, FakeTransport(_settings(), inbox=[MqttMessage(STATE_TOPIC, "RUNNING")]))
+    scenario.publish(BROKER, None, CONTROL_TOPIC, "START")
+    assert fake.retained == [(CONTROL_TOPIC, "START")]
 
 
 def test_live_scenario_can_be_constructed_with_the_link() -> None:
@@ -255,6 +272,43 @@ def test_observe_command_topic_without_traffic_is_honest() -> None:
     assert "mqtt_observed" not in _types(outcome)
     assert scenario.state.discovery.mqtt_observed is False
     assert "no control traffic" in "\n".join(outcome.lines).lower()
+
+
+def test_forge_then_observe_completes_the_attack_live() -> None:
+    """The regression this retain fix closes: against a real broker, the
+    device itself never republishes a command (only its own state), and a
+    student's single sequential terminal cannot run `mosquitto_sub` and
+    `mosquitto_pub` at the same instant — so before this fix, `mqtt_observed`
+    (and therefore `attack_completed`, which requires it) could never fire
+    through any realistic, single-session student action. The forged publish
+    is retained, so a `mosquitto_sub` run AFTER the attack still receives it,
+    exactly as a real broker would redeliver a retained message to a new
+    subscriber. The inbox below models that redelivery: the device's state
+    confirmation is consumed during `publish`, then the retained command
+    message is what the broker hands back on the very next connection.
+    """
+    scenario = SmartHomeMQTTScenario()
+    fake = _attach(
+        scenario,
+        FakeTransport(
+            _settings(),
+            inbox=[MqttMessage(STATE_TOPIC, "RUNNING"), MqttMessage(CONTROL_TOPIC, "START")],
+        ),
+    )
+    # The rest of the discovery chain (pure in-memory, no transport) — a
+    # realistic student has already done this before ever touching MQTT.
+    scenario.extract_firmware()
+    scenario.analyze_firmware(None)
+
+    publish_outcome = scenario.publish(BROKER, None, CONTROL_TOPIC, "START")
+    assert "spoof_succeeded" in _types(publish_outcome)
+    assert "attack_completed" not in _types(publish_outcome)  # not observed yet
+    assert fake.retained == [(CONTROL_TOPIC, "START")]
+
+    observe_outcome = scenario.observe(BROKER, None, CONTROL_TOPIC)
+    assert "mqtt_observed" in _types(observe_outcome)
+    assert "attack_completed" in _types(observe_outcome)
+    assert scenario.state.completion.attack_successful is True
 
 
 # --- N: the provisioned password never reaches the activity log -------------

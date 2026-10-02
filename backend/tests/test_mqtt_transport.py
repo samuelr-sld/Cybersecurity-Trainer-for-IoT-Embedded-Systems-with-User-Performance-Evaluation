@@ -100,7 +100,7 @@ class FakePahoClient:
     def subscribe(self, topic: str, qos: int = 0):
         return (self._subscribe_code, 1)
 
-    def publish(self, topic: str, payload: str, qos: int = 0):
+    def publish(self, topic: str, payload: str, qos: int = 0, retain: bool = False):
         if self._publish_raises:
             return FakeInfo(rc=0, raise_on_wait=True)
         return FakeInfo(rc=self._publish_rc)
@@ -256,7 +256,7 @@ class FakeTransport:
             raise MqttTransportError(self._subscribe_error)
         self.subscribed.append(topic)
 
-    def publish(self, topic: str, payload: str) -> None:
+    def publish(self, topic: str, payload: str, *, retain: bool = False) -> None:
         if self._publish_error:
             raise MqttTransportError(self._publish_error)
         self.published.append((topic, payload))
