@@ -244,6 +244,10 @@
 }
 
 @media (max-height: 800px) {
+  .menu-screen {
+    padding-top: 72px;
+  }
+
   .menu-footer {
     height: 44px;
   }

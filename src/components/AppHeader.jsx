@@ -1,9 +1,11 @@
+import FullscreenToggle from './FullscreenToggle'
 import Icon from './Icon'
 import Logo from './Logo'
 
 /**
  * The top bar every post-sign-in screen shares: menu button + screen title on
- * the left, the CT mark centred, and the screen's own actions on the right.
+ * the left, the CT mark centred, and the screen's own actions on the right,
+ * ending with the fullscreen control (the same place on every screen).
  * Hardware status deliberately does NOT live here — it is the status bar's job
  * (components/StatusBar.jsx) so it reads the same in every mode.
  */
@@ -21,6 +23,7 @@ export default function AppHeader({ title, badge, meta, actions, onMenu }) {
       <div className="topbar-right">
         {meta ? <div className="topbar-meta">{meta}</div> : null}
         {actions}
+        <FullscreenToggle />
       </div>
     </header>
   )

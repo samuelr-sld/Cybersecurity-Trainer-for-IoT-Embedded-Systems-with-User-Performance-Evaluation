@@ -57,6 +57,10 @@ const ICONS = {
       </>
     ),
   },
+  // The whole screen (not one panel, as maximize/restore are): corner brackets
+  // pointing out to enter fullscreen, and in to leave it.
+  'fullscreen-enter': { box: '0 0 20 20', base: STROKE, body: <path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4" strokeWidth="1.8" /> },
+  'fullscreen-exit': { box: '0 0 20 20', base: STROKE, body: <path d="M7 3v4H3M13 3v4h4M17 13h-4v4M3 13h4v4" strokeWidth="1.8" /> },
   'chevron-left': { box: '0 0 12 12', base: STROKE, body: <path d="M8 2L4 6l4 4" strokeWidth="1.7" /> },
   'chevron-right': { box: '0 0 12 12', base: STROKE, body: <path d="M4 2l4 4-4 4" strokeWidth="1.7" /> },
   'caret-up': { box: '0 0 10 10', base: FILL, body: <path d="M5 2l4 6H1z" /> },

@@ -64,3 +64,24 @@ test('backend error text is shown as a sentence', () => {
   assert.equal(sentenceCase(''), '')
   assert.equal(sentenceCase(undefined), '')
 })
+
+// Blockly loads its zoom/trash sprite, cursors and sounds from
+// https://static.blockly.com/media/ unless `media` says otherwise. That is a
+// third-party fetch the trainer cannot make (it has no Internet), so they are
+// served from the app's own public/ folder.
+test('Blockly is injected with local media and no sounds', () => {
+  const source = readFileSync(join(root, 'src/components/BlocklyWorkspace.jsx'), 'utf8')
+  assert.match(source, /media:\s*`\$\{import\.meta\.env\.BASE_URL\}blockly-media\/`/, 'media must point at the app itself')
+  assert.match(source, /sounds:\s*false/, 'sounds must be off (their files are not shipped)')
+})
+
+test('public/blockly-media is a faithful copy of the installed Blockly media (minus sounds)', () => {
+  const shipped = join(root, 'public/blockly-media')
+  const upstream = join(root, 'node_modules/blockly/media')
+  const files = readdirSync(shipped)
+  assert.ok(files.includes('sprites.svg'), 'the zoom/trash sprite must be shipped')
+  assert.ok(!files.some((name) => /\.(mp3|ogg|wav)$/.test(name)), 'no sound files are shipped')
+  for (const name of files) {
+    assert.deepEqual(readFileSync(join(shipped, name)), readFileSync(join(upstream, name)), `${name} differs from node_modules/blockly/media`)
+  }
+})

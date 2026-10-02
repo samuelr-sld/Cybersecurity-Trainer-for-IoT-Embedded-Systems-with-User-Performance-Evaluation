@@ -1,0 +1,4 @@
+# Files that run on the Raspberry Pi (Linux) keep LF line endings even when
+# checked out on Windows (core.autocrlf=true): a CR breaks a script's #! line
+# and a systemd unit. Everything else keeps the repository's existing handling.
+deploy/* text eol=lf

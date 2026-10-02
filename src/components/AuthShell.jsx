@@ -1,5 +1,6 @@
 import { APP_VERSION } from '../appInfo'
 import BackendStatusPill from './BackendStatusPill'
+import FullscreenToggle from './FullscreenToggle'
 import Icon from './Icon'
 import Logo from './Logo'
 
@@ -14,6 +15,7 @@ export default function AuthShell({ tagline, onMenu, children }) {
       <button type="button" className="icon-btn auth-menu" aria-label="Open menu" onClick={onMenu}>
         <Icon name="menu" size={32} />
       </button>
+      <FullscreenToggle className="is-corner" />
       <header className="auth-brand">
         <Logo width={132} />
         <p className="auth-tagline">{tagline}</p>

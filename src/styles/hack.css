@@ -153,6 +153,12 @@
   gap: 4px;
 }
 
+/* Copy / Clear fill the bar they sit in (44px, border included). */
+.terminal-bar .terminal-actions .icon-btn.is-sm {
+  width: 44px;
+  height: 43px;
+}
+
 .terminal-screen {
   flex: 1;
   min-height: 0;

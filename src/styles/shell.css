@@ -144,7 +144,15 @@
 }
 
 .hw-field.is-cyclable {
+  position: relative;
   cursor: pointer;
+}
+
+/* 12px of text in a 36px bar: the tappable area is the bar's full height. */
+.hw-field.is-cyclable::after {
+  content: '';
+  position: absolute;
+  inset: -12px -6px;
 }
 
 .hw-field.is-cyclable .hw-value {

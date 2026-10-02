@@ -141,6 +141,13 @@ export default function BlocklyWorkspace({
       zoom: { controls: true, wheel: true, startScale: 0.9, maxScale: 3, minScale: 0.4 },
       move: { scrollbars: true, drag: true, wheel: false },
       trashcan: true,
+      // Unless told otherwise Blockly fetches its zoom/trash sprite, cursors and
+      // sounds from its own project's web server. The trainer has no Internet,
+      // so they come from the app itself (public/blockly-media/, a copy of
+      // node_modules/blockly/media without the sound files) and Blockly stays
+      // silent. src/offline.test.js pins both.
+      media: `${import.meta.env.BASE_URL}blockly-media/`,
+      sounds: false,
     })
     workspaceRef.current = workspace
 

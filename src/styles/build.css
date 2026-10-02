@@ -437,8 +437,16 @@ button.tree-row:hover {
 }
 
 .tab-workspace .tab-close {
+  position: relative;
   padding: 0 14px 0 8px;
   color: var(--muted);
+}
+
+/* 32px wide: the tappable area reaches 4px further each side. */
+.tab-workspace .tab-close::after {
+  content: '';
+  position: absolute;
+  inset: 0 -4px;
 }
 
 .tab-workspace .tab-close:hover {
@@ -793,6 +801,17 @@ button.tree-row:hover {
 .terminal-actions .icon-btn.is-sm {
   width: 40px;
   height: 34px;
+}
+
+/* ... with an invisible 44 x 44 tappable area around each. */
+.terminal-head .terminal-actions .icon-btn.is-sm {
+  position: relative;
+}
+
+.terminal-head .terminal-actions .icon-btn.is-sm::after {
+  content: '';
+  position: absolute;
+  inset: -5px -2px;
 }
 
 .terminal-output {

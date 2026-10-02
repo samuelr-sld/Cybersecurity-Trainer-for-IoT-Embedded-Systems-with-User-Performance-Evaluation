@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import FullscreenToggle from '../components/FullscreenToggle'
 import Icon from '../components/Icon'
 import Logo from '../components/Logo'
 import { APP_VERSION } from '../appInfo'
@@ -121,6 +122,7 @@ export default function MainMenu({ student, onHack, onBuild, onEval, onMenu }) {
       <button type="button" className="icon-btn menu-burger" aria-label="Open menu" onClick={onMenu}>
         <Icon name="menu" size={32} />
       </button>
+      <FullscreenToggle className="is-corner" />
 
       <main className="menu-panel">
         <header className="menu-head">

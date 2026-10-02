@@ -119,6 +119,78 @@ still starts without it.
 Starting the backend (by hand or as a service) runs one device detection, which
 reads the ESP32's MAC and resets the board once. It writes no flash.
 
+### Desktop launcher (the touchscreen icon)
+
+The Pi is operated as a touchscreen appliance: the backend service above starts
+at boot, and a student taps a **Cybersecurity Trainer** icon on the desktop.
+Nothing opens the browser at boot. Install it once on the Pi, as the desktop
+user (no sudo, no package):
+
+```bash
+sh deploy/install-desktop-launcher.sh               # install / refresh
+sh deploy/install-desktop-launcher.sh --uninstall   # remove
+```
+
+It writes `~/Desktop/cybertrainer.desktop` and the same entry in
+`~/.local/share/applications/` from `deploy/cybertrainer.desktop.in` (this
+checkout's paths filled in, icon `public/favicon.svg`), and turns on pcmanfm's
+"Don't ask options on launch executable file" (`quick_exec=1` in
+`~/.config/libfm/libfm.conf`). Without that one preference Raspberry Pi OS asks
+"Execute / Execute in Terminal / Open / Cancel" on every tap; it applies the
+next time the desktop starts (log out and in, or reboot), and `--uninstall`
+leaves it as it is.
+
+A tap runs `deploy/cybertrainer-launcher.sh`:
+
+1. If `cybertrainer-backend.service` is **not active** it is started
+   (`sudo -n systemctl start --no-block`, or plain `systemctl`, which asks
+   through the desktop's polkit agent). An active or still-starting service is
+   left alone: it is never restarted, and no second uvicorn is ever created.
+2. It waits (up to 60 s, with a short "Starting the trainer..." notice) for
+   `http://localhost:8000/` to answer, and fails fast if the unit enters
+   `failed`.
+3. It opens that address in the desktop's default browser (else the first of
+   chromium / firefox / epiphany found) as a normal window. Chromium is given
+   `--password-store=basic`: the desktop logs in automatically, so the login
+   keyring is locked, and Chromium would otherwise stop on an "Unlock Keyring"
+   password box before loading the page.
+
+The address is `localhost`, never a LAN address, so the Pi's own screen works
+with only the `CyberTrainer` access point up and no home Wi-Fi or Internet;
+laptops on the access point use `http://192.168.50.1:8000/` directly. A failure
+shows a dialog and is written to `~/.cache/cybertrainer/launcher.log`.
+Fullscreen is the app's own header control (top-right), never automatic.
+`tests/test_deploy_launcher.py` runs the real script against fake `systemctl` /
+`sudo` / `curl` / browsers and pins all of the above.
+
+### On-screen keyboard (touchscreen)
+
+A web page cannot start a program, and the trainer must not fake a keyboard in
+JavaScript (xterm, Blockly and the text fields keep the browser's normal input),
+so the keyboard belongs to the desktop and appears when a text field is tapped.
+This Pi boots the **X11** session (`rpd-x`: Openbox + lxpanel-pi + pcmanfm);
+squeekboard, which comes with Raspberry Pi OS, only runs under the Wayland
+session, so **Onboard** is the keyboard used here. Two steps:
+
+```bash
+sudo apt install onboard at-spi2-core     # once, WITH Internet (the AP has none)
+sh deploy/install-touch-keyboard.sh       # per user; --uninstall undoes it
+```
+
+`at-spi2-core` is the accessibility bus: without it Chromium cannot tell Onboard
+that a field was tapped and only the floating keyboard icon works. The script
+installs nothing; it sets Onboard's behaviour for the current user (auto-show on
+tap, hide on a physical key, a floating toggle icon, above a fullscreen browser,
+starts hidden, accessibility on so Onboard never asks the student) and adds
+`~/.config/autostart/cybertrainer-onboard.desktop`, because Onboard's own
+autostart entry only applies to Unity and MATE. It applies at the next login
+(or `setsid onboard &`). On a Pi without Internet, copy the `.deb` files for
+`onboard`, `onboard-common`, `onboard-data`, `at-spi2-core` and their
+dependencies from a networked machine. Checked on the Pi with synthetic taps in
+Chromium (auto-show, typing into the page, above a fullscreen window); real
+finger input on the 1280x800 panel is not yet verified, and the keyboard's size
+and position are Onboard's defaults (drag/resize it once and Onboard remembers).
+
 ### Lab environment (Panel 1 live MQTT / Build validation)
 
 Hack Mode's live attack path and Build Mode's remediation validation read their
