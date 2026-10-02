@@ -1,0 +1,540 @@
+/* Evaluation (Dashboard.jsx) and the instructor student list. */
+
+.eval-nav {
+  width: 188px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.eval-nav-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.generated-card {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--base);
+}
+
+.generated-card .label-caps {
+  font-size: 10px;
+}
+
+.generated-card .mono {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.generated-card .mono span {
+  display: block;
+}
+
+.eval-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+.eval-cards {
+  /* Grow to fill the page, but never shrink below the content: long metric
+     explanations make the page scroll instead of squeezing the tiles. */
+  flex: 1 0 auto;
+  display: flex;
+  gap: 12px;
+}
+
+.eval-card {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px;
+}
+
+.eval-card.is-fill {
+  min-height: 0;
+}
+
+.eval-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.section-title {
+  font: 700 14px/1.2 var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.section-sub {
+  margin: 8px 0 12px;
+  font: 400 12.5px/1.4 var(--font-sans);
+  color: var(--muted-soft);
+}
+
+.eval-empty {
+  padding: 16px 0;
+  color: var(--muted-soft);
+  font: 400 14px/1.5 var(--font-sans);
+}
+
+.eval-legend {
+  margin-top: auto;
+  padding-top: 4px;
+  font: 400 12px/1.5 var(--font-sans);
+  color: var(--muted);
+}
+
+/* --- context ------------------------------------------------------------------------- */
+
+.eval-context {
+  flex: none;
+  padding: 14px 18px 16px;
+}
+
+.context-grid {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1.3fr 1.3fr;
+  gap: 12px 18px;
+  margin-top: 12px;
+}
+
+.context-wide {
+  grid-column: span 3;
+}
+
+.context-value {
+  margin-top: 7px;
+  font: 500 15px/1.3 var(--font-sans);
+  overflow-wrap: anywhere;
+}
+
+.context-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.context-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  min-height: 56px;
+  padding: 8px 16px;
+}
+
+.context-bar-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font: 500 15px/1.2 var(--font-sans);
+}
+
+.context-bar-action {
+  margin-left: auto;
+}
+
+/* --- metric grids ----------------------------------------------------------------------- */
+
+.kpi-grid {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  /* Rows fit their text. When a card has spare height (a tall screen) the space
+     sits between the tiles and the card's button, which stays anchored to the
+     bottom, instead of stretching the tiles into large empty boxes. */
+  grid-auto-rows: auto;
+  align-content: start;
+}
+
+.kpi-grid .kpi {
+  min-height: 128px;
+}
+
+.eval-card > .btn {
+  margin-top: auto;
+}
+
+.kpi-grid.is-two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.kpi-grid.is-three {
+  flex: none;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.kpi-grid.is-four {
+  flex: none;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.kpi.is-wide {
+  grid-column: span 2;
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 18px 0 8px;
+}
+
+.history-head h3 {
+  font: 700 15px/1.2 var(--font-sans);
+}
+
+.history-table {
+  flex: 1;
+  min-height: 120px;
+}
+
+.data-table .is-na {
+  color: var(--muted);
+}
+
+/* --- workflow --------------------------------------------------------------------------- */
+
+.legend {
+  display: flex;
+  gap: 16px;
+  font: 500 12px/1 var(--font-sans);
+  color: var(--muted-soft);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.legend-item::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+}
+
+.legend-item.is-hack::before {
+  color: var(--info);
+}
+
+.legend-item.is-build::before {
+  color: var(--success);
+}
+
+.phases {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 8px;
+}
+
+.phase {
+  position: relative;
+  min-width: 0;
+  padding: 44px 20px 12px 0;
+}
+
+.phase::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  left: 34px;
+  right: 4px;
+  height: 2px;
+  background: var(--line-strong);
+}
+
+.phase:last-child::before {
+  display: none;
+}
+
+.phase-node {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  font: 700 13px/1 var(--font-sans);
+}
+
+.phase.is-hack .phase-node {
+  color: var(--info);
+}
+
+.phase.is-build .phase-node {
+  color: var(--success);
+}
+
+.phase h3 {
+  margin-bottom: 8px;
+  font: 700 18px/1.2 var(--font-sans);
+}
+
+.phase-fact {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.phase-fact dd {
+  font: 400 13.5px/1.4 var(--font-sans);
+}
+
+.phase-metric {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font: 700 26px/1 var(--font-display);
+}
+
+.phase-note {
+  display: block;
+  margin-top: 4px;
+  font: 400 12px/1.4 var(--font-sans);
+  color: var(--muted-soft);
+}
+
+/* --- instructor student list ----------------------------------------------------------------- */
+
+.instructor-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+
+.summary-row {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  padding: 14px 18px 16px;
+}
+
+.summary-value {
+  margin-top: 10px;
+  font: 700 34px/1 var(--font-display);
+}
+
+.summary-caption {
+  margin-top: 8px;
+  font: 400 14px/1.2 var(--font-sans);
+  color: var(--muted-soft);
+}
+
+.student-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.student-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.list-title {
+  font: 700 17px/1.2 var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.student-list-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(320px, 40vw);
+  height: var(--touch-target);
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--base);
+  color: var(--muted);
+}
+
+.search-field:focus-within {
+  outline: 2px solid var(--text);
+  outline-offset: 1px;
+  border-color: var(--text);
+}
+
+.search-field input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--text);
+  font: 400 14px/1 var(--font-sans);
+}
+
+.search-field input::placeholder {
+  color: var(--muted);
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.filter-chip {
+  height: 40px;
+  padding: 0 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text);
+  font: 600 14px/1 var(--font-sans);
+}
+
+.filter-chip:hover:not(.is-on) {
+  background: var(--raised);
+  border-color: var(--line-hover);
+}
+
+.filter-chip.is-on {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-primary);
+}
+
+.filter-count {
+  margin-left: 4px;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.student-table {
+  flex: 1;
+  min-height: 120px;
+}
+
+.student-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font: 500 14px/1.2 var(--font-sans);
+}
+
+.avatar {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--raised);
+  font: 700 12px/1 var(--font-sans);
+  color: var(--text-soft);
+}
+
+.cell-action {
+  text-align: right;
+}
+
+.student-list-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font: 400 14px/1 var(--font-sans);
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pager-page {
+  color: var(--muted-soft);
+  font-size: 13px;
+}
+
+.hub-state {
+  color: var(--text);
+}
+
+@media (max-width: 1100px) {
+  .eval-cards {
+    flex-direction: column;
+  }
+
+  .kpi-grid.is-four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .kpi-grid.is-three {
+    grid-template-columns: 1fr;
+  }
+
+  .context-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .context-wide {
+    grid-column: span 2;
+  }
+
+  .summary-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .phases {
+    grid-template-columns: 1fr;
+  }
+
+  .phase::before {
+    display: none;
+  }
+}

@@ -12,12 +12,28 @@ function readCssVar(name, fallback) {
   return value || fallback
 }
 
+// The design tokens (src/styles/tokens.css) as an xterm theme. xterm draws
+// bold ANSI colours in their "bright" variant, so each colour the prompt and
+// notices use is set for both the normal and bright slot.
 function buildTheme() {
+  const success = readCssVar('--success', '#b9f56b')
+  const info = readCssVar('--info', '#7aa7e0')
+  const danger = readCssVar('--danger', '#ff7b7b')
+  const warning = readCssVar('--warning', '#f2d34a')
   return {
-    background: readCssVar('--term', '#0d0d0d'),
-    foreground: '#d8d8d8',
-    cursor: '#d8d8d8',
-    selectionBackground: '#3a3a3a',
+    background: readCssVar('--base', '#141316'),
+    foreground: readCssVar('--text', '#e5e4e5'),
+    cursor: readCssVar('--text', '#e5e4e5'),
+    cursorAccent: readCssVar('--base', '#141316'),
+    selectionBackground: 'rgba(122, 167, 224, 0.35)',
+    green: success,
+    brightGreen: success,
+    blue: info,
+    brightBlue: info,
+    red: danger,
+    brightRed: danger,
+    yellow: warning,
+    brightYellow: warning,
   }
 }
 
@@ -59,6 +75,21 @@ const HackTerminal = forwardRef(function HackTerminal({ onInput, onResize, bootT
     focus() {
       termRef.current?.focus()
     },
+    // The whole scrollback as plain text (what "copy output" copies). Wrapped
+    // lines are rejoined so a long command is not split at the terminal width.
+    getText() {
+      const buffer = termRef.current?.buffer.active
+      if (!buffer) return ''
+      const lines = []
+      for (let i = 0; i < buffer.length; i += 1) {
+        const line = buffer.getLine(i)
+        if (!line) continue
+        const text = line.translateToString(true)
+        if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text
+        else lines.push(text)
+      }
+      return lines.join('\n').replace(/\s+$/, '')
+    },
   }))
 
   useEffect(() => {
@@ -68,8 +99,9 @@ const HackTerminal = forwardRef(function HackTerminal({ onInput, onResize, bootT
     const term = new Terminal({
       convertEol: true,
       cursorBlink: true,
-      fontFamily: 'var(--mono)',
-      fontSize: 13,
+      fontFamily: readCssVar('--font-mono', 'monospace'),
+      fontSize: 14,
+      lineHeight: 1.45,
       theme: buildTheme(),
     })
     const fitAddon = new FitAddon()

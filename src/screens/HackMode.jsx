@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader'
 import HackTerminal from '../components/HackTerminal'
+import Icon from '../components/Icon'
+import StatusBar from '../components/StatusBar'
 import useHackSocket, { CONNECTION_STATUS } from '../hooks/useHackSocket'
 import HardwareHeaderStatus from '../components/HardwareHeaderStatus'
-import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE } from '../hardware/deviceState'
-import { GUIDED_STEPS } from '../data'
+import { HARDWARE_POLL_INTERVAL_MS, UNKNOWN_HARDWARE, usbRepresentations } from '../hardware/deviceState'
 import { PROMPT_DISPLAY, applyPromptFrame, initialPromptState } from '../hackTerminal/terminalPromptModel'
 import { foundationSummary, hasActivityTarget } from '../hackTerminal/targetDeviceModel'
+import { OBJECTIVE_STATE, deriveObjectives, objectiveProgress } from '../hackTerminal/objectivesModel'
+import { hackEventLabel } from '../hackTerminal/eventLabels'
+import { copyToClipboard } from '../hackTerminal/clipboard'
 
 // Phase 2C: the backend's real-tool toolbox (backend/app/commands/registry.py)
 // in the order the learning progression uses them — understand the device
@@ -33,34 +37,6 @@ const TOOLS = [
   { id: 'pub', name: 'mosquitto_pub', action: 'publish', command: 'mosquitto_pub' },
 ]
 
-// LIVE HACK METRICS stays hardcoded on purpose: TTE/attempt-count/efficiency
-// scoring is Phase 2E's job, not this phase's — see CLAUDE.md and the 2D-C
-// brief. Everything else on this screen (Guided Steps, Activity Log, Target
-// Device) is now driven by scenarioEvents/scenarioState below.
-const ATTEMPTS = 3
-
-// Backend `ScenarioEventType` values (app/scenarios/events.py) -> Activity
-// Log copy. Deliberately a plain lookup, not a switch: an event type this
-// map doesn't know about (the closed set changed) falls back to the raw
-// value below rather than silently dropping the row.
-const EVENT_LABELS = {
-  firmware_extracted: 'Firmware extracted',
-  firmware_analyzed: 'Firmware analyzed',
-  broker_discovered: 'MQTT broker discovered',
-  topic_discovered: 'MQTT topic discovered',
-  // Key is the generic `scan` (backend/app/scenarios/events.py) — the
-  // `nmap` command's one event, kept free of "MQTT" so a future scenario's
-  // own recon can reuse it. The label stays MQTT-specific because that is
-  // what this scenario's scan actually found; only the event name is generic.
-  scan: 'MQTT service scanned',
-  mqtt_observed: 'MQTT telemetry observed',
-  spoof_attempted: 'Spoof attempt',
-  spoof_rejected: 'Spoof rejected',
-  spoof_succeeded: 'Spoof successful',
-  target_impacted: 'Target impacted',
-  attack_completed: 'Attack completed',
-}
-
 function nowStamp() {
   return new Date().toLocaleTimeString('en-GB', { hour12: false })
 }
@@ -85,28 +61,85 @@ function eventStamp(occurredAt) {
   return parsed.toLocaleTimeString('en-GB', { hour12: false })
 }
 
-// The 3 existing Guided Steps map onto milestones along the backend's real
-// 6-stage flow (firmware extract -> analyze -> broker/topic discovery ->
-// MQTT observation -> spoof attempt -> successful attack): this screen's
-// step list isn't growing to 6 rows, so each row reflects the state flags
-// that mark its milestone reached, not a single event in isolation.
-function guidedStepsDone(scenarioState) {
-  if (!scenarioState) return [false, false, false]
-  const { discovery, attack } = scenarioState
-  return [
-    Boolean(discovery?.broker_discovered),
-    Boolean(discovery?.mqtt_observed),
-    Boolean(attack?.spoof_successful),
-  ]
-}
-
-// True-color ANSI escapes matching the legacy .term-line.warn color, used
-// only for frontend-injected notices (protocol errors) — never for backend
-// `output` text, which is written verbatim.
-const ANSI_ERR = '\x1b[38;2;220;90;90m'
+// True-color ANSI escapes in the design system's danger red, used only for
+// frontend-injected notices (protocol errors) — never for backend `output`
+// text, which is written verbatim.
+const ANSI_ERR = '\x1b[38;2;255;123;123m'
 const ANSI_RESET = '\x1b[0m'
 
-export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participantId }) {
+// "Near enough to the bottom that a new Activity Log entry should still
+// auto-scroll into view".
+const LOG_AUTOSCROLL_THRESHOLD_PX = 32
+
+const OBJECTIVE_ICON = {
+  [OBJECTIVE_STATE.DONE]: 'status-done',
+  [OBJECTIVE_STATE.PARTIAL]: 'status-partial',
+  [OBJECTIVE_STATE.PENDING]: 'status-pending',
+}
+
+function Row({ label, children }) {
+  return (
+    <div className="kv-row">
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  )
+}
+
+// The TARGET DEVICE readout. The scenario owns the snapshot's shape, so this
+// branches on which shape arrived, never on a panel id.
+function TargetDevice({ scenarioState, panelName }) {
+  if (!scenarioState) {
+    return <p className="empty-line">No contact with the target yet — begin recon.</p>
+  }
+  if (!hasActivityTarget(scenarioState)) {
+    // A foundation panel (its package defines no activity yet): the snapshot
+    // carries no target/discovery skeleton, so say what it says and read
+    // nothing else. See targetDeviceModel.js.
+    return <p className="empty-line">{foundationSummary(scenarioState)}</p>
+  }
+  const { target, discovery } = scenarioState
+  const attack = scenarioState.attack || {}
+  const unknown = 'UNKNOWN — recover from firmware'
+  return (
+    <dl className="kv">
+      {panelName ? <Row label="Panel">{panelName}</Row> : null}
+      <Row label="Status">{String(target.device_status).toUpperCase()}</Row>
+      {scenarioState.motor ? (
+        // Smart Home MQTT Control (Panel 1, Phase 2E.1): the snapshot shape is
+        // scenario-owned and genuinely different from the Environmental
+        // target's (motor/broker_host vs environment/ip_address).
+        <>
+          <Row label="Broker">
+            {discovery.broker_discovered ? `${target.broker_host}:${target.broker_port}` : unknown}
+          </Row>
+          <Row label="Command topic">{discovery.topic_discovered ? target.command_topic : unknown}</Row>
+          {discovery.mqtt_observed ? (
+            <Row label="Motor">
+              {scenarioState.motor.running ? 'RUNNING' : 'STOPPED'}
+              {attack.spoof_active ? ' (SPOOFED)' : ''}
+            </Row>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <Row label="Broker">
+            {discovery.broker_discovered ? `${target.ip_address}:${target.mqtt_port}` : unknown}
+          </Row>
+          <Row label="Topic">{discovery.topic_discovered ? target.mqtt_topic : unknown}</Row>
+          {discovery.mqtt_observed ? (
+            <Row label="Telemetry">
+              {scenarioState.environment.temperature}°C
+              {attack.spoof_active ? ' (SPOOFED)' : ''}
+            </Row>
+          ) : null}
+        </>
+      )}
+    </dl>
+  )
+}
+
+export default function HackMode({ onBack, onBuild, onMenu, participantId }) {
   const termRef = useRef(null)
   const inputBufferRef = useRef('')
 
@@ -129,15 +162,12 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participa
   // re-render.
   const promptStateRef = useRef(initialPromptState())
 
-  const [marked, setMarked] = useState(false)
-
-  // Session id, scenario events, and the scenario state snapshot now drive
-  // the Activity Log / Guided Steps / Target Device panels below. All three
-  // are local to this component (not lifted to App.jsx): HackMode already
-  // fully unmounts on every "back to menu" -> "hack" round trip (App.jsx has
-  // no stable key keeping it alive across screen changes), which is what
-  // resets this state for a new session — no extra teardown code needed.
-  const [, setSessionId] = useState(null)
+  // Scenario events and the scenario state snapshot drive the Activity Log,
+  // Objectives and Target Device panels below. Both are local to this
+  // component (not lifted to App.jsx): HackMode already fully unmounts on
+  // every "back to menu" -> "hack" round trip (App.jsx has no stable key
+  // keeping it alive across screen changes), which is what resets this state
+  // for a new session — no extra teardown code needed.
   const [scenarioEvents, setScenarioEvents] = useState([])
   const [scenarioState, setScenarioState] = useState(null)
 
@@ -149,6 +179,10 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participa
   // and conflating them is exactly what would let hardware noise leak into
   // the Activity Log or the Target Device panel.
   const [hardware, setHardware] = useState(UNKNOWN_HARDWARE)
+
+  // 'idle' | 'copied' | 'failed' — feedback for the Copy output button.
+  const [copyState, setCopyState] = useState('idle')
+  const copyTimerRef = useRef(null)
 
   // Writes a chunk of backend-authored text to the terminal verbatim — no
   // prefix, no reformatting. Terminal-rendered timestamps were removed
@@ -175,8 +209,7 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participa
 
   const { status, sendInput, sendResize, sendHardwareStatus } = useHackSocket({
     participantId,
-    onSession: (message) => {
-      setSessionId(message.session_id)
+    onSession: () => {
       // A `session` frame only ever arrives once per connection (right after
       // accept — see backend/app/websocket.py), so this is defensive rather
       // than something that fires mid-session: it guarantees a brand new
@@ -267,9 +300,26 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participa
   // still attached. The socket's own state is never *shown* — it is
   // diagnostics, and the header reports the ESP32, not the transport.
   const device = status === CONNECTION_STATUS.CONNECTED ? hardware : UNKNOWN_HARDWARE
+  const port = usbRepresentations(device)[0]
 
-  const stepsDone = guidedStepsDone(scenarioState)
-  const currentStepIndex = stepsDone.findIndex((done) => !done)
+  const objectives = deriveObjectives(scenarioState)
+  const progress = objectiveProgress(objectives.items)
+
+  // Activity Log: a new entry scrolls into view only if the reader was already
+  // at/near the bottom.
+  const logRef = useRef(null)
+  const logNearBottomRef = useRef(true)
+  useEffect(() => {
+    const el = logRef.current
+    if (el && logNearBottomRef.current) el.scrollTop = el.scrollHeight
+  }, [scenarioEvents])
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    },
+    [],
+  )
 
   // The single path a completed command line takes to the backend, whether
   // it came from the terminal's own Enter key or a tool button below —
@@ -358,162 +408,183 @@ export default function HackMode({ onBack, onBuild, onSuccess, onMenu, participa
     sendResize(cols, rows)
   }
 
+  // Display-only: copies what is already on screen and clears the on-screen
+  // scrollback. Neither sends a frame or reaches the backend, and the clear
+  // keeps the current prompt line (and anything typed on it) exactly as the
+  // backend's own `clear` command does.
+  async function copyOutput() {
+    const copied = await copyToClipboard(termRef.current?.getText() ?? '')
+    setCopyState(copied ? 'copied' : 'failed')
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopyState('idle'), 1800)
+  }
+
+  function clearOutput() {
+    termRef.current?.clear()
+  }
+
   return (
-    <div className="page">
+    <div className="screen screen-fixed">
       <AppHeader
-        title="HACK MODE"
-        // The uniform panel/hardware header. Identical component and
-        // identical shared device state in Build Mode — the mode name above
-        // is the only difference between the two headers.
-        right={<HardwareHeaderStatus hardware={device} />}
+        title="Hack Mode"
+        badge="Authorized lab only"
         onMenu={onMenu}
+        meta={
+          objectives.kind === 'list' ? (
+            <>
+              <span>
+                Objectives {progress.done} / {progress.total}
+              </span>
+              <div
+                className="progress hack-progress"
+                role="progressbar"
+                aria-label="Objectives completed"
+                aria-valuenow={progress.done}
+                aria-valuemin={0}
+                aria-valuemax={progress.total}
+              >
+                <span style={{ width: `${(progress.done / progress.total) * 100}%` }} />
+              </div>
+            </>
+          ) : null
+        }
       />
-      <main className="page-body hack-grid">
-        <aside className="side-col">
-          <section className="panel">
-            <h3>RECON & HACKING ESSENTIALS</h3>
-            <ul className="tool-list">
-              {TOOLS.map((t) => (
-                <li key={t.id}>
-                  <code>{t.name}</code>
-                  <button type="button" className="pill" onClick={() => runTool(t)}>
-                    {t.action}
-                  </button>
-                </li>
-              ))}
-            </ul>
+
+      <main className="screen-body hack-body">
+        <aside className="hack-col hack-col-left">
+          <section className="card hack-card" aria-label="Objectives">
+            <h2 className="hack-card-title">Objectives</h2>
+            {objectives.kind === 'list' ? (
+              <ul className="objectives">
+                {objectives.items.map((item) => (
+                  <li key={item.id} className={`objective is-${item.state}`}>
+                    <Icon name={OBJECTIVE_ICON[item.state]} size={14} />
+                    <span>{item.label}</span>
+                    <span className="sr-only">
+                      {item.state === OBJECTIVE_STATE.DONE
+                        ? ' — complete'
+                        : item.state === OBJECTIVE_STATE.PARTIAL
+                          ? ' — in progress'
+                          : ' — not started'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : objectives.kind === 'none' ? (
+              <p className="empty-line">
+                <Icon name="info" size={14} /> No training objectives are defined for this panel yet.
+              </p>
+            ) : (
+              <p className="empty-line">Objectives appear once the target reports its state.</p>
+            )}
           </section>
-          <section className="panel">
-            <h3>GUIDED STEPS</h3>
-            <ol className="steps">
-              {GUIDED_STEPS.map((label, i) => (
-                <li
-                  key={label}
-                  className={stepsDone[i] ? 'done' : i === currentStepIndex ? 'current' : ''}
-                >
-                  <span>{i + 1}</span>
-                  {label}
-                </li>
-              ))}
-            </ol>
-          </section>
-        </aside>
-        <section className="terminal">
-          <HackTerminal ref={termRef} onInput={handleTerminalInput} onResize={handleTerminalResize} />
-        </section>
-        <aside className="side-col">
-          <section className="panel">
-            <h3>LIVE HACK METRICS</h3>
-            <div className="metric">
-              <strong>00:04:12</strong>
-              <span>TIME-TO-EXPLOITATION</span>
-            </div>
-            <div className="metric">
-              <strong>{ATTEMPTS}</strong>
-              <span>EXPLOITATION ATTEMPTS</span>
-            </div>
-            <div className="metric">
-              <strong>82%</strong>
-              <span>RECONNAISSANCE EFFICIENCY</span>
-            </div>
-          </section>
-          <section className="panel">
-            <h3>ACTIVITY LOG</h3>
-            <ul className="plain-log">
+
+          <section className="card hack-card is-grow" aria-label="Activity log">
+            <h2 className="hack-card-title">Activity Log</h2>
+            <ul
+              className="activity-log"
+              ref={logRef}
+              onScroll={(e) => {
+                const el = e.currentTarget
+                logNearBottomRef.current =
+                  el.scrollHeight - el.scrollTop - el.clientHeight < LOG_AUTOSCROLL_THRESHOLD_PX
+              }}
+            >
               {scenarioEvents.length === 0 ? (
-                <li className="muted">No activity yet — run a command to begin.</li>
+                <li className="empty-line">No activity yet — run a command to begin.</li>
               ) : (
                 scenarioEvents.map((entry, i) => (
                   <li key={i}>
-                    {entry.at} — {EVENT_LABELS[entry.event] || entry.event}
+                    <span className="log-time">{entry.at}</span>
+                    <span>{hackEventLabel(entry.event)}</span>
                   </li>
                 ))
               )}
             </ul>
           </section>
-          <section className="panel dashed">
-            <h3>TARGET DEVICE</h3>
-            {scenarioState && !hasActivityTarget(scenarioState) ? (
-              // A foundation panel (its package defines no activity yet): the
-              // snapshot carries no target/discovery skeleton, so say what it
-              // says and read nothing else. See targetDeviceModel.js.
-              <p>{foundationSummary(scenarioState)}</p>
-            ) : scenarioState ? (
-              <>
-                <p>Status: {scenarioState.target.device_status.toUpperCase()}</p>
-                {scenarioState.motor ? (
-                  // Smart Home MQTT Control (Panel 1, Phase 2E.1): the
-                  // snapshot shape is scenario-owned and genuinely different
-                  // from the Environmental target's (motor/broker_host vs
-                  // environment/ip_address) — this branches on which shape
-                  // arrived, not on a panel id.
-                  <>
-                    <p>
-                      Broker:{' '}
-                      {scenarioState.discovery.broker_discovered
-                        ? `${scenarioState.target.broker_host}:${scenarioState.target.broker_port}`
-                        : 'UNKNOWN — recover from firmware'}
-                    </p>
-                    <p>
-                      Command topic:{' '}
-                      {scenarioState.discovery.topic_discovered
-                        ? scenarioState.target.command_topic
-                        : 'UNKNOWN — recover from firmware'}
-                    </p>
-                    {scenarioState.discovery.mqtt_observed ? (
-                      <p>
-                        Motor: {scenarioState.motor.running ? 'RUNNING' : 'STOPPED'}
-                        {scenarioState.attack.spoof_active ? ' (SPOOFED)' : ''}
-                      </p>
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <p>
-                      Broker:{' '}
-                      {scenarioState.discovery.broker_discovered
-                        ? `${scenarioState.target.ip_address}:${scenarioState.target.mqtt_port}`
-                        : 'UNKNOWN — recover from firmware'}
-                    </p>
-                    <p>
-                      Topic:{' '}
-                      {scenarioState.discovery.topic_discovered
-                        ? scenarioState.target.mqtt_topic
-                        : 'UNKNOWN — recover from firmware'}
-                    </p>
-                    {scenarioState.discovery.mqtt_observed ? (
-                      <p>
-                        Telemetry: {scenarioState.environment.temperature}°C
-                        {scenarioState.attack.spoof_active ? ' (SPOOFED)' : ''}
-                      </p>
-                    ) : null}
-                  </>
-                )}
-              </>
-            ) : (
-              <p>No contact with the target yet — begin recon.</p>
-            )}
+
+          <button type="button" className="btn btn-block" onClick={onBack}>
+            <Icon name="arrow-left" size={14} />
+            Back to menu
+          </button>
+        </aside>
+
+        <section className="card hack-terminal" aria-label="Terminal">
+          <div className="terminal-bar">
+            <span className="terminal-title">
+              <Icon name="terminal" size={16} />
+              Terminal
+              {port ? <span className="terminal-port">{port}</span> : null}
+            </span>
+            <div className="terminal-actions">
+              <button
+                type="button"
+                className="icon-btn is-quiet is-sm"
+                aria-label="Copy output"
+                title="Copy the terminal output"
+                onClick={copyOutput}
+              >
+                <Icon name={copyState === 'copied' ? 'status-done' : 'copy'} size={16} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn is-quiet is-sm"
+                aria-label="Clear terminal"
+                title="Clear the terminal screen"
+                onClick={clearOutput}
+              >
+                <Icon name="trash" size={16} />
+              </button>
+              <span className="sr-only" role="status">
+                {copyState === 'copied' ? 'Output copied' : copyState === 'failed' ? 'Copy failed' : ''}
+              </span>
+            </div>
+          </div>
+          <div className="terminal-screen">
+            <HackTerminal ref={termRef} onInput={handleTerminalInput} onResize={handleTerminalResize} />
+          </div>
+          <div className="terminal-foot">
+            <span>Commands run only through the trainer&apos;s real-tool toolbox. Type help to list them.</span>
+          </div>
+        </section>
+
+        <aside className="hack-col hack-col-right">
+          <section className="card hack-card" aria-label="Toolbox">
+            <h2 className="hack-card-title">Toolbox</h2>
+            <div className="tool-grid">
+              {TOOLS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  className="tool-chip"
+                  title={`${t.action}: runs ${t.command}`}
+                  aria-label={`${t.name} — ${t.action}`}
+                  onClick={() => runTool(t)}
+                >
+                  {t.name}
+                </button>
+              ))}
+            </div>
           </section>
+
+          <section className="card hack-card" aria-label="Target device">
+            <h2 className="hack-card-title">Target Device</h2>
+            <TargetDevice scenarioState={scenarioState} panelName={device.panel} />
+          </section>
+
+          <button type="button" className="btn btn-primary btn-block hack-proceed" onClick={onBuild}>
+            Proceed to Build Mode
+            <Icon name="arrow-right" size={16} />
+          </button>
         </aside>
       </main>
-      <footer className="link-footer">
-        <button type="button" onClick={onBack}>
-          ← BACK TO MENU
-        </button>
-        <button
-          type="button"
-          className="btn-solid"
-          onClick={() => {
-            setMarked(true)
-            onSuccess?.()
-          }}
-        >
-          {marked ? '[ ATTACK MARKED ]' : '[ MARK ATTACK SUCCESSFUL ]'}
-        </button>
-        <button type="button" onClick={onBuild}>
-          PROCEED TO BUILD MODE →
-        </button>
-      </footer>
+
+      <StatusBar>
+        {/* The uniform panel/hardware readout. Identical component and
+            identical shared device state in Build Mode — the mode name in the
+            top bar is the only difference between the two screens. */}
+        <HardwareHeaderStatus hardware={device} />
+      </StatusBar>
     </div>
   )
 }

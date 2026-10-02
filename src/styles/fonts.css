@@ -1,0 +1,74 @@
+/*
+ * Bundled fonts. The trainer runs fully offline on the Raspberry Pi's own
+ * access point, so nothing here (or anywhere in the app) may reach for a CDN
+ * or Google Fonts: every face below is a local file under src/assets/fonts,
+ * which Vite fingerprints and serves from the same origin as the app.
+ *
+ * Latin subset only — enough for the English UI and for terminal output. Any
+ * glyph outside it (arrows, check marks) is drawn as an SVG icon instead of a
+ * text character, so it never depends on a fallback font.
+ */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/Inter-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/Inter-500.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/Inter-600.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/Inter-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Roboto Condensed';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('../assets/fonts/RobotoCondensed-600.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Roboto Condensed';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/RobotoCondensed-700.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/JetBrainsMono-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/JetBrainsMono-500.woff2') format('woff2');
+}

@@ -1,0 +1,180 @@
+/* Sign-in, registration and instructor sign-in. */
+
+.auth-screen {
+  position: relative;
+  align-items: center;
+  padding: 36px 16px 22px;
+  background-color: var(--base);
+  background-image:
+    radial-gradient(640px 320px at 50% 110px, rgba(229, 228, 229, 0.07), transparent 70%),
+    radial-gradient(var(--dot-grid) 1px, transparent 1px);
+  background-size:
+    auto,
+    28px 28px;
+}
+
+.auth-menu {
+  position: absolute;
+  left: 20px;
+  top: 20px;
+}
+
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.auth-tagline {
+  font: 500 13px/1 var(--font-sans);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: center;
+}
+
+.auth-card {
+  width: min(460px, 100%);
+  margin-top: 28px;
+  padding: 28px 32px 30px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  box-shadow: var(--shadow-card);
+}
+
+.auth-title {
+  margin: 24px 0 4px;
+  text-align: center;
+  font: 700 28px/1 var(--font-sans);
+}
+
+.auth-card > .auth-title:first-child {
+  margin-top: 0;
+}
+
+.auth-sub {
+  margin-bottom: 22px;
+  text-align: center;
+  font: 400 14px/1.4 var(--font-sans);
+  color: var(--muted);
+}
+
+.auth-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.auth-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.auth-back {
+  align-self: center;
+  margin-top: 4px;
+}
+
+.auth-note {
+  margin-top: 14px;
+  text-align: center;
+  font: 400 12px/1.5 var(--font-sans);
+  color: var(--muted);
+}
+
+.auth-footer {
+  margin-top: auto;
+  padding-top: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.auth-footer .version {
+  font-size: 13px;
+}
+
+@media (max-height: 820px) {
+  .auth-screen {
+    padding-top: 22px;
+  }
+
+  .auth-card {
+    margin-top: 18px;
+    padding: 22px 28px 24px;
+  }
+
+  .auth-title {
+    margin-top: 16px;
+  }
+
+  .auth-sub {
+    margin-bottom: 16px;
+  }
+
+  .auth-fields {
+    gap: 14px;
+  }
+
+  .auth-actions {
+    margin-top: 16px;
+  }
+
+  .auth-footer {
+    padding-top: 12px;
+    gap: 10px;
+  }
+
+  .auth-screen {
+    padding-bottom: 12px;
+  }
+}
+
+/* Short laptop screens (720px and below): a smaller mark and tighter fields so
+   the sign-in card never needs a page scroll. */
+@media (max-height: 760px) {
+  .auth-brand .logo {
+    width: 96px;
+    height: auto;
+  }
+
+  .auth-card {
+    margin-top: 12px;
+    padding: 18px 26px 20px;
+  }
+
+  .field-lg .field {
+    height: 46px;
+  }
+
+  .auth-card .btn-lg {
+    min-height: 46px;
+  }
+
+  .auth-card .seg {
+    min-height: 40px;
+  }
+
+  .auth-title {
+    margin-top: 12px;
+    font-size: 24px;
+  }
+
+  .auth-sub {
+    margin-bottom: 12px;
+  }
+
+  .auth-fields {
+    gap: 10px;
+  }
+
+  .auth-actions {
+    margin-top: 12px;
+    gap: 10px;
+  }
+}

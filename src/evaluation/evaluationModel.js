@@ -30,11 +30,35 @@ export const SESSION_STATUS_LABEL = {
   interrupted: 'Interrupted',
 }
 
-export const SESSION_STATUS_CLASS = {
-  completed: 'ok',
-  incomplete: 'bad',
-  in_progress: 'warn',
-  interrupted: 'bad',
+/**
+ * The metric names the Evaluation page shows, held in one place. These follow
+ * the project's final manuscript terminology as specified for the UI. They are
+ * LABELS only: the value, unit and reasoning under each one still come from the
+ * backend untouched. (backend/app/evaluation.py `METRIC_INFO` spells EAC, TTE,
+ * TTR, AID and DEI differently; that is documented, not edited, here.)
+ */
+export const METRIC_NAMES = {
+  ACR: 'Attack Completion Rate',
+  RE: 'Reconnaissance Efficiency',
+  EAC: 'Exploit Action Completeness',
+  TTE: 'Time to Exploit',
+  TTR: 'Time to Remediation',
+  AID: 'Attempt-to-Iteration Depth',
+  DEI: 'Development Efficiency Index',
+}
+
+/**
+ * The status chip colour for each session status. Colour is never the only
+ * cue: the chip always carries the status word from SESSION_STATUS_LABEL.
+ * An interrupted session reads as a warning (the backend stopped it), not as a
+ * failure by the student.
+ */
+export const SESSION_STATUS_TONE = {
+  completed: 'is-success',
+  incomplete: 'is-danger',
+  in_progress: 'is-warning',
+  interrupted: 'is-warning',
+  not_started: 'is-muted',
 }
 
 export const METRIC_STATUS_LABEL = {
@@ -59,6 +83,14 @@ export function formatTimestamp(iso) {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
 }
 
+/** ISO timestamp -> `{ date, time }` in local format, or null when absent. */
+export function splitTimestamp(iso) {
+  if (!iso) return null
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return null
+  return { date: date.toLocaleDateString(), time: date.toLocaleTimeString() }
+}
+
 /**
  * One metric's display text. Only a `computed` metric shows a number; any
  * other status shows its label, and a missing metric shows "No data".
@@ -77,6 +109,54 @@ export function formatMetric(metric) {
 
 export function isMetricAvailable(metric) {
   return Boolean(metric) && metric.status === 'computed' && metric.value !== null
+}
+
+/**
+ * How one metric tile shows its value: `{ text, unit, tone }`. `tone` is
+ * 'value' for a computed number, 'pending' for a metric that cannot be
+ * computed yet, and 'na' for one that does not apply (or has no data). The
+ * number is exactly what the backend computed, in the unit the backend gave —
+ * only the presentation (big figure, small unit) is split out here.
+ */
+export function metricDisplay(metric) {
+  if (!isMetricAvailable(metric)) {
+    return { text: formatMetric(metric), unit: null, tone: metric?.status === 'not_yet_computable' ? 'pending' : 'na' }
+  }
+  const { value, unit } = metric
+  if (unit === '%') return { text: `${Number(value).toFixed(1)}%`, unit: null, tone: 'value' }
+  if (unit === 's') {
+    const text = formatDuration(value)
+    return { text, unit: text.split(':').length === 3 ? 'h:mm:ss' : 'm:ss', tone: 'value' }
+  }
+  if (unit === 'attempts/min') return { text: Number(value).toFixed(2), unit: 'attempts/min', tone: 'value' }
+  if (unit === 'sessions') return { text: String(value), unit: value === 1 ? 'session' : 'sessions', tone: 'value' }
+  return { text: String(value), unit: unit || null, tone: 'value' }
+}
+
+// "no sessions recorded" -> "No sessions recorded."
+function sentence(text) {
+  const trimmed = String(text || '').trim()
+  if (!trimmed) return ''
+  const cased = trimmed[0].toUpperCase() + trimmed.slice(1)
+  return /[.!?]$/.test(cased) ? cased : `${cased}.`
+}
+
+/**
+ * The one-line explanation under a metric figure: the backend's own `detail`,
+ * lightly formatted, prefixed to say why there is no number when there is none.
+ * Empty when the backend gave no detail (a computed metric with nothing to add).
+ */
+export function metricNote(metric) {
+  if (!metric) return 'No data was returned for this metric.'
+  const detail = sentence(metric.detail)
+  if (isMetricAvailable(metric)) return detail
+  if (metric.status === 'not_yet_computable') return `Not yet computable. ${detail}`.trim()
+  return `Not evaluated. ${detail}`.trim()
+}
+
+/** "succeeded/total" for one attempt bucket, or an em dash when there is none. */
+export function attemptText(bucket) {
+  return bucket ? `${bucket.succeeded}/${bucket.total}` : '—'
 }
 
 /** Tooltip text: the backend's own reason plus the metric's definition. */
@@ -140,4 +220,20 @@ export function panelsOf(report) {
 /** True when the participant has no recorded Hack or Build session at all. */
 export function hasNoSessions(report) {
   return !report?.hack?.sessions?.length && !report?.build?.sessions?.length
+}
+
+/**
+ * The most recently STARTED session across both modes, as `{ mode, session }`
+ * with `mode` 'hack' or 'build', or null when nothing has been recorded. Each
+ * mode's list is newest-first, so only the two heads need comparing.
+ */
+export function latestSession(report) {
+  const hack = report?.hack?.sessions?.[0]
+  const build = report?.build?.sessions?.[0]
+  if (!hack && !build) return null
+  if (!build) return { mode: 'hack', session: hack }
+  if (!hack) return { mode: 'build', session: build }
+  return new Date(build.started_at).getTime() > new Date(hack.started_at).getTime()
+    ? { mode: 'build', session: build }
+    : { mode: 'hack', session: hack }
 }

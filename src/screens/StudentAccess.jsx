@@ -1,100 +1,107 @@
 import { useState } from 'react'
-import AppHeader from '../components/AppHeader'
-import InfoBanner from '../components/InfoBanner'
+import AuthShell, { AccountTabs } from '../components/AuthShell'
+import Field from '../components/Field'
+import Icon from '../components/Icon'
+import { sentenceCase } from '../text'
 
-export default function StudentAccess({ onBack, onEnter, onRegister, error, onMenu }) {
-  const [signIn, setSignIn] = useState({ id: '', name: '' })
-  const [reg, setReg] = useState({ id: '', name: '' })
+// A student is a registered participant: a full name plus a student number
+// (backend/app/participants.py). There is no password — the number is the
+// identity, and the backend validates both.
+const NUMBER_HINT = 'Letters, digits and hyphens, up to 32 characters.'
+
+export default function StudentAccess({ error, onMenu, onInstructor, onEnter, onRegister, onDismissError }) {
+  const [mode, setMode] = useState('login')
+  const [form, setForm] = useState({ id: '', name: '' })
+  const registering = mode === 'register'
+
+  function update(field, value) {
+    setForm((current) => ({ ...current, [field]: value }))
+    if (error) onDismissError?.()
+  }
+
+  function switchMode(next) {
+    setMode(next)
+    onDismissError?.()
+  }
+
+  function submit(event) {
+    event.preventDefault()
+    if (registering) onRegister(form)
+    else onEnter(form)
+  }
 
   return (
-    <div className="page">
-      <AppHeader
-        title="IoT CYBERSECURITY SANDBOX"
-        right={
-          <>
-            <span className="dot ok" /> PI5 HOST ONLINE <span className="pipe">|</span> MQTT
-            BROKER: RUNNING
-          </>
-        }
-        onMenu={onMenu}
-      />
-      <div className="subnav">
-        <button type="button" className="text-link" onClick={onBack}>
-          ← BACK TO ROLE SELECTION
-        </button>
-        <h2>STUDENT ACCESS</h2>
-        <span />
-      </div>
-      <main className="page-body">
-        {error ? <p className="form-error">{error}</p> : null}
-        <div className="split-auth">
-          <form
-            className="auth-card"
-            onSubmit={(e) => {
-              e.preventDefault()
-              onEnter(signIn)
-            }}
-          >
-            <div className="auth-tabs">
-              <span className="tab active">SIGN IN</span>
-            </div>
-            <label>
-              STUDENT NUMBER
-              <input
-                value={signIn.id}
-                placeholder="Enter student number"
-                onChange={(e) => setSignIn({ ...signIn, id: e.target.value })}
-              />
-            </label>
-            <label>
-              FULL NAME
-              <input
-                value={signIn.name}
-                placeholder="Enter your full name"
-                onChange={(e) => setSignIn({ ...signIn, name: e.target.value })}
-              />
-            </label>
-            <button type="submit" className="btn-solid">
-              ENTER SANDBOX
-            </button>
-          </form>
-          <div className="or-badge">OR</div>
-          <form
-            className="auth-card"
-            onSubmit={(e) => {
-              e.preventDefault()
-              onRegister(reg)
-            }}
-          >
-            <div className="auth-tabs">
-              <span className="tab active">REGISTER STUDENT</span>
-            </div>
-            <label>
-              FULL NAME
-              <input
-                value={reg.name}
-                placeholder="Enter your full name"
-                onChange={(e) => setReg({ ...reg, name: e.target.value })}
-              />
-            </label>
-            <label>
-              STUDENT NUMBER
-              <input
-                value={reg.id}
-                placeholder="Enter student number"
-                onChange={(e) => setReg({ ...reg, id: e.target.value })}
-              />
-            </label>
-            <button type="submit" className="btn-solid">
-              REGISTER STUDENT
-            </button>
-          </form>
+    <AuthShell
+      tagline={registering ? 'Create your training account' : 'Hands-on IoT security training'}
+      onMenu={onMenu}
+    >
+      <form className="auth-card" onSubmit={submit} noValidate>
+        {registering ? null : <AccountTabs active="student" onInstructor={onInstructor} />}
+        <h2 className="auth-title">{registering ? 'Register' : 'Login'}</h2>
+        <p className="auth-sub">
+          {registering
+            ? 'Your progress is saved to this account.'
+            : 'Welcome back. Sign in to resume your training.'}
+        </p>
+
+        <div className="auth-fields">
+          <Field
+            large
+            id="student-name"
+            label="Full name"
+            icon="user"
+            placeholder="Enter your full name"
+            autoComplete="name"
+            value={form.name}
+            onChange={(event) => update('name', event.target.value)}
+          />
+          <Field
+            large
+            id="student-number"
+            label="Student number"
+            icon="id-card"
+            placeholder="e.g. 2023-123456"
+            autoComplete="off"
+            hint={NUMBER_HINT}
+            value={form.id}
+            onChange={(event) => update('id', event.target.value)}
+          />
         </div>
-      </main>
-      <InfoBanner>
-        Registration is stored by the trainer backend so your Hack and Build sessions are recorded
-        under your student number for evaluation. There is no password: use your own student number.
-      </InfoBanner>
-    </div>
+
+        {error ? (
+          <div className="notice is-danger" role="alert" style={{ marginTop: 16 }}>
+            <Icon name="warning" size={14} />
+            {sentenceCase(error)}
+          </div>
+        ) : null}
+
+        <div className="auth-actions">
+          {registering ? (
+            <>
+              <button type="submit" className="btn btn-primary btn-lg btn-block">
+                Register
+              </button>
+              <button type="button" className="text-link auth-back" onClick={() => switchMode('login')}>
+                <Icon name="arrow-left" size={14} />
+                Back to login
+              </button>
+            </>
+          ) : (
+            <>
+              <button type="submit" className="btn btn-primary btn-lg btn-block">
+                Sign in
+                <Icon name="arrow-right" size={16} />
+              </button>
+              <button type="button" className="btn btn-dark btn-lg btn-block" onClick={() => switchMode('register')}>
+                Register
+              </button>
+            </>
+          )}
+        </div>
+        {registering ? null : (
+          <p className="auth-note">Your sessions are recorded under your student number for evaluation.</p>
+        )}
+      </form>
+    </AuthShell>
   )
 }

@@ -4,11 +4,17 @@ import { readFileSync } from 'node:fs'
 import {
   BUILD_METRICS,
   HACK_METRICS,
+  METRIC_NAMES,
+  SESSION_STATUS_TONE,
+  attemptText,
   buildSummary,
   formatDuration,
   formatMetric,
   hackSummary,
   isMetricAvailable,
+  latestSession,
+  metricDisplay,
+  metricNote,
   metricTooltip,
   panelsOf,
   sectionState,
@@ -114,11 +120,69 @@ test('mode sockets carry the participant only when there is one', () => {
 })
 
 test('the Evaluation and professor screens read no seeded demo data', () => {
-  for (const file of ['../screens/Dashboard.jsx', '../screens/ProfessorAccess.jsx']) {
+  for (const file of [
+    '../screens/Dashboard.jsx',
+    '../screens/ProfessorAccess.jsx',
+    '../screens/InstructorLogin.jsx',
+    '../screens/InstructorStudents.jsx',
+  ]) {
     // Comments are stripped: they may explain that no score exists.
     const source = readFileSync(new URL(file, import.meta.url), 'utf8').replace(/^\s*\/\/.*$/gm, '')
     assert.doesNotMatch(source, /from '\.\.\/data'/)
     assert.doesNotMatch(source, /STUDENTS/)
     assert.doesNotMatch(source, /\bscore\b|\bgrade\b/i)
+  }
+})
+
+test('every established metric has a name, and only those seven', () => {
+  assert.deepEqual(Object.keys(METRIC_NAMES), [...HACK_METRICS, ...BUILD_METRICS])
+  assert.equal(METRIC_NAMES.ACR, 'Attack Completion Rate')
+  assert.equal(METRIC_NAMES.EAC, 'Exploit Action Completeness')
+  assert.equal(METRIC_NAMES.AID, 'Attempt-to-Iteration Depth')
+})
+
+test('metric tiles split the figure from its unit without changing the number', () => {
+  assert.deepEqual(metricDisplay(computed('ACR', 75, '%')), { text: '75.0%', unit: null, tone: 'value' })
+  assert.deepEqual(metricDisplay(computed('TTE', 272, 's')), { text: '4:32', unit: 'm:ss', tone: 'value' })
+  assert.deepEqual(metricDisplay(computed('TTR', 3725, 's')), { text: '1:02:05', unit: 'h:mm:ss', tone: 'value' })
+  assert.deepEqual(metricDisplay(computed('AID', 0, 'attempts/min')), { text: '0.00', unit: 'attempts/min', tone: 'value' })
+  assert.deepEqual(metricDisplay(computed('EAC', 2, 'sessions')), { text: '2', unit: 'sessions', tone: 'value' })
+  assert.equal(metricDisplay(computed('EAC', 1, 'sessions')).unit, 'session')
+})
+
+test('an unavailable metric never gets a number or a unit', () => {
+  assert.deepEqual(metricDisplay(na('RE', '%')), { text: 'N/A', unit: null, tone: 'na' })
+  assert.deepEqual(metricDisplay(pending('TTE', 's')), { text: 'Pending', unit: null, tone: 'pending' })
+  assert.deepEqual(metricDisplay(null), { text: 'No data', unit: null, tone: 'na' })
+})
+
+test('metric notes say why there is no number, using the backend reason', () => {
+  assert.equal(metricNote(na('RE', '%')), 'Not evaluated. Why not.')
+  assert.equal(metricNote(pending('TTE', 's')), 'Not yet computable.')
+  assert.equal(metricNote(computed('ACR', 60, '%')), 'D.')
+  assert.equal(metricNote({ status: 'computed', value: 1, detail: '3/4 declared objectives completed' }), '3/4 declared objectives completed.')
+  assert.match(metricNote(null), /no data/i)
+})
+
+test('attempt buckets read succeeded/total', () => {
+  assert.equal(attemptText({ succeeded: 1, total: 3 }), '1/3')
+  assert.equal(attemptText(undefined), '—')
+})
+
+test('the latest session is the most recently started across both modes', () => {
+  const report = {
+    hack: { sessions: [{ session_id: 'h', started_at: '2026-10-02T01:00:00+00:00' }] },
+    build: { sessions: [{ session_id: 'b', started_at: '2026-10-02T02:00:00+00:00' }] },
+  }
+  assert.equal(latestSession(report).mode, 'build')
+  assert.equal(latestSession({ ...report, build: { sessions: [] } }).mode, 'hack')
+  assert.equal(latestSession({ ...report, hack: { sessions: [] } }).session.session_id, 'b')
+  assert.equal(latestSession({ hack: { sessions: [] }, build: { sessions: [] } }), null)
+  assert.equal(latestSession(undefined), null)
+})
+
+test('every session status has a chip tone, and colour is never the only cue', () => {
+  for (const status of ['completed', 'incomplete', 'in_progress', 'interrupted', 'not_started']) {
+    assert.match(SESSION_STATUS_TONE[status], /^is-/)
   }
 })

@@ -1,0 +1,210 @@
+/*
+ * Application shell: the full-height screen frame, the top bar, and the status
+ * bar that every screen shares. Hack Mode, Build Mode and Evaluation fill the
+ * viewport (`screen-fixed`) and scroll inside their panels; the sign-in and
+ * menu screens are centred and grow with their content.
+ */
+
+.screen {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--base);
+  color: var(--text);
+}
+
+.screen-fixed {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.screen-dotted {
+  background-image: radial-gradient(var(--dot-grid) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.screen-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+
+/* --- top bar ----------------------------------------------------------------- */
+
+.topbar {
+  flex: none;
+  height: var(--topbar-height);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.topbar-title {
+  font: 600 26px/1 var(--font-display);
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  margin-left: 6px;
+  border: 1px solid var(--danger);
+  border-radius: 13px;
+  color: var(--danger);
+  font: 700 11px/1 var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.topbar-right {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.topbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 500 13px/1 var(--font-sans);
+  color: var(--muted-soft);
+  white-space: nowrap;
+}
+
+/* --- status bar ----------------------------------------------------------------- */
+
+.statusbar {
+  flex: none;
+  height: var(--statusbar-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 16px;
+  font: 500 12px/1 var(--font-sans);
+  color: var(--muted);
+}
+
+.statusbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.version {
+  font: 400 12px/1 var(--font-sans);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* The uniform PANEL | USB | CONNECTED readout (components/HardwareHeaderStatus). */
+.hw-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.hw-sep {
+  color: var(--line-strong);
+}
+
+.hw-field {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: default;
+}
+
+.hw-field.is-cyclable {
+  cursor: pointer;
+}
+
+.hw-field.is-cyclable .hw-value {
+  border-bottom: 1px dotted var(--muted);
+}
+
+.hw-field.is-cyclable:hover {
+  color: var(--text);
+}
+
+.hw-field.is-empty {
+  cursor: default;
+}
+
+.hw-conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted-soft);
+}
+
+.hw-conn.is-connected {
+  color: var(--text);
+}
+
+/* Backend reachability, shown on the sign-in screens. */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 32px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--muted);
+  font: 500 12px/1 var(--font-sans);
+}
+
+.status-pill b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.status-pill-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.status-pill-sep {
+  width: 1px;
+  height: 12px;
+  background: var(--line-strong);
+}
+
+/* The "Restoring your session" screen shown while a reload is re-attaching. */
+.resume-screen {
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--muted-soft);
+}

@@ -1,0 +1,259 @@
+/* Hack Mode: objectives + log, the real xterm terminal, toolbox + target. */
+
+.hack-body {
+  min-height: 0;
+}
+
+.hack-col {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.hack-col-left {
+  width: 232px;
+}
+
+.hack-col-right {
+  width: 300px;
+}
+
+.hack-card {
+  padding: 12px 16px 14px;
+}
+
+.hack-card.is-grow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hack-card-title {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  font: 700 18px/1.2 var(--font-sans);
+}
+
+.hack-progress {
+  width: 120px;
+}
+
+.empty-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--muted-soft);
+  font: 400 13px/1.45 var(--font-sans);
+}
+
+.empty-line .icon {
+  margin-top: 2px;
+}
+
+/* --- objectives ------------------------------------------------------------------------ */
+
+.objectives {
+  display: flex;
+  flex-direction: column;
+}
+
+.objective {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  font: 500 14px/1.25 var(--font-sans);
+}
+
+.objective.is-done {
+  color: var(--success);
+}
+
+.objective.is-partial {
+  color: var(--warning);
+}
+
+.objective.is-pending {
+  color: var(--muted);
+}
+
+/* --- activity log ---------------------------------------------------------------------- */
+
+.activity-log {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  font: 400 12px/1.45 var(--font-mono);
+}
+
+.activity-log > li {
+  display: flex;
+  gap: 8px;
+}
+
+.activity-log > li.empty-line {
+  font-family: var(--font-sans);
+}
+
+.log-time {
+  flex: none;
+  color: var(--muted);
+}
+
+/* --- terminal ---------------------------------------------------------------------------- */
+
+.hack-terminal {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.terminal-bar {
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.terminal-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font: 500 13px/1 var(--font-sans);
+}
+
+.terminal-port {
+  font: 400 12px/1 var(--font-mono);
+  color: var(--muted);
+}
+
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.terminal-screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--base);
+}
+
+/* xterm.js host. The terminal manages its own scroll viewport, so this must not
+   also scroll. Padding lives on the terminal element, not the host: the fit
+   addon subtracts the terminal element's padding when it works out how many
+   rows and columns fit, and does not subtract the host's. */
+.xterm-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.xterm-host .xterm {
+  height: 100%;
+  padding: 14px 18px 8px;
+}
+
+/* xterm.css paints its scroll viewport solid black regardless of the theme;
+   match the terminal surface instead. */
+.xterm-host .xterm .xterm-viewport {
+  background-color: var(--base);
+}
+
+.terminal-foot {
+  flex: none;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 0 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font: 400 12px/1 var(--font-sans);
+}
+
+/* --- toolbox and target ------------------------------------------------------------------- */
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tool-chip {
+  min-height: var(--touch-target);
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-field);
+  background: var(--base);
+  color: var(--text);
+  text-align: left;
+  font: 500 12px/1 var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+
+.tool-chip:hover {
+  background: var(--raised);
+  border-color: var(--line-hover);
+}
+
+.tool-chip:active {
+  background: #000;
+}
+
+.kv {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kv-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.kv-row dt {
+  font: 600 10.5px/1 var(--font-sans);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.kv-row dd {
+  font: 400 13px/1.35 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.hack-proceed {
+  margin-top: auto;
+}
+
+@media (max-width: 1180px) {
+  .hack-col-left {
+    width: 200px;
+  }
+
+  .hack-col-right {
+    width: 240px;
+  }
+}

@@ -32,30 +32,31 @@ function readCssVar(name, fallback) {
 }
 
 /**
- * A dark theme matching this app's existing palette (see src/index.css) —
- * only the workspace/toolbox/flyout chrome, not the blocks themselves
- * (their default Blockly colours stay usable/familiar, per CLAUDE.md:
- * "prioritize usability... do not introduce a completely unrelated visual
- * theme"). Built once per mount from the live CSS variables rather than
+ * A dark theme matching the design tokens (src/styles/tokens.css) — only the
+ * workspace/toolbox/flyout chrome and the block font, not the blocks'
+ * own colours (their default Blockly colours stay usable/familiar, per
+ * CLAUDE.md: "prioritize usability... do not introduce a completely unrelated
+ * visual theme"). Built once per mount from the live CSS variables rather than
  * hardcoded hex, so a future palette change here needs no Blockly edit.
  */
 function buildBlocklyTheme() {
   return Blockly.Theme.defineTheme('build-mode-dark', {
     name: 'build-mode-dark',
     base: Blockly.Themes.Classic,
+    fontStyle: { family: readCssVar('--font-sans', 'sans-serif'), weight: '600', size: 12 },
     componentStyles: {
-      workspaceBackgroundColour: readCssVar('--bg', '#0b0f14'),
-      toolboxBackgroundColour: readCssVar('--panel', '#151c24'),
-      toolboxForegroundColour: readCssVar('--ink', '#e6edf3'),
-      flyoutBackgroundColour: readCssVar('--panel', '#151c24'),
-      flyoutForegroundColour: readCssVar('--ink', '#e6edf3'),
+      workspaceBackgroundColour: readCssVar('--base', '#141316'),
+      toolboxBackgroundColour: readCssVar('--surface', '#1c1c1e'),
+      toolboxForegroundColour: readCssVar('--text', '#e5e4e5'),
+      flyoutBackgroundColour: readCssVar('--surface', '#1c1c1e'),
+      flyoutForegroundColour: readCssVar('--text', '#e5e4e5'),
       flyoutOpacity: 1,
-      scrollbarColour: readCssVar('--muted', '#8b98a8'),
+      scrollbarColour: readCssVar('--muted', '#919093'),
       scrollbarOpacity: 0.4,
-      insertionMarkerColour: readCssVar('--warn', '#d29922'),
+      insertionMarkerColour: readCssVar('--warning', '#f2d34a'),
       insertionMarkerOpacity: 0.4,
-      markerColour: readCssVar('--ok', '#3fb950'),
-      cursorColour: readCssVar('--ok', '#3fb950'),
+      markerColour: readCssVar('--success', '#b9f56b'),
+      cursorColour: readCssVar('--success', '#b9f56b'),
     },
   })
 }
@@ -114,7 +115,7 @@ export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceCha
       toolbox: POPULATED_TOOLBOX,
       theme: buildBlocklyTheme(),
       renderer: 'zelos',
-      grid: { spacing: 24, length: 2, colour: readCssVar('--line', '#263241'), snap: true },
+      grid: { spacing: 24, length: 2, colour: readCssVar('--line-strong', '#3a3b3e'), snap: true },
       zoom: { controls: true, wheel: true, startScale: 0.9, maxScale: 3, minScale: 0.4 },
       move: { scrollbars: true, drag: true, wheel: false },
       trashcan: true,

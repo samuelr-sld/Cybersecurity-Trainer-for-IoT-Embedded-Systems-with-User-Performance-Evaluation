@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import AppHeader from '../components/AppHeader'
+import Icon from '../components/Icon'
+import StatusBar from '../components/StatusBar'
 import usePreparationSocket from '../hooks/usePreparationSocket'
 import {
   OUTCOME,
@@ -16,13 +18,13 @@ import {
 // presentation only; every checkmark was already confirmed by the backend.
 const READY_HOLD_MS = 700
 
-const MODE_NAMES = { hack: 'HACK MODE', build: 'BUILD MODE' }
+const MODE_NAMES = { hack: 'Hack Mode', build: 'Build Mode' }
 
 const MARKS = {
-  [STEP_STATUS.PENDING]: '○',
-  [STEP_STATUS.RUNNING]: '●',
-  [STEP_STATUS.SUCCEEDED]: '✓',
-  [STEP_STATUS.FAILED]: '✕',
+  [STEP_STATUS.PENDING]: 'status-pending',
+  [STEP_STATUS.RUNNING]: 'status-partial',
+  [STEP_STATUS.SUCCEEDED]: 'status-done',
+  [STEP_STATUS.FAILED]: 'status-failed',
 }
 
 /**
@@ -59,36 +61,25 @@ export default function ModePreparation({ mode, onReady, onRetry, onBack, onMenu
   const failed = prep.outcome === OUTCOME.FAILED
   const panel = prep.facts.panel_name
   const port = prep.facts.port
+  const modeName = MODE_NAMES[mode] || 'the mode'
 
   return (
-    <div className="page">
-      <AppHeader
-        title={`${MODE_NAMES[mode] || 'MODE'} — SESSION PREPARATION`}
-        right={
-          panel ? (
-            <>
-              PANEL: {panel}
-              {port ? <> <span className="pipe">|</span> USB: {port}</> : null}
-            </>
-          ) : (
-            'PANEL: —'
-          )
-        }
-        onMenu={onMenu}
-      />
-      <main className="page-body prep-body">
+    <div className="screen screen-fixed screen-dotted">
+      <AppHeader title={MODE_NAMES[mode] || 'Mode'} onMenu={onMenu} />
+      <main className="prep-body">
         <section className="prep-card" aria-live="polite">
-          <h2>PREPARING TRAINING SESSION</h2>
+          <h2>Preparing training session</h2>
           <p className="prep-sub">
-            Restoring the panel&apos;s vulnerable baseline firmware before {MODE_NAMES[mode] || 'the mode'} opens.
+            Restoring the panel&apos;s vulnerable baseline firmware before {modeName} opens. Every session starts from
+            this baseline.
           </p>
           <ol className="prep-steps">
             {PREPARATION_STEPS.map((step) => {
               const status = prep.steps[step.id]
               return (
                 <li key={step.id} className={`prep-step is-${status}`}>
-                  <span className="prep-mark" aria-hidden="true">
-                    {MARKS[status]}
+                  <span className="prep-mark">
+                    <Icon name={MARKS[status]} size={18} />
                   </span>
                   <span>{stepLabel(step, status)}</span>
                 </li>
@@ -96,7 +87,12 @@ export default function ModePreparation({ mode, onReady, onRetry, onBack, onMenu
             })}
           </ol>
 
-          {ready ? <p className="prep-ready">READY — opening {MODE_NAMES[mode]}…</p> : null}
+          {ready ? (
+            <p className="prep-ready">
+              <Icon name="status-done" size={16} />
+              READY — opening {modeName}…
+            </p>
+          ) : null}
 
           {failed ? (
             <div className="prep-failure" role="alert">
@@ -104,24 +100,35 @@ export default function ModePreparation({ mode, onReady, onRetry, onBack, onMenu
               <p>{prep.message}</p>
               {prep.detail ? <pre className="prep-detail">{prep.detail}</pre> : null}
               <div className="prep-actions">
-                <button type="button" className="btn-solid" onClick={onRetry}>
-                  RETRY
+                <button type="button" className="btn btn-primary" onClick={onRetry}>
+                  Retry
                 </button>
-                <button type="button" className="btn-outline" onClick={onBack}>
-                  BACK
+                <button type="button" className="btn" onClick={onBack}>
+                  Back to menu
                 </button>
               </div>
             </div>
-          ) : null}
+          ) : (
+            <div className="prep-actions">
+              <button type="button" className="text-link" onClick={onBack}>
+                <Icon name="arrow-left" size={14} />
+                Cancel
+              </button>
+            </div>
+          )}
         </section>
       </main>
-      <footer className="link-footer">
-        <button type="button" onClick={onBack}>
-          {failed ? '← BACK TO MENU' : '← CANCEL'}
-        </button>
-        <span>EVERY SESSION STARTS FROM THE VULNERABLE BASELINE.</span>
-        <span />
-      </footer>
+      <StatusBar>
+        <span>
+          PANEL: <span className={panel ? undefined : 'muted'}>{panel || '—'}</span>
+        </span>
+        <span className="hw-sep" aria-hidden="true">
+          |
+        </span>
+        <span>
+          USB: <span className={port ? undefined : 'muted'}>{port || '—'}</span>
+        </span>
+      </StatusBar>
     </div>
   )
 }

@@ -1,0 +1,66 @@
+/*
+ * CyberTrainer design tokens — the single source for colour, type, spacing and
+ * shape. Derived from the "Design tokens and states" reference screen; every
+ * component stylesheet reads these variables and never a literal colour, so
+ * the whole application can be re-skinned from this one block.
+ *
+ * Two non-CSS consumers resolve these at run time because their libraries need
+ * concrete colour strings, not `var()` expressions: the xterm.js terminal
+ * (components/HackTerminal.jsx) and the Blockly theme
+ * (components/BlocklyWorkspace.jsx). Rename a token here and update them.
+ */
+:root {
+  /* Surfaces */
+  --base: #141316; /* app background */
+  --surface: #1c1c1e; /* cards, panels */
+  --raised: #242627; /* inputs, hover */
+  --line: #2e2e31; /* borders */
+  --line-strong: #3a3b3e; /* control borders */
+  --line-hover: #5a5b5f; /* control borders on hover */
+  --dot-grid: #202023; /* background dot texture */
+
+  /* Text */
+  --text: #e5e4e5; /* 14.3 : 1 on base */
+  --text-soft: #c9c8ca;
+  --muted-soft: #a8a7aa;
+  --muted: #919093; /* 5.7 : 1 on base */
+
+  /* Status — never colour alone: every use also carries an icon or a label */
+  --success: #b9f56b;
+  --warning: #f2d34a;
+  --danger: #ff7b7b;
+  --info: #7aa7e0;
+
+  /* Primary (light) button states */
+  --primary: #e5e4e5;
+  --primary-hover: #ffffff;
+  --primary-active: #c4c3c5;
+  --on-primary: #141316;
+
+  /* Type */
+  --font-sans: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-display: 'Roboto Condensed', 'Arial Narrow', 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', Consolas, monospace;
+
+  /* Shape — radius 12 inputs, 14 buttons, 18 cards */
+  --radius-field: 12px;
+  --radius-button: 14px;
+  --radius-card: 18px;
+  --radius-panel: 26px;
+  --radius-pill: 999px;
+
+  /* Spacing 4 / 8 / 12 / 16 / 24 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+
+  /* Chrome heights */
+  --topbar-height: 56px;
+  --statusbar-height: 36px;
+  --touch-target: 44px;
+
+  --shadow-card: 0 24px 60px rgba(0, 0, 0, 0.35);
+  --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.45);
+}

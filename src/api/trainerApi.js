@@ -97,6 +97,20 @@ export function fetchEvaluation(participantId) {
   return request(`/api/evaluation/${encodeURIComponent(participantId)}`)
 }
 
+/**
+ * The backend's liveness probe (GET /health). True when it answers OK; any
+ * network failure or non-OK answer is "not reachable". Read-only: it touches
+ * no session, no hardware and no database.
+ */
+export async function fetchHealth(signal) {
+  try {
+    const response = await fetch(`${resolveApiUrl()}/health`, { signal, cache: 'no-store' })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 /** Is this Hack/Build session still running on the backend? */
 export function fetchSessionLive(mode, sessionId) {
   return request(`/api/sessions/${mode}/${encodeURIComponent(sessionId)}`).then((body) => Boolean(body?.live))

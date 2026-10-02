@@ -7,15 +7,15 @@ import {
 } from '../hardware/deviceState'
 
 /**
- * The uniform hardware header both modes render:
+ * The uniform hardware readout both modes render in their status bar:
  *
- *   PANEL: 20:9b:a9:88:0b:e4 | USB: COM3 | CONNECTED
+ *   PANEL: 20:9b:a9:88:0b:e4 | USB: COM3 | CONNECTED ●
  *
- * Placed after the screen's mode name, that reads as the one format Hack
- * Mode and Build Mode share:
+ * Under the top bar's mode name, that reads as the one format Hack Mode and
+ * Build Mode share:
  *
- *   HACK MODE  | PANEL: … | USB: … | CONNECTED
- *   BUILD MODE | PANEL: … | USB: … | CONNECTED
+ *   HACK MODE  ... PANEL: … | USB: … | CONNECTED
+ *   BUILD MODE ... PANEL: … | USB: … | CONNECTED
  *
  * ONE COMPONENT, SO UNIFORMITY IS STRUCTURAL. Neither screen formats these
  * fields itself and neither can drift: they both hand this the shared
@@ -66,6 +66,8 @@ export default function HardwareHeaderStatus({ hardware }) {
       </span>
       <span className={connected ? 'hw-conn is-connected' : 'hw-conn is-disconnected'}>
         {connectionLabel(hardware)}
+        {/* The word is the status; the dot only reinforces it. */}
+        <span className={connected ? 'dot is-ok' : 'dot is-bad'} aria-hidden="true" />
       </span>
     </span>
   )
