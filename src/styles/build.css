@@ -1,8 +1,128 @@
-/* Build Mode: panel rail, project tree, editor, Blockly, terminal, pipeline. */
+/*
+ * Build Mode: panel rail | side column | editor card. Composition follows the
+ * supplied references (Build Mode / Build Mode Blockly): the rail and side
+ * column are cards at the left and the active workspace — the stacked C++
+ * source or the Blockly canvas — is the large card. Compile / Flash / Run
+ * validation are compact icon buttons in the top bar (.build-actions), so the
+ * workspace carries no controls of its own. At 1280x800 the rail is 56px, the
+ * side column 236px and the editor 940px.
+ */
 
 .build-body {
+  --side-width: 236px;
   min-height: 0;
 }
+
+/* The header toolbar: [C++ | Blockly] [Compile Flash Validation] | [Reset Quit].
+   One even 12px rhythm between every group and the divider, and every control
+   exactly 44px tall so their tops and bottoms line up. */
+.build-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The mode switch's 38px segments inside 2px padding and a 1px border make the
+   same 44px as the buttons beside it (it was 46px, 1px off at both edges). */
+.build-toolbar .seg-group.is-compact {
+  padding: 2px;
+}
+
+/* Sets the session-ending controls apart from the build actions in the top bar. */
+.topbar-sep {
+  flex: none;
+  width: 1px;
+  height: 24px;
+  background: var(--line-strong);
+}
+
+/* --- build actions (top bar) ---------------------------------------------------------- */
+
+/* Compile / Flash / Run validation: icon-only, 44px squares drawn like the
+   bordered header buttons beside them (Reset, Quit) so the bar reads as one
+   family. Flash keeps the primary fill it always had. */
+.build-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.build-action {
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-button);
+  background: var(--surface);
+  color: var(--text);
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s,
+    transform 0.08s;
+}
+
+.build-action:hover:not(:disabled) {
+  background: var(--raised);
+  border-color: var(--line-hover);
+}
+
+.build-action:active:not(:disabled) {
+  background: var(--base);
+  transform: scale(0.96);
+}
+
+.build-action:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+
+.build-action.is-primary {
+  background: var(--primary);
+  border-color: var(--muted);
+  color: var(--on-primary);
+}
+
+.build-action.is-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  border-color: var(--muted);
+}
+
+.build-action.is-primary:active:not(:disabled) {
+  background: var(--primary-active);
+}
+
+.build-action:disabled {
+  background: var(--raised);
+  border-color: var(--line);
+  color: var(--muted);
+  transform: none;
+}
+
+/* Without a text label the running state needs its own cue: the icon pulses
+   while its operation runs (the button is also disabled and says so in its
+   accessible name and tooltip). */
+@media (prefers-reduced-motion: no-preference) {
+  .build-action.is-working .icon {
+    animation: build-action-pulse 1s ease-in-out infinite;
+  }
+}
+
+/* A play triangle's visual weight sits left of its box; nudged so it reads centred. */
+.build-actions > .build-action:first-child .icon {
+  transform: translateX(1px);
+}
+
+@keyframes build-action-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.muted-note {
+  color: var(--muted-soft);
+  font: 400 12px/1.5 var(--font-sans);
+}
+
+/* --- rail -------------------------------------------------------------------------------- */
 
 .build-rail {
   width: 56px;
@@ -16,8 +136,10 @@
   align-self: stretch;
 }
 
+/* --- side column --------------------------------------------------------------------- */
+
 .build-side {
-  width: 252px;
+  width: var(--side-width);
   flex: none;
   display: flex;
   flex-direction: column;
@@ -31,8 +153,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 6px 0 16px;
+  padding: 0 var(--space-1) 0 var(--space-4);
   border-bottom: 1px solid var(--line);
+}
+
+/* The collapse control is a 40px target (it was 32px) with its icon where it was. */
+.side-head .icon-btn {
+  width: 40px;
+  height: 40px;
 }
 
 .side-head h2 {
@@ -46,27 +174,14 @@
   padding: 8px;
 }
 
-.side-caption {
-  margin: 16px 8px 6px;
-  font: 600 11px/1 var(--font-sans);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.muted-note {
-  color: var(--muted-soft);
-  font: 400 12px/1.5 var(--font-sans);
-}
-
-/* --- project tree ------------------------------------------------------------------------ */
+/* --- project tree -------------------------------------------------------------------- */
 
 .tree-row {
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 32px;
+  min-height: 40px;
   padding: 0 10px;
   border: 0;
   border-radius: 10px;
@@ -80,6 +195,24 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A file's name: the stem shortens with an ellipsis in a narrow column, the
+   extension never does, so "smart_home_mqtt_c….ino" still says what it is. */
+.tree-name {
+  display: flex;
+}
+
+.tree-stem {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-ext {
+  flex: none;
   white-space: nowrap;
 }
 
@@ -104,47 +237,7 @@ button.tree-row:hover {
   gap: 2px;
 }
 
-.section-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.section-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 34px;
-  padding: 0 8px 0 10px;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text-soft);
-  font: 400 12.5px/1 var(--font-mono);
-  text-align: left;
-}
-
-.section-row:hover {
-  background: var(--raised);
-}
-
-.section-row.is-on {
-  background: var(--line);
-  color: var(--text);
-}
-
-.section-row.is-editable {
-  color: var(--text);
-}
-
-.section-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* --- policy tags ---------------------------------------------------------------------- */
 
 .policy-tag {
   flex: none;
@@ -172,22 +265,23 @@ button.tree-row:hover {
   color: var(--info);
 }
 
-/* --- remediation brief ---------------------------------------------------------------------- */
+/* --- build brief + activity ------------------------------------------------------- */
 
 .brief {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 14px;
+  padding: 14px 16px 16px;
 }
 
 .brief-value {
-  font: 600 14px/1.3 var(--font-mono);
+  color: var(--text);
+  font: 600 14px/1.35 var(--font-sans);
   overflow-wrap: anywhere;
 }
 
 .brief h3 {
-  margin-bottom: 4px;
+  margin-bottom: 5px;
   font: 600 11px/1 var(--font-sans);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -195,14 +289,15 @@ button.tree-row:hover {
 }
 
 .brief section p {
-  font: 400 13px/1.5 var(--font-sans);
   color: var(--text-soft);
+  font: 400 13px/1.5 var(--font-sans);
+  overflow-wrap: anywhere;
 }
 
 .activity-body {
   display: flex;
   flex-direction: column;
-  padding: 12px 14px;
+  padding: 12px 16px;
 }
 
 .activity-log-scroll {
@@ -211,7 +306,7 @@ button.tree-row:hover {
   overflow-y: auto;
 }
 
-/* --- editor ---------------------------------------------------------------------------------- */
+/* --- editor card ------------------------------------------------------------------------- */
 
 .build-center {
   flex: 1;
@@ -224,23 +319,63 @@ button.tree-row:hover {
 
 .build-editor {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* The maximized terminal is positioned over this card (see .terminal-dock). */
+  position: relative;
 }
 
-.tab-strip {
+/* Everything above the terminal dock: tab bar, source / canvas, notices, the
+   breadcrumb row. It takes whatever height the dock leaves, so a taller dock
+   shrinks it and Blockly's ResizeObserver re-measures the canvas. */
+.editor-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* A maximized terminal is drawn over the card. The editor underneath is kept
+   exactly as it is (same layout, scroll, blocks) and merely not shown; the
+   caller also marks it inert so nothing in it takes focus. */
+.editor-main.is-covered {
+  visibility: hidden;
+}
+
+/* File tabs stay put; the opened-section tabs beside them scroll sideways
+   (wheel, touch, or the active tab being brought into view) instead of showing
+   a scrollbar in a 44px row. */
+.tab-bar {
   flex: none;
   height: 44px;
   display: flex;
   align-items: stretch;
   border-bottom: 1px solid var(--line);
+}
+
+.tab-strip {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.tab-strip > .tab {
+  flex: none;
 }
 
 .tab {
-  height: 44px;
+  height: 100%;
   padding: 0 16px;
   display: inline-flex;
   align-items: center;
@@ -251,6 +386,10 @@ button.tree-row:hover {
   color: var(--muted);
   font: 500 13px/1 var(--font-sans);
   white-space: nowrap;
+}
+
+.tab-file {
+  flex: none;
 }
 
 .tab:hover {
@@ -285,6 +424,18 @@ button.tree-row:hover {
   padding: 0 4px 0 16px;
 }
 
+/* Only EDITABLE sections get a tab, and the blocks icon says so. */
+.tab-workspace .tab-label .icon {
+  color: var(--info);
+}
+
+.tab-name {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tab-workspace .tab-close {
   padding: 0 14px 0 8px;
   color: var(--muted);
@@ -306,12 +457,13 @@ button.tree-row:hover {
 }
 
 .code-section {
+  --card-bg: var(--base);
   position: relative;
   flex: none;
   padding: 9px 20px 9px 14px;
   border: 1px solid var(--line-strong);
   border-radius: 16px;
-  background: var(--base);
+  background: var(--card-bg);
   cursor: pointer;
   transition: border-color 0.12s;
 }
@@ -321,7 +473,9 @@ button.tree-row:hover {
   border-color: var(--line-hover);
 }
 
+/* The open section: a bright outline and a slightly lifted surface, not a fill. */
 .code-section.is-selected {
+  --card-bg: var(--surface);
   border-color: var(--text);
 }
 
@@ -331,12 +485,24 @@ button.tree-row:hover {
   box-shadow: inset 3px 0 0 var(--info);
 }
 
+/* Inside a card the policy is a quiet caption, not a badge: sixteen bordered
+   pills down one file was noise. Editable is told apart by its blue edge and
+   label, locked also by its dimmed code, explore by its eye icon. The card's own
+   background masks any code running under it. */
 .code-section > .policy-tag {
   position: absolute;
-  top: 8px;
-  right: 12px;
-  background: var(--base);
+  top: 9px;
+  right: 14px;
+  height: 18px;
+  padding: 0 0 0 10px;
+  border: 0;
+  border-radius: 0;
+  background: var(--card-bg);
   z-index: 1;
+}
+
+.code-section.is-locked .code-lines {
+  opacity: 0.7;
 }
 
 .code-lines {
@@ -444,13 +610,35 @@ button.tree-row:hover {
   inset: 0;
 }
 
+/* The open canvas's policy tag, in the tab bar's free right-hand end. */
+.tab-context {
+  flex: none;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+  padding: 0 var(--space-3) 0 var(--space-4);
+}
+
+/* Kept slim: the draft notice and a refusal can show together, and every pixel
+   they take comes out of the canvas. */
 .build-notices {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 6px 12px;
   border-top: 1px solid var(--line);
+}
+
+.build-notices .notice {
+  align-items: center;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.build-notices .notice > .icon {
+  margin-top: 0;
 }
 
 .editor-foot {
@@ -486,125 +674,238 @@ button.tree-row:hover {
   white-space: nowrap;
 }
 
-/* --- general terminal ---------------------------------------------------------------------- */
+/* --- terminal dock ------------------------------------------------------------------------ */
 
-.general-terminal {
+/* Compile / flash / validation output, along the bottom of the editor card. The
+   docked height is set inline (TerminalDock.jsx); collapsed it is just the
+   header; maximized it covers the card. */
+.terminal-dock {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   border-top: 1px solid var(--line);
+  background: var(--surface);
 }
 
-.terminal-toggle {
-  width: 100%;
-  height: 42px;
+.terminal-dock.is-maximized {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  border-top: 0;
+}
+
+/* Holds the docked dock's place in the card while the maximized dock is lifted
+   out of the flow, so the editor underneath keeps its exact layout. */
+.terminal-spacer {
+  flex: none;
+}
+
+/* The dock's top edge: a row above the header that is the drag handle (and a
+   keyboard-focusable separator). Only drawn while docked. */
+.terminal-grip {
+  position: relative;
+  flex: none;
+  height: 10px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.terminal-grip::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  width: 40px;
+  height: 4px;
+  margin-left: -20px;
+  border-radius: 2px;
+  background: var(--line-strong);
+  transition: background 0.12s;
+}
+
+.terminal-grip:hover::after,
+.terminal-grip:focus-visible::after,
+.terminal-dock.is-resizing .terminal-grip::after {
+  background: var(--muted-soft);
+}
+
+.terminal-grip:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+
+.terminal-dock.is-resizing {
+  user-select: none;
+}
+
+.terminal-head {
+  flex: none;
+  height: 36px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 14px;
-  border: 0;
-  background: var(--surface);
-  color: var(--muted-soft);
-  font: 600 12px/1 var(--font-sans);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  gap: 8px;
+  padding: 0 4px 0 14px;
 }
 
-.terminal-toggle:hover {
+.terminal-title {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.terminal-dock.is-maximized .terminal-title {
+  cursor: default;
+}
+
+.terminal-name {
+  color: var(--text);
+  font: 600 13px/1 var(--font-sans);
+  transition: color 0.12s;
+}
+
+/* A collapsed dock is a quiet tab; it brightens when it opens or is hovered. */
+.terminal-dock.is-collapsed .terminal-name {
+  color: var(--muted-soft);
+}
+
+.terminal-dock.is-collapsed .terminal-title:hover .terminal-name {
   color: var(--text);
 }
 
-.terminal-toggle-label {
-  display: inline-flex;
+.terminal-title .chip {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.terminal-actions {
+  flex: none;
+  display: flex;
   align-items: center;
-  gap: 10px;
+}
+
+/* 40 x 34 targets inside the 36px header (they were 32 x 32). */
+.terminal-actions .icon-btn.is-sm {
+  width: 40px;
+  height: 34px;
 }
 
 .terminal-output {
-  height: 150px;
+  flex: 1;
+  min-height: 0;
   margin: 0;
-  padding: 10px 14px;
+  padding: 8px 14px 10px;
   overflow: auto;
+  border-top: 1px solid var(--line);
   background: var(--base);
   color: var(--text-soft);
   font: 400 12px/1.5 var(--font-mono);
   white-space: pre-wrap;
+  /* A long path or URL in compiler output wraps instead of widening the page. */
+  overflow-wrap: anywhere;
 }
 
-/* --- pipeline strip --------------------------------------------------------------------------- */
-
-.build-pipeline {
-  flex: none;
-  min-height: 84px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 10px 14px 10px 18px;
+.terminal-output[hidden] {
+  display: none;
 }
 
-.pipeline {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.pipeline-step {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--muted);
-}
-
-.pipeline-step.is-success {
-  color: var(--success);
-}
-
-.pipeline-step.is-warning {
-  color: var(--warning);
-}
-
-.pipeline-step.is-danger {
-  color: var(--danger);
-}
-
-.pipeline-title {
-  color: var(--text);
-  font: 600 13px/1.2 var(--font-sans);
-}
-
-.pipeline-detail {
-  margin-top: 3px;
-  color: var(--muted-soft);
-  font: 400 11px/1.2 var(--font-sans);
-}
-
-.pipeline-link {
-  flex: 1;
-  min-width: 16px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--line);
-}
-
-.pipeline-link.is-done {
-  background: var(--success);
+.terminal-output:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: -2px;
 }
 
 /* --- Blockly ----------------------------------------------------------------------------------- */
 
-.blockly-host .blocklyToolboxDiv {
-  font-family: var(--font-sans);
+/* The "hide toolbox" switch. toolboxVisibility.js puts .toolbox-hidden on the
+   workspace's injection div and also calls Blockly's own setVisible(false); this
+   rule is the guarantee that the toolbox (and a flyout of it) is out of the
+   layout whatever Blockly's private visible flag says. Out of the layout is also
+   what lets Toolbox.position() measure a width of 0, which is what hands the
+   canvas the toolbox's former column. `!important` beats Blockly's inline
+   `style.display`. */
+.blockly-host .toolbox-hidden .blocklyToolbox,
+.blockly-host .toolbox-hidden .blocklyToolboxFlyout {
+  display: none !important;
+}
+
+/* Blockly's toolbox is the canvas's left column, drawn like the reference's
+   "Toolbox" panel: the side column's width, a title, and one row per category
+   with its colour as a short bar. Blockly marks a category's colour as an inline
+   `border-left` on `.blocklyToolboxCategory` (and paints the selected row in
+   that colour), so the container becomes the 40px highlight row and the inner
+   row the bar + label. CSS only — BlocklyWorkspace.jsx is not involved. The
+   `!important`s beat Blockly's inline styles. */
+.blockly-host .blocklyToolbox {
+  width: var(--side-width);
+  padding: 0 0 4px;
   border-right: 1px solid var(--line);
+  font-family: var(--font-sans);
+}
+
+.blockly-host .blocklyToolbox::before {
+  content: 'Toolbox';
+  display: block;
+  height: 44px;
+  margin-bottom: 4px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font: 600 14px/44px var(--font-sans);
+}
+
+.blockly-host .blocklyToolboxCategoryContainer {
+  margin: 0 8px 2px;
+  padding: 6px 8px;
+  border-radius: 10px;
+}
+
+.blockly-host .blocklyToolboxCategoryContainer:hover,
+.blockly-host .blocklyToolboxCategoryContainer[aria-selected='true'] {
+  background: var(--raised);
 }
 
 .blockly-host .blocklyToolboxCategory {
-  border-radius: 10px;
-  margin: 2px 6px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  /* Blockly adds 3px under every category, which made a row 43px; without it the
+     rows are the reference's 40px apart and all ten fit beside the default
+     Terminal height at 1280x800 without scrolling. */
+  margin-bottom: 0 !important;
+  padding-left: 12px !important;
+  border-left-width: 5px !important;
+  border-radius: 3px;
+  background: transparent !important;
+}
+
+/* The divider between category groups was a bright-white 1px line, the one hard
+   edge in the panel; it is now an ordinary hairline, inset like the rows. */
+.blockly-host .blocklyTreeSeparator {
+  margin: 4px 16px !important;
+  border-bottom-color: var(--line) !important;
+}
+
+/* Scrollbars: present when needed, quiet when not. */
+.blockly-host .blocklyScrollbarHandle {
+  fill-opacity: 0.28 !important;
+}
+
+.blockly-host .blocklyScrollbarHandle:hover {
+  fill-opacity: 0.5 !important;
+}
+
+.blockly-host .blocklyToolboxCategoryIcon {
+  display: none !important;
 }
 
 .blockly-host .blocklyToolboxCategoryLabel {
-  font: 500 13.5px/1 var(--font-sans);
+  color: var(--text) !important;
+  font: 500 14px/1 var(--font-sans);
 }
 
 .blockly-host .blocklyFlyoutBackground {
@@ -615,8 +916,16 @@ button.tree-row:hover {
   stroke: none;
 }
 
-@media (max-width: 1180px) {
-  .build-side {
-    width: 212px;
-  }
+/* --- compile notification ------------------------------------------------------------------ */
+
+/* The toast belongs to the editor card, so it hangs from the card's top-right
+   corner just BELOW its tab bar: clear of the tab bar's own right-hand end (the
+   section tag) and, with the card's 12px margin plus 16px, of Blockly's vertical
+   scrollbar. Offsets are the top bar, the tab bar and a gap; they do not depend
+   on the viewport. It is not drawn while the Terminal is maximized (the
+   Terminal's own status chip says the same thing there, and it pulses when the
+   status changes). */
+.toast.build-toast {
+  top: calc(var(--topbar-height) + 44px + 8px);
+  right: 28px;
 }

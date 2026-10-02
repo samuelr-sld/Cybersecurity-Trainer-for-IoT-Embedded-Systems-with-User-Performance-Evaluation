@@ -4,6 +4,7 @@ import * as BlocklyEnMsg from 'blockly/msg/en'
 import { registerArduinoBlocks } from '../blockly/arduinoBlocks'
 import { generateArduinoCode } from '../blockly/arduinoGenerator'
 import { POPULATED_TOOLBOX } from '../blockly/catalog/masterCatalog.generated'
+import { applyToolboxVisibility } from '../blockly/toolboxVisibility'
 
 // `blockly/core` (the modular entry point this file deliberately uses
 // instead of the "batteries included" `blockly` package — see the module
@@ -93,17 +94,38 @@ function buildBlocklyTheme() {
  * mounted: `flush()` reports the workspace's CURRENT serialization through
  * `onWorkspaceChange` synchronously if it differs from the last one reported
  * (see the FLUSH comment below).
+ *
+ * `toolboxVisible` (default true) shows or hides Blockly's own toolbox — a
+ * presentation toggle driven by `BuildMode.jsx`'s rail button; it changes no
+ * block, category or serialization. Hidden, the toolbox leaves the layout
+ * entirely and the canvas takes its space (see src/blockly/toolboxVisibility.js
+ * and the `.toolbox-hidden` rule in build.css).
  */
-export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceChange, onCodeChange, apiRef }) {
+export default function BlocklyWorkspace({
+  initialWorkspaceState,
+  onWorkspaceChange,
+  onCodeChange,
+  apiRef,
+  toolboxVisible = true,
+}) {
   const hostRef = useRef(null)
   const workspaceRef = useRef(null)
   const onCodeChangeRef = useRef(onCodeChange)
   const onWorkspaceChangeRef = useRef(onWorkspaceChange)
+  const toolboxVisibleRef = useRef(toolboxVisible)
 
   useEffect(() => {
     onCodeChangeRef.current = onCodeChange
     onWorkspaceChangeRef.current = onWorkspaceChange
+    toolboxVisibleRef.current = toolboxVisible
   })
+
+  // A toggle after mount. (A new canvas, which is a remount, applies the
+  // current value itself right after it is injected, below.)
+  useEffect(() => {
+    const workspace = workspaceRef.current
+    if (workspace) applyToolboxVisibility(workspace, toolboxVisible, Blockly.svgResize)
+  }, [toolboxVisible])
 
   useEffect(() => {
     const host = hostRef.current
@@ -127,6 +149,11 @@ export default function BlocklyWorkspace({ initialWorkspaceState, onWorkspaceCha
       // itself never reports back as a student edit.
       Blockly.serialization.workspaces.load(initialWorkspaceState, workspace)
     }
+    // A section opened while the toolbox is hidden stays hidden: applied here,
+    // in the same task as the injection, so it is never drawn first. (A new
+    // workspace starts with its toolbox shown, so there is nothing to apply
+    // for the common case.)
+    if (!toolboxVisibleRef.current) applyToolboxVisibility(workspace, false, Blockly.svgResize)
 
     // Only a change to what the workspace SERIALIZES to is reported. Blockly
     // delivers events asynchronously, so the creation events of the load

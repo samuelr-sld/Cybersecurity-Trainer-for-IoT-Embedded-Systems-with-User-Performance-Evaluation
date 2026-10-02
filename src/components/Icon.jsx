@@ -44,6 +44,19 @@ const ICONS = {
   'arrow-right': { box: '0 0 16 16', base: STROKE, body: <path d="M3 8h10M9 4l4 4-4 4" strokeWidth="1.8" /> },
   'arrow-left': { box: '0 0 14 14', base: STROKE, body: <path d="M12 7H2M6 3L2 7l4 4" strokeWidth="1.6" /> },
   'chevron-down': { box: '0 0 10 10', base: STROKE, body: <path d="M2 3.5l3 3 3-3" strokeWidth="1.5" /> },
+  'chevron-up': { box: '0 0 10 10', base: STROKE, body: <path d="M2 6.5l3-3 3 3" strokeWidth="1.5" /> },
+  // A panel taking all the room / giving it back (the usual window vocabulary).
+  maximize: { box: '0 0 14 14', base: STROKE, body: <rect x="2.5" y="2.5" width="9" height="9" rx="1.6" strokeWidth="1.4" /> },
+  restore: {
+    box: '0 0 14 14',
+    base: STROKE,
+    body: (
+      <>
+        <rect x="2.5" y="4.5" width="7" height="7" rx="1.4" strokeWidth="1.3" />
+        <path d="M4.5 4.5V3.4a.9.9 0 01.9-.9h5.2a.9.9 0 01.9.9v5.2a.9.9 0 01-.9.9H9.5" strokeWidth="1.3" />
+      </>
+    ),
+  },
   'chevron-left': { box: '0 0 12 12', base: STROKE, body: <path d="M8 2L4 6l4 4" strokeWidth="1.7" /> },
   'chevron-right': { box: '0 0 12 12', base: STROKE, body: <path d="M4 2l4 4-4 4" strokeWidth="1.7" /> },
   'caret-up': { box: '0 0 10 10', base: FILL, body: <path d="M5 2l4 6H1z" /> },

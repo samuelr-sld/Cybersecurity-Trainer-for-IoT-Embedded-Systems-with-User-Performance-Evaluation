@@ -1,11 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
+import ActivityLog from '../components/ActivityLog'
 import AppHeader from '../components/AppHeader'
 import BlocklyWorkspace from '../components/BlocklyWorkspace'
+import BuildBrief from '../components/BuildBrief'
 import CppCode from '../components/CppCode'
 import Icon from '../components/Icon'
 import StatusBar from '../components/StatusBar'
-import { restoreFromSessionFrame } from '../build/sessionRestore'
+import TerminalDock from '../components/TerminalDock'
+import { formatElapsed, restoreFromSessionFrame } from '../build/sessionRestore'
+import { VALIDATION_UNDEFINED_NOTE, validationDefined } from '../build/buildControls'
+import { splitExtension } from '../build/fileName'
 import { numberSegments } from '../build/sectionLines'
+import { POLICY_HINT, POLICY_ICON, POLICY_LABEL, policyOf, sectionLabel } from '../build/sectionNav'
+import { INITIAL_DOCK, dockReducer, terminalRevealedBy } from '../build/terminalDock'
 import useBuildSocket, { CONNECTION_STATUS } from '../hooks/useBuildSocket'
 // Shared with Hack Mode rather than kept private here: both screens render
 // the SAME backend device state (one `device_monitor` per process, see
@@ -24,38 +31,6 @@ import {
   transmitVia,
 } from '../build/compileChain'
 
-// Backend `BuildEventType` values (backend/app/build/events.py) -> Activity
-// Log copy. A plain lookup, not a switch, so an event type this map doesn't
-// know about (the closed set changed) falls back to the raw value below
-// rather than silently dropping the row — the same pattern HackMode.jsx
-// uses for ScenarioEventType. The session/edit five (Phase 3A), the three
-// compile events (Phase 3B) and the three flash events (Phase 3C) are all
-// really emitted; the rest are reserved vocabulary for later phases
-// (validation, security/functional testing).
-const EVENT_LABELS = {
-  build_session_started: 'Build session started',
-  workspace_loaded: 'Workspace loaded',
-  security_region_edited: 'Security region edited',
-  code_edited: 'Code edited',
-  build_session_ended: 'Build session ended',
-  compile_started: 'Compile started',
-  compile_failed: 'Compile failed',
-  compile_succeeded: 'Compile succeeded',
-  flash_started: 'Flash started',
-  flash_failed: 'Flash failed',
-  flash_succeeded: 'Flash succeeded',
-  validation_started: 'Validation started',
-  validation_failed: 'Validation failed',
-  validation_succeeded: 'Validation succeeded',
-  security_test_started: 'Security test started',
-  security_test_failed: 'Security test failed',
-  security_test_succeeded: 'Security test succeeded',
-  functional_test_started: 'Functional test started',
-  functional_test_failed: 'Functional test failed',
-  functional_test_succeeded: 'Functional test succeeded',
-  build_completed: 'Build completed',
-}
-
 // Backend `CompileStatus`/`FlashStatus`/`ValidationStatus` values (backend/
 // app/build/models.py) -> display copy. `detecting` and `no_device` are
 // FlashStatus-only: flashing has a physical failure domain compilation does
@@ -70,13 +45,12 @@ const BUILD_STATUS_LABEL = {
   failed: 'FAILED',
 }
 
-// The General Terminal's header suffix for whichever operation it is
-// currently showing (see `currentOp` below) — GENERAL TERMINAL alone when
-// nothing has run yet.
-const GENERAL_TERMINAL_LABEL = { compile: 'COMPILE', flash: 'FLASH', validation: 'VALIDATION' }
+// The Terminal's status chip names whichever operation it is currently showing
+// (see `currentOp` below); with nothing run yet there is no chip.
+const TERMINAL_OP_LABEL = { compile: 'COMPILE', flash: 'FLASH', validation: 'VALIDATION' }
 
-// Backend `CompileStatus` -> the General Terminal's banner copy while it is
-// showing a compile, mirroring FLASH_BANNER's shape below.
+// Backend `CompileStatus` -> the Terminal's banner copy while it is showing a
+// compile, mirroring FLASH_BANNER's shape below.
 const COMPILE_BANNER = {
   running: 'COMPILING…',
   succeeded: '✓ COMPILE SUCCESS',
@@ -119,11 +93,10 @@ const FLASH_FAILURE_NOTE = {
   internal_error: 'The backend could not run the upload.',
 }
 
-// Backend `ValidationStatus` -> the Validation Terminal's banner copy,
-// reusing exactly the same `.flash-terminal` visual language (Phase B7).
-// `ValidationStatus` has no `detecting`/`no_device` members — a validation
-// never touches device discovery, it judges firmware already on the board —
-// so this map only ever needs the three states below.
+// Backend `ValidationStatus` -> the Terminal's banner copy while it is showing
+// a validation (Phase B7). `ValidationStatus` has no `detecting`/`no_device`
+// members — a validation never touches device discovery, it judges firmware
+// already on the board — so this map only ever needs the three states below.
 const VALIDATION_BANNER = {
   running: 'VALIDATING…',
   succeeded: '✓ VALIDATION SUCCESS',
@@ -141,38 +114,6 @@ const VALIDATION_OUTCOME_NOTE = {
   not_run: 'No check ran for this firmware.',
 }
 
-// Activity Log timestamps are SESSION ELAPSED TIME (HH:MM:SS since this
-// Build Mode session's own `session` frame arrived — see `sessionStartRef`
-// below), never a wall-clock time-of-day. Nothing server-side currently
-// stamps a `BuildEvent` with a real timestamp (`backend/app/build/events.py`
-// has none), so there is no backend timestamp this discards — this is the
-// smallest frontend-only state needed to give each entry a stable, already-
-// elapsed display value once logged, per CLAUDE.md's Activity Log
-// requirements. Should the backend ever start stamping events for future
-// evaluation metrics, this only needs to read that value instead of
-// `Date.now()` at push-time; the elapsed-since-session-start display and the
-// per-session reset stay exactly as they are.
-// The Activity Log's session clock. Only ever called from the `session`
-// socket handler, never during render — kept as a module-level function so
-// that stays obvious to the React Compiler's purity check, which cannot see
-// that `useBuildSocket` invokes its handlers from socket callbacks.
-function sessionClockNow() {
-  return Date.now()
-}
-
-function formatElapsedSince(startMs) {
-  // `startMs` is null only in the instant before `onSession` has set it —
-  // see `sessionStartRef` — which no logged event can ever observe (the
-  // `session` frame, and therefore `onSession`, always precedes any `event`
-  // frame). Falls back to "just started" rather than a garbage huge value.
-  const totalSeconds = Math.max(0, Math.floor((Date.now() - (startMs ?? Date.now())) / 1000))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  const pad = (n) => String(n).padStart(2, '0')
-  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
-}
-
 // How long a successful-compile toast stays up before it auto-dismisses. A
 // failed one is deliberately NOT on a timer — it stays until the user
 // dismisses it or a new compile starts, since a syntax error is exactly the
@@ -188,9 +129,8 @@ const COMPILE_TOAST_CONTENT = {
   failed: { icon: 'status-failed', title: 'Compilation failed' },
 }
 
-// How each build step (compile / flash / validation) and the General Terminal's
-// status chip look for each backend status. The status WORD is always shown
-// next to the icon, so colour is never the only cue.
+// How the Terminal's status chip looks for each backend status. The status WORD
+// is always in the chip (BUILD_STATUS_LABEL), so colour is never the only cue.
 const STATUS_VISUAL = {
   not_started: { icon: 'status-pending', tone: 'is-muted' },
   detecting: { icon: 'status-partial', tone: 'is-warning' },
@@ -200,35 +140,35 @@ const STATUS_VISUAL = {
   no_device: { icon: 'status-failed', tone: 'is-danger' },
 }
 
-// The Blockly workspace is reached through the side-panel rail's three real
-// panels; the rail only chooses which one the collapsible left column shows.
+// The rail's panels. The rail only chooses which one the side column shows;
+// every panel is a view of state this screen already holds. (The reference's
+// further rail slots — run, terminal, device — have no real function yet, so
+// they are not drawn.)
 const SIDE_PANELS = [
   { id: 'project', icon: 'rail-files', label: 'Project' },
-  { id: 'brief', icon: 'rail-checklist', label: 'Remediation brief' },
+  { id: 'brief', icon: 'rail-checklist', label: 'Build Brief' },
   { id: 'activity', icon: 'rail-timeline', label: 'Activity log' },
 ]
 
-// Section interaction policy (backend `InteractionPolicy`) -> how it is labelled.
-// LOCKED and EXPLORE are both read-only; only EDITABLE opens a Blockly canvas.
-const POLICY_LABEL = { locked: 'Locked', explore: 'Explore', editable: 'Editable' }
-const POLICY_ICON = { locked: 'lock', explore: 'eye', editable: 'rail-blocks' }
+// The Activity log's clock is SESSION ELAPSED TIME (HH:MM:SS since this Build
+// Mode session's own `session` frame arrived — see `sessionStartRef`), never a
+// time of day: nothing server-side stamps a `BuildEvent`. Both are only ever
+// called from socket handlers, never during render — module-level so that is
+// obvious to the React Compiler's purity check, which cannot see that
+// `useBuildSocket` invokes its handlers from socket callbacks.
+function sessionClockNow() {
+  return Date.now()
+}
+
+function elapsedSince(startMs) {
+  // `startMs` is null only in the instant before `onSession` has set it, which
+  // no logged event can observe (the `session` frame always precedes any
+  // `event` frame); fall back to "just started" rather than a huge value.
+  return formatElapsed((Date.now() - (startMs ?? Date.now())) / 1000)
+}
 
 function fileIcon(name) {
   return name.endsWith('.ino') ? 'file-sketch' : 'file'
-}
-
-// One stage of the Compile -> Flash -> Verify strip.
-function PipelineStep({ status, title, detail }) {
-  const visual = STATUS_VISUAL[status] || STATUS_VISUAL.not_started
-  return (
-    <li className={`pipeline-step ${visual.tone}`}>
-      <Icon name={visual.icon} size={28} />
-      <div>
-        <p className="pipeline-title">{title}</p>
-        <p className="pipeline-detail">{detail}</p>
-      </div>
-    </li>
-  )
 }
 
 // Why an EDIT -> COMPILE -> FLASH chain stopped short (src/build/
@@ -247,10 +187,6 @@ const CHAIN_NOTICE_TEXT = {
 // switching away would otherwise silently throw those blocks away.
 const SWITCH_BLOCKED_NOTICE =
   'This section has edits that are not compiled yet. Press COMPILE to submit them before opening another section or file.'
-
-// "Near enough to the bottom that a new Activity Log entry should still
-// auto-scroll into view" — see the activityLogRef/onScroll wiring below.
-const ACTIVITY_LOG_AUTOSCROLL_THRESHOLD_PX = 32
 
 export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   const [state, setState] = useState(null)
@@ -277,6 +213,27 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   // section. Reset whenever the active file changes or a new session starts,
   // since a tab's region id only means something within its own file.
   const [openWorkspaceTabs, setOpenWorkspaceTabs] = useState([])
+  // THE SIDE COLUMN. `sidePanel` is which of the rail's panels (SIDE_PANELS) it
+  // shows; whether it is open is remembered PER EDITOR MODE. C++ opens with the
+  // Project panel beside the source, as in the reference. Blockly opens with
+  // the column closed, so Blockly's own toolbox is the left column of the
+  // canvas and the canvas keeps the width — opening a panel there is the
+  // student's choice, and pressing the rail's open button (or the Blocks
+  // toolbox button) closes it again.
+  const [sidePanel, setSidePanel] = useState('project')
+  const [sideOpenCpp, setSideOpenCpp] = useState(true)
+  const [sideOpenBlockly, setSideOpenBlockly] = useState(false)
+  // Whether Blockly's own toolbox (the block palette) is shown on a canvas. A
+  // presentation toggle driven by the rail's Blocks toolbox button, independent
+  // of the side column above — hiding one never hides the other. Remembered
+  // across section switches and C++/Blockly switches; Reset or re-entering the
+  // mode remounts this screen, which starts it shown again.
+  const [toolboxVisible, setToolboxVisible] = useState(true)
+  // The moment THIS Build Mode session started, for the Activity log's elapsed
+  // timestamps — set in `onSession` below (never during render: `Date.now()` is
+  // impure), so a fresh `/ws/build` connection always restarts at 00:00:00 and
+  // a resumed one continues from its real age.
+  const sessionStartRef = useRef(null)
   // THE LOCAL DRAFT AND THE EDIT -> COMPILE -> FLASH CHAIN. There is no
   // student-facing save: a section's edits live in the chain driver
   // (src/build/compileChain.js `createChainDriver`) until COMPILE or FLASH
@@ -314,16 +271,6 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   const [legacyTextOpen, setLegacyTextOpen] = useState(false)
   const [legacyDraft, setLegacyDraft] = useState(null)
 
-  // Collapsing this hands its grid column's width to the editor/Blockly
-  // canvas (see `.ide-grid.left-collapsed` in App.css) — no new sidebar,
-  // just the existing left column shrinking to a thin toggle strip. The
-  // Blockly workspace's own ResizeObserver (see BlocklyWorkspace.jsx)
-  // picks up the resulting size change on its own; nothing here has to
-  // tell it to.
-  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false)
-  // Which of the rail's panels (SIDE_PANELS) the left column is showing.
-  const [sidePanel, setSidePanel] = useState('project')
-
   // True from the moment validation is requested until the backend answers
   // with a fresh `state` (or rejects the request with an `error` frame). The
   // backend's own `validation_started`/succeeded/failed events already stream
@@ -332,23 +279,18 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   // runs.
   const [validationPending, setValidationPending] = useState(false)
 
-  // Which of compile/flash/validation the General Terminal below is
-  // currently showing — null until the first one runs. Set from the real
-  // backend `*_started` events in `onEvent` below, and kept as the last one
-  // that ran once everything is idle, so the terminal's result stays on
-  // screen until a different operation starts (`currentOp` below folds this
-  // together with the three live "is running" flags).
+  // Which of compile/flash/validation the Terminal below is currently
+  // showing — null until the first one runs. Set from the real backend
+  // `*_started` events in `onEvent` below, and kept as the last one that ran
+  // once everything is idle, so the terminal's result stays on screen until a
+  // different operation starts (`currentOp` below folds this together with the
+  // three live "is running" flags).
   const [activeOp, setActiveOp] = useState(null)
-  // The General Terminal is collapsed to its header bar until clicked.
-  const [terminalOpen, setTerminalOpen] = useState(false)
-
-  // The moment THIS Build Mode session started, for Activity Log elapsed
-  // timestamps (see `formatElapsedSince`) — set in `onSession` below (never
-  // during render: `Date.now()` is impure), so a fresh `/ws/build`
-  // connection (a new session, per backend/app/build_websocket.py) always
-  // restarts the display at 00:00:00, never carries over a previous
-  // session's clock.
-  const sessionStartRef = useRef(null)
+  // How much room the Terminal dock takes (src/build/terminalDock.js): collapsed
+  // to its header, docked at a height the student can drag, or maximized over the
+  // editor. Pure presentation — it changes nothing about what is compiled,
+  // flashed or validated, and `onEvent` below opens it when output arrives.
+  const [dock, dispatchDock] = useReducer(dockReducer, INITIAL_DOCK)
 
   // Drives the small bottom-right compile toast (see COMPILE_TOAST_CONTENT).
   // `showSuccessToast` is on its own timer so a success notification
@@ -385,8 +327,9 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   } = useBuildSocket({
     participantId,
     onSession: (message) => {
-      // A resumed session brings its own log and age; a new one brings
-      // neither, so it restarts at 00:00:00 exactly as before.
+      // A resumed session brings its own log, age and last operation (so the
+      // terminal keeps showing it); a new one brings none, and restarts at
+      // 00:00:00.
       const restored = restoreFromSessionFrame(message, sessionClockNow())
       setEvents(restored.events)
       setProtocolError('')
@@ -435,7 +378,7 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
     onEvent: (message) => {
       setEvents((evts) => [
         ...evts,
-        { event: message.event, data: message.data, at: formatElapsedSince(sessionStartRef.current) },
+        { event: message.event, data: message.data, at: elapsedSince(sessionStartRef.current) },
       ])
       // `code_edited` is the one event both `edit_region` and
       // `edit_section_blocks` produce on success (never `hardware_status`'s
@@ -478,11 +421,11 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
           successToastTimeoutRef.current = null
         }
       }
-      // GENERAL TERMINAL: which of compile/flash/validation it keeps showing
-      // once that operation finishes (see `currentOp` below) — set from the
-      // real backend event that starts each one, the same plain-response-to-
-      // an-occurrence pattern the compile toast above uses, never derived by
-      // watching other state in an effect.
+      // TERMINAL: which of compile/flash/validation it keeps showing once that
+      // operation finishes (see `currentOp` below) — set from the real backend
+      // event that starts each one, the same plain-response-to-an-occurrence
+      // pattern the compile toast above uses, never derived by watching other
+      // state in an effect.
       if (message.event === 'compile_started') {
         setActiveOp('compile')
       } else if (message.event === 'flash_started') {
@@ -490,6 +433,9 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
       } else if (message.event === 'validation_started') {
         setActiveOp('validation')
       }
+      // Output changed: open the Terminal if it is collapsed (a failure included).
+      // It never maximizes, and a dock that is already open keeps its size.
+      if (terminalRevealedBy(message.event)) dispatchDock({ type: 'reveal' })
     },
     onError: (message) => {
       setProtocolError(message)
@@ -548,6 +494,29 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
     [],
   )
 
+  // Keep what the student just opened in view. A LOCKED/EXPLORE section is
+  // only highlighted inside the long stacked file, possibly far off screen:
+  // one that is entirely out of view is brought to the top, one already
+  // (partly) visible moves only as far as it must, so clicking a section in
+  // place never makes the file jump.
+  const codeViewRef = useRef(null)
+  useEffect(() => {
+    if (!selectedSectionId || workspaceActive) return
+    const view = codeViewRef.current
+    const row = [...(view?.children || [])].find((el) => el.dataset.regionId === selectedSectionId)
+    if (!row) return
+    const v = view.getBoundingClientRect()
+    const r = row.getBoundingClientRect()
+    row.scrollIntoView({ block: r.bottom <= v.top || r.top >= v.bottom ? 'start' : 'nearest' })
+  }, [selectedSectionId, workspaceActive])
+
+  // The same for the tab strip, which scrolls sideways once enough sections
+  // have been opened.
+  const tabStripRef = useRef(null)
+  useEffect(() => {
+    tabStripRef.current?.querySelector('.tab.is-on')?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [selectedSectionId, workspaceActive, openWorkspaceTabs.length])
+
   // `running` covers both the brief edit submission and the real compile,
   // since from the student's point of view both are "compiling" — see the
   // chain in src/build/compileChain.js. `succeeded`/`failed` reflect the
@@ -579,12 +548,6 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
 
   const validationStatus = state?.validation_status || 'not_started'
   const validationOutput = state?.validation_output || null
-  // Phase 1.2. The connected panel's own `RemediationSpec` prose (backend/
-  // app/build/validation/models.py), verbatim from `state.remediation` —
-  // `null` for the four panels that declare no remediation activity yet.
-  // Never assembled or paraphrased here: what a fix must achieve is
-  // courseware content, not frontend copy.
-  const remediation = state?.remediation || null
   // Mirrors exactly the two gates `BuildService.validate_workspace` itself
   // enforces (app/build/service.py) — a successful flash must have happened,
   // AND the workspace still has to be the one that was flashed (flash_ready,
@@ -592,8 +555,18 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   // "nothing else is already in flight" guards `canFlash` already follows.
   // This can never offer an action the backend would refuse; it only avoids
   // a round trip to find that out.
+  //
+  // A panel that declares no remediation (`state.remediation` is null — Panel
+  // 2 today) has no validation to run, so Run Validation is never offered for
+  // it, whatever else is true.
+  const hasValidation = validationDefined(state?.remediation)
   const canValidate =
-    flashStatus === 'succeeded' && flashReady && !validationPending && !busy && !isCompiling
+    hasValidation &&
+    flashStatus === 'succeeded' &&
+    flashReady &&
+    !validationPending &&
+    !busy &&
+    !isCompiling
   const validationBannerStatus = validationPending ? 'running' : validationStatus
 
   // Backend `hardware` block (backend/app/build_sessions.py: `snapshot`) —
@@ -636,11 +609,10 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
     return () => clearInterval(id)
   }, [socketLinked, sendHardwareStatus, driver])
 
-  // The compile half of the General Terminal below — real `arduino-cli
-  // compile` output (`compileOutput.stdout`/`stderr`), never simulated. This
-  // was already sent by the backend in every `state` frame (`compile_output`)
-  // but had nowhere inline to render since the compile toast only ever showed
-  // an icon/title; this is the same data, just finally given a terminal.
+  // The compile half of the Terminal below — real `arduino-cli compile` output
+  // (`compileOutput.stdout`/`stderr`), never simulated. The backend sends it in
+  // every `state` frame (`compile_output`); the compile toast only shows an
+  // icon/title, so this is where the output itself is read.
   const compileOutput = state?.compile_output || null
   const compileTerminalText = submitting
     ? 'Submitting edits…'
@@ -660,11 +632,9 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
             .join('\n')
   const compileBannerStatus = submitting || isCompiling ? 'running' : compileStatus
 
-  // The Flash Terminal under the code editor — real Arduino CLI/esptool
-  // output (`flashOutput.stdout`/`stderr`), never simulated text. Built the
-  // same way the old `.flash-result` block was (same banner/device/failure-
-  // note copy), just rendered as one scrollable terminal block instead of a
-  // separate colored banner plus a nested `<pre>`.
+  // The flash half of the Terminal — real Arduino CLI/esptool output
+  // (`flashOutput.stdout`/`stderr`), never simulated text: banner, device and
+  // failure-note copy, then the tool's own output.
   const flashTerminalText = flashing
     ? 'Detecting device / uploading…'
     : flashStatus === 'not_started'
@@ -684,8 +654,8 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
           .filter(Boolean)
           .join('\n')
 
-  // The Validation Terminal, built the same way as the Flash Terminal above
-  // — real backend validator output (`validationOutput.message`/`details`),
+  // The validation half, built the same way as the flash half above — real
+  // backend validator output (`validationOutput.message`/`details`),
   // never simulated. `details` is the strategy's own free-form evidence
   // mapping (app/build/validation/models.py: `ValidationResult.details`),
   // rendered as pretty JSON since its shape is validator-specific and not
@@ -707,17 +677,14 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
           .filter(Boolean)
           .join('\n')
 
-  // GENERAL TERMINAL. Compile, flash and validation used to each get their
-  // own always-visible terminal block; this merges their presentation into
-  // one, showing whichever of the three is currently running and, once it
-  // finishes, keeping that same operation's result on screen until a
-  // different one starts — exactly the "stays until superseded" behavior the
-  // old Flash/Validation Terminals already had individually. None of the
-  // three text/status builders above changed; this only picks between them.
+  // TERMINAL. Compile, flash and validation share one output area: it shows
+  // whichever of the three is currently running and, once it finishes, keeps
+  // that same operation's result on screen until a different one starts. None of
+  // the three text/status builders above changed; this only picks between them.
   const compileRunning = submitting || isCompiling
   const validationRunning = validationPending
   const currentOp = flashing ? 'flash' : compileRunning ? 'compile' : validationRunning ? 'validation' : activeOp
-  const generalTerminalText =
+  const terminalText =
     currentOp === 'compile'
       ? compileTerminalText
       : currentOp === 'flash'
@@ -725,7 +692,7 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
         : currentOp === 'validation'
           ? validationTerminalText
           : 'Output will appear here once you compile, flash, or validate.'
-  const generalTerminalBannerStatus =
+  const terminalStatus =
     currentOp === 'compile'
       ? compileBannerStatus
       : currentOp === 'flash'
@@ -733,43 +700,13 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
         : currentOp === 'validation'
           ? validationBannerStatus
           : 'not_started'
-  const generalTerminalStatusText =
-    currentOp === 'compile'
-      ? compileRunning
-        ? 'COMPILING…'
-        : BUILD_STATUS_LABEL[compileStatus] || compileStatus
-      : currentOp === 'flash'
-        ? flashing
-          ? 'UPLOADING…'
-          : BUILD_STATUS_LABEL[flashStatus] || flashStatus
-        : currentOp === 'validation'
-          ? validationPending
-            ? 'VALIDATING…'
-            : BUILD_STATUS_LABEL[validationStatus] || validationStatus
-          : BUILD_STATUS_LABEL.not_started
-
-  // Smart auto-scroll for the Activity Log: a new entry scrolls into view
-  // only if the reader was already at/near the bottom. `isNearBottomRef` is
-  // kept current by the list's own onScroll handler (so it reflects where
-  // the reader actually is right before a new entry lands) and read — not
-  // set — by the effect below, which runs after `events` grows.
-  const activityLogRef = useRef(null)
-  const isNearBottomRef = useRef(true)
-
-  function handleActivityLogScroll(e) {
-    const el = e.currentTarget
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    isNearBottomRef.current = distanceFromBottom < ACTIVITY_LOG_AUTOSCROLL_THRESHOLD_PX
-  }
-
-  useEffect(() => {
-    const el = activityLogRef.current
-    if (el && isNearBottomRef.current) {
-      el.scrollTop = el.scrollHeight
-    }
-    // Also when the Activity log panel is (re)opened, so it opens on the
-    // newest entry rather than the first.
-  }, [events, sidePanel, leftPanelCollapsed])
+  // The header chip: which operation, and how it stands. No chip until one has run.
+  const terminalChip = currentOp
+    ? {
+        label: `${TERMINAL_OP_LABEL[currentOp]} · ${BUILD_STATUS_LABEL[terminalStatus] || terminalStatus}`,
+        tone: (STATUS_VISUAL[terminalStatus] || STATUS_VISUAL.not_started).tone,
+      }
+    : null
 
   // Leaving the open section while it holds an uncompiled draft is REFUSED,
   // not silently allowed: with no separate save step, switching away would
@@ -913,6 +850,13 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
     setFailureToastDismissed(true)
   }
 
+  function compileHint() {
+    if (compiling) return 'Compilation in progress'
+    if (busy) return 'Wait for the current operation to finish'
+    if (validationPending) return 'Wait for the validation check to finish'
+    return 'Compile the firmware'
+  }
+
   function flashHint() {
     if (canFlash) {
       return flashNeedsCompile
@@ -926,6 +870,7 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   }
 
   function validationHint() {
+    if (!hasValidation) return VALIDATION_UNDEFINED_NOTE
     if (canValidate) return 'Run the validation check against the flashed firmware'
     if (validationPending) return 'A validation check is already running'
     if (flashing) return 'Wait for the current flash to finish'
@@ -974,7 +919,6 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
   const project = state?.project
   const projectName = project?.module_id || project?.scenario_id || 'project'
   const boardName = project?.board?.name
-  const sidePanelDef = SIDE_PANELS.find((p) => p.id === sidePanel) || SIDE_PANELS[0]
 
   // The Blockly switch opens the workspace of the most recently opened
   // editable section, or else the first editable one. With no editable section
@@ -984,59 +928,37 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
     activeSegments.find((s) => s.policy === 'editable')?.region_id ??
     null
 
-  // The rail chooses the left column's panel; pressing the open panel's own
-  // button collapses the column to hand its width to the editor.
+  // A real Blockly canvas is on screen (not still loading, not the legacy
+  // text fallback). Only then does the workspace have a toolbox of its own.
+  const blocklyCanvasOpen = workspaceActive && !sectionLoading && Boolean(sectionData?.representable)
+  const sideOpen = workspaceActive ? sideOpenBlockly : sideOpenCpp
+  const setSideOpen = workspaceActive ? setSideOpenBlockly : setSideOpenCpp
+  const sidePanelDef = SIDE_PANELS.find((p) => p.id === sidePanel) || SIDE_PANELS[0]
+
+  // A rail button opens its panel; pressing the open panel's own button closes
+  // the column again, handing its width back to the editor.
   function pickSidePanel(id) {
-    if (id === sidePanel && !leftPanelCollapsed) {
-      setLeftPanelCollapsed(true)
+    if (sideOpen && id === sidePanel) {
+      setSideOpen(false)
     } else {
       setSidePanel(id)
-      setLeftPanelCollapsed(false)
+      setSideOpen(true)
     }
   }
 
-  const compileLabel =
-    (busy && chain.intent === CHAIN_INTENT.COMPILE) || (!busy && isCompiling) ? 'Compiling…' : 'Compile'
+  // The header's build actions are icon-only, so these labels are what a
+  // screen reader hears (aria-label) and what the tooltip's lead says while an
+  // operation is running; `is-working` is the sighted cue.
+  const compiling = (busy && chain.intent === CHAIN_INTENT.COMPILE) || (!busy && isCompiling)
+  const flashWorking = flashing || (busy && chain.intent === CHAIN_INTENT.FLASH)
+  const compileLabel = compiling ? 'Compiling…' : 'Compile'
   const flashLabel = flashing
     ? 'Flashing…'
     : busy && chain.intent === CHAIN_INTENT.FLASH
       ? 'Compiling before flash…'
       : 'Flash'
-
-  const compileDetail =
-    compileBannerStatus === 'running'
-      ? 'Compiling…'
-      : compileBannerStatus === 'succeeded'
-        ? compileOutput?.duration_seconds != null
-          ? `Built in ${compileOutput.duration_seconds} s`
-          : 'Built'
-        : compileBannerStatus === 'failed'
-          ? 'Failed — see terminal'
-          : 'Not started'
-  const flashDetail =
-    flashBannerStatus === 'running' || flashBannerStatus === 'detecting'
-      ? 'Uploading…'
-      : flashBannerStatus === 'succeeded'
-        ? flashOutput?.port
-          ? `Uploaded to ${flashOutput.port}`
-          : 'Uploaded'
-        : flashBannerStatus === 'no_device'
-          ? 'No device detected'
-          : flashBannerStatus === 'failed'
-            ? 'Failed — see terminal'
-            : canFlash && flashReady
-              ? 'Ready to flash'
-              : 'Not started'
-  const validationDetail =
-    validationBannerStatus === 'running'
-      ? 'Validating…'
-      : validationBannerStatus === 'succeeded'
-        ? 'Remediation validated'
-        : validationBannerStatus === 'failed'
-          ? validationOutput?.outcome === 'error'
-            ? 'Check did not complete'
-            : 'Requirement not met'
-          : 'Not started'
+  const validationLabel = validationPending ? 'Validating…' : 'Run validation'
+  const compileDisabled = busy || isCompiling || validationPending || !hasActiveProject
 
   return (
     <div className="screen screen-fixed">
@@ -1044,22 +966,12 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
         title="Build Mode"
         onMenu={onMenu}
         actions={
-          <>
-            <div className="session-actions is-inline" role="group" aria-label="Session">
-              <button
-                type="button"
-                className="btn"
-                title="End this session and start a new one from the baseline"
-                onClick={onReset}
-              >
-                <Icon name="refresh" size={14} />
-                Reset
-              </button>
-              <button type="button" className="btn" title="End this session and return to the main menu" onClick={onQuit}>
-                <Icon name="arrow-left" size={14} />
-                Quit
-              </button>
-            </div>
+          <div className="build-toolbar">
+            {/* The C++ | Blockly switch is TWO DISTINCT WORKSPACES, not two
+                tabs of one editor: C++ shows the stacked source, Blockly the
+                canvas of the open editable section. It sits first, ahead of
+                Compile and Flash, as in the reference; Reset and Quit close
+                the bar, set apart from them. */}
             <div className="seg-group is-compact" role="group" aria-label="Editor mode">
               <button
                 type="button"
@@ -1080,27 +992,98 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
                 Blockly
               </button>
             </div>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy || isCompiling || validationPending || !hasActiveProject}
-              onClick={compile}
-            >
-              <Icon name="play" size={16} />
-              {compileLabel}
-            </button>
-            <button type="button" className="btn btn-primary" disabled={!canFlash} onClick={flash} title={flashHint()}>
-              <Icon name="bolt" size={16} />
-              {flashLabel}
-            </button>
-          </>
+            {/* COMPILE / FLASH / RUN VALIDATION: compact icon-only controls,
+                the only place these three actions live. Each calls the same
+                handler as ever (compile / flash / validate). The accessible
+                name is the action (or what it is doing right now); the
+                tooltip is the reason it is or is not available, and the same
+                text is also an .sr-only description, since a disabled button
+                can neither take focus nor show a tooltip on a touch screen.
+                Run validation has no bug icon to borrow: it reuses the
+                shield. */}
+            <div className="build-actions" role="group" aria-label="Build actions">
+              <button
+                type="button"
+                className={`icon-btn build-action${compiling ? ' is-working' : ''}`}
+                disabled={compileDisabled}
+                onClick={compile}
+                aria-label={compileLabel}
+                aria-busy={compiling || undefined}
+                title={compileHint()}
+              >
+                <Icon name="play" size={18} />
+              </button>
+              <button
+                type="button"
+                className={`icon-btn build-action is-primary${flashWorking ? ' is-working' : ''}`}
+                disabled={!canFlash}
+                onClick={flash}
+                aria-label={flashLabel}
+                aria-busy={flashWorking || undefined}
+                aria-describedby="build-flash-note"
+                title={flashHint()}
+              >
+                <Icon name="bolt" size={18} />
+              </button>
+              <button
+                type="button"
+                className={`icon-btn build-action${validationPending ? ' is-working' : ''}`}
+                disabled={!canValidate}
+                onClick={validate}
+                aria-label={validationLabel}
+                aria-busy={validationPending || undefined}
+                aria-describedby="build-validation-note"
+                title={validationHint()}
+              >
+                <Icon name="shield" size={18} />
+              </button>
+              <span id="build-flash-note" className="sr-only">
+                {flashHint()}
+              </span>
+              <span id="build-validation-note" className="sr-only">
+                {validationHint()}
+              </span>
+            </div>
+            <span className="topbar-sep" aria-hidden="true" />
+            <div className="session-actions is-inline" role="group" aria-label="Session">
+              <button
+                type="button"
+                className="btn"
+                title="End this session and start a new one from the baseline"
+                onClick={onReset}
+              >
+                <Icon name="refresh" size={14} />
+                Reset
+              </button>
+              <button type="button" className="btn" title="End this session and return to the main menu" onClick={onQuit}>
+                <Icon name="arrow-left" size={14} />
+                Quit
+              </button>
+            </div>
+          </div>
         }
       />
 
       <main className="screen-body build-body">
         <nav className="card build-rail" aria-label="Workspace panels">
+          {/* The Blocks toolbox button exists only while a Blockly canvas is
+              on screen. It shows or hides Blockly's own toolbox (the canvas's
+              left column) and nothing else: the side column below has its own
+              rail buttons and is unaffected either way. */}
+          {blocklyCanvasOpen ? (
+            <button
+              type="button"
+              className={`icon-btn is-quiet${toolboxVisible ? ' is-on' : ''}`}
+              aria-label="Blocks toolbox"
+              aria-pressed={toolboxVisible}
+              title={toolboxVisible ? 'Hide blocks toolbox' : 'Show blocks toolbox'}
+              onClick={() => setToolboxVisible((visible) => !visible)}
+            >
+              <Icon name="rail-blocks" size={20} />
+            </button>
+          ) : null}
           {SIDE_PANELS.map((panel) => {
-            const open = panel.id === sidePanel && !leftPanelCollapsed
+            const open = sideOpen && panel.id === sidePanel
             return (
               <button
                 key={panel.id}
@@ -1117,7 +1100,7 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
           })}
         </nav>
 
-        {leftPanelCollapsed ? null : (
+        {sideOpen ? (
           <aside className="card build-side" aria-label={sidePanelDef.label}>
             <div className="side-head">
               <h2>{sidePanelDef.label}</h2>
@@ -1126,7 +1109,7 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
                 className="icon-btn is-quiet is-sm"
                 aria-label="Collapse panel"
                 title="Collapse panel"
-                onClick={() => setLeftPanelCollapsed(true)}
+                onClick={() => setSideOpen(false)}
               >
                 <Icon name="panel-collapse" size={14} />
               </button>
@@ -1135,329 +1118,293 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
             {sidePanel === 'project' ? (
               <div className="side-body">
                 <div className="tree">
-                  <p className="tree-row is-folder">
+                  <p className="tree-row is-folder" title={projectName}>
                     <Icon name="chevron-down" size={10} />
                     <Icon name="folder" size={16} />
                     <span>{projectName}</span>
                   </p>
                   <div className="tree-children">
-                    {fileNames.map((name) => (
-                      <button
-                        key={name}
-                        type="button"
-                        className={`tree-row${name === resolvedActiveFile ? ' is-on' : ''}`}
-                        onClick={() => switchFile(name)}
-                      >
-                        <Icon name={fileIcon(name)} size={16} />
-                        <span>{name}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <p className="side-caption">Sections</p>
-                {activeSegments.length === 0 ? (
-                  <p className="muted-note">Loading firmware…</p>
-                ) : (
-                  <ul className="section-list">
-                    {activeSegments.map((segment) => {
-                      const policy = segment.policy || 'locked'
+                    {fileNames.map((name) => {
+                      // The stem may be ellipsized in a narrow column; the extension never is.
+                      const [stem, extension] = splitExtension(name)
                       return (
-                        <li key={segment.region_id}>
-                          <button
-                            type="button"
-                            className={`section-row is-${policy}${segment.region_id === selectedSectionId ? ' is-on' : ''}`}
-                            title={`${segment.region_id} (${POLICY_LABEL[policy] || policy})`}
-                            onClick={() => openSection(segment.region_id)}
-                          >
-                            <Icon name={POLICY_ICON[policy] || 'lock'} size={14} />
-                            <span className="section-name">{segment.region_id}</span>
-                            <span className={`policy-tag is-${policy}`}>{POLICY_LABEL[policy] || policy}</span>
-                          </button>
-                        </li>
+                        <button
+                          key={name}
+                          type="button"
+                          className={`tree-row${name === resolvedActiveFile ? ' is-on' : ''}`}
+                          title={name}
+                          onClick={() => switchFile(name)}
+                        >
+                          <Icon name={fileIcon(name)} size={16} />
+                          <span className="tree-name">
+                            <span className="tree-stem">{stem}</span>
+                            <span className="tree-ext">{extension}</span>
+                          </span>
+                        </button>
                       )
                     })}
-                  </ul>
-                )}
+                  </div>
+                </div>
               </div>
             ) : null}
 
             {sidePanel === 'brief' ? (
-              <div className="side-body brief">
-                <p className="eyebrow">Scenario</p>
-                <p className="brief-value">{project?.scenario_id || 'connecting…'}</p>
-                {project?.module_id ? <p className="muted-note">{project.module_id}</p> : null}
-                {/* Phase 1.2 — what the remediation must achieve, so a student
-                    can read this before running validation rather than
-                    discovering the requirement only from a failed check.
-                    Verbatim from the panel's own `RemediationSpec`; absent
-                    when the package declares no remediation activity yet. */}
-                {remediation ? (
-                  <>
-                    <section>
-                      <h3>Vulnerability</h3>
-                      <p>{remediation.vulnerability}</p>
-                    </section>
-                    <section>
-                      <h3>Remediation goal</h3>
-                      <p>{remediation.remediation_goal}</p>
-                    </section>
-                    <section>
-                      <h3>Validation requirement</h3>
-                      <p>{remediation.validation_requirement}</p>
-                    </section>
-                  </>
-                ) : (
-                  <p className="empty-line">
-                    <Icon name="info" size={14} /> No remediation activity is defined for this panel yet.
-                  </p>
-                )}
-              </div>
+              <BuildBrief remediation={state?.remediation} firmwareName={project?.firmware_name} />
             ) : null}
 
-            {sidePanel === 'activity' ? (
-              <div className="side-body activity-body">
-                {/* Bounded + independently scrollable. Timestamps are
-                    session-elapsed HH:MM:SS (formatElapsedSince), not
-                    time-of-day; see the module-level comment above. */}
-                <div className="activity-log-scroll" ref={activityLogRef} onScroll={handleActivityLogScroll}>
-                  <ul className="activity-log">
-                    {events.length === 0 ? (
-                      <li className="empty-line">No activity yet.</li>
-                    ) : (
-                      events.map((entry, i) => (
-                        <li key={i}>
-                          <span className="log-time">{entry.at}</span>
-                          <span>{EVENT_LABELS[entry.event] || entry.event}</span>
-                        </li>
-                      ))
-                    )}
-                  </ul>
-                </div>
-              </div>
-            ) : null}
+            {sidePanel === 'activity' ? <ActivityLog events={events} /> : null}
           </aside>
-        )}
+        ) : null}
 
         <div className="build-center">
-          <section className="card build-editor">
-            {/* File tabs, plus one closable tab per EDITABLE section a student
-                has opened. A file tab shows that file's full stacked source;
-                a section tab shows that section's own Blockly workspace. Only
-                the open section is ever mounted, and nothing here changes the
-                single-open-section model (`selectedSectionId`/`sectionData`). */}
-            <div className="tab-strip" role="tablist" aria-label="Open files">
-              {fileNames.map((name) => (
-                <button
-                  key={name}
-                  type="button"
-                  role="tab"
-                  aria-selected={!workspaceActive && name === resolvedActiveFile}
-                  className={`tab${!workspaceActive && name === resolvedActiveFile ? ' is-on' : ''}`}
-                  onClick={() => {
-                    if (name !== resolvedActiveFile) switchFile(name)
-                    else if (workspaceActive) closeWorkspaceView()
-                  }}
-                >
-                  <Icon name={fileIcon(name)} size={14} />
-                  {name}
-                </button>
-              ))}
-              {openWorkspaceTabs.map((id) => {
-                const active = id === selectedSectionId && workspaceActive
-                return (
-                  <span key={id} className={`tab tab-workspace${active ? ' is-on' : ''}`}>
+          <section className="card build-editor" aria-label="Firmware workspace">
+            {/* Everything but the Terminal dock is the editor proper. A maximized
+                Terminal covers it rather than unmounting it, so the open section,
+                its draft and Blockly's canvas all stay exactly as they were:
+                hidden from sight and from the keyboard (inert), nothing more. */}
+            <div className={`editor-main${dock.maximized ? ' is-covered' : ''}`} inert={dock.maximized}>
+              {/* File tabs, then one closable tab per EDITABLE section a student
+                  has opened. A file tab shows that file's full stacked source;
+                  a section tab shows that section's own Blockly workspace. Only
+                  the open section is ever mounted, and nothing here changes the
+                  single-open-section model (`selectedSectionId`/`sectionData`).
+                  Tabs draw a shortened name; the full section id stays in every
+                  title and aria-label. Every section is reached by clicking it
+                  in the source view below, whatever its policy. */}
+              <div className="tab-bar" role="tablist" aria-label="Open files and workspaces">
+                {fileNames.map((name) => {
+                  const active = !workspaceActive && name === resolvedActiveFile
+                  return (
                     <button
+                      key={name}
                       type="button"
                       role="tab"
                       aria-selected={active}
-                      className="tab-label"
-                      onClick={() => openSection(id)}
+                      className={`tab tab-file${active ? ' is-on' : ''}`}
+                      title={fileNames.length === 1 ? `Full File — ${name}` : name}
+                      onClick={() => {
+                        // The file tab IS "Full File": the whole source with no
+                        // section open or highlighted, through the same guarded
+                        // exit the C++ switch uses.
+                        if (name !== resolvedActiveFile) switchFile(name)
+                        else if (workspaceActive || selectedSectionId) closeWorkspaceView()
+                      }}
                     >
-                      <Icon name="rail-blocks" size={14} />
-                      {id}
+                      <Icon name={fileIcon(name)} size={14} />
+                      {name}
                     </button>
-                    <button
-                      type="button"
-                      className="tab-close"
-                      aria-label={`Close ${id} workspace`}
-                      onClick={() => closeWorkspaceTab(id)}
-                    >
-                      <Icon name="close" size={10} />
-                    </button>
-                  </span>
-                )
-              })}
-            </div>
-
-            {workspaceActive ? (
-              // THE OPEN EDITABLE SECTION'S OWN WORKSPACE TAB. Replaces the
-              // stacked source view entirely while open — only the active
-              // tab's workspace is ever mounted — and returning to the file
-              // tab brings the source view back unchanged.
-              <div className="code-workspace">
-                {sectionLoading || !sectionData ? (
-                  <p className="muted-note">Loading section…</p>
-                ) : sectionData.representable ? (
-                  // THE INTENDED EDITING PATH. Blockly is the source of
-                  // truth for this section — the generated C++ is an output
-                  // of it, never something typed here. `key={selectedSectionId}`
-                  // remounts the canvas (and reloads `sectionData.workspace`)
-                  // whenever the student opens a different section; see
-                  // BlocklyWorkspace.jsx.
-                  <div className="blockly-panel">
-                    <BlocklyWorkspace
-                      key={selectedSectionId}
-                      initialWorkspaceState={sectionData.workspace}
-                      onWorkspaceChange={onBlocksChange}
-                      apiRef={blocklyApiRef}
-                    />
-                  </div>
-                ) : (
-                  // Understood by the backend as EDITABLE, but the toolbox
-                  // has no vocabulary for this construct yet — refused as a
-                  // block edit, never faked. The legacy raw-text path stays
-                  // available so the section is still completable meanwhile;
-                  // it is not offered for any section the toolbox CAN draw.
-                  <>
-                    {!legacyTextOpen ? (
-                      <>
-                        <CppCode code={selectedSegment.text} className="code-segment" />
-                        <button type="button" className="btn btn-sm" onClick={() => openLegacyText(selectedSegment)}>
-                          Edit as text (legacy)
-                        </button>
-                      </>
-                    ) : (
-                      <textarea
-                        className="code-editor-full"
-                        spellCheck={false}
-                        value={legacyDraft ?? ''}
-                        onChange={(e) => onLegacyTextChange(e.target.value)}
-                      />
-                    )}
-                  </>
-                )}
-              </div>
-            ) : (
-              // THE COMPLETE .ino IS THE PRIMARY WORKSPACE. Every discovered
-              // section renders here, in document order, all the time — a
-              // student reads the whole firmware for context and clicks a
-              // section directly in place to open its workspace tab (an
-              // EDITABLE one) or just highlight it in place (LOCKED/EXPLORE).
-              // Text is always the plain, current text from `state.files`.
-              <div className="code-view">
-                {activeSegments.length === 0 ? (
-                  <p className="muted-note">Loading firmware…</p>
-                ) : (
-                  numberSegments(activeSegments).map(({ segment, start, lines }) => {
-                    const policy = segment.policy || 'locked'
-                    const isSelected = segment.region_id === selectedSectionId
+                  )
+                })}
+                <div
+                  className="tab-strip"
+                  ref={tabStripRef}
+                  onWheel={(e) => {
+                    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
+                  }}
+                >
+                  {openWorkspaceTabs.map((id) => {
+                    const active = id === selectedSectionId && workspaceActive
                     return (
-                      <div
-                        key={segment.region_id}
-                        className={`code-section is-${policy}${isSelected ? ' is-selected' : ''}`}
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`Open ${segment.region_id} (${POLICY_LABEL[policy] || policy})`}
-                        onClick={() => openSection(segment.region_id)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            openSection(segment.region_id)
-                          }
-                        }}
-                      >
-                        <span className={`policy-tag is-${policy}`}>
-                          <Icon name={POLICY_ICON[policy] || 'lock'} size={12} />
-                          {POLICY_LABEL[policy] || policy}
-                        </span>
-                        <div className="code-lines">
-                          <pre className="code-gutter" aria-hidden="true">
-                            {lines.map((_, i) => start + i).join('\n')}
-                          </pre>
-                          <CppCode code={lines.join('\n')} className="code-segment" />
-                        </div>
-                      </div>
+                      <span key={id} className={`tab tab-workspace${active ? ' is-on' : ''}`}>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          className="tab-label"
+                          title={`${id} — ${POLICY_HINT.editable}`}
+                          aria-label={`${id}, ${POLICY_HINT.editable}`}
+                          onClick={() => openSection(id)}
+                        >
+                          <Icon name={POLICY_ICON.editable} size={14} />
+                          <span className="tab-name">{sectionLabel(id)}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="tab-close"
+                          aria-label={`Close ${id} workspace`}
+                          onClick={() => closeWorkspaceTab(id)}
+                        >
+                          <Icon name="close" size={10} />
+                        </button>
+                      </span>
                     )
-                  })
-                )}
-              </div>
-            )}
-
-            {/* Every action button (COMPILE / FLASH / validation) lives in the
-                top bar and the pipeline strip. This is the workspace's
-                submission-state readout, plus why the last COMPILE/FLASH chain
-                stopped short, if it did. */}
-            {protocolError || sectionDirty || chainNotice ? (
-              <div className="build-notices">
-                {protocolError ? (
-                  <div className="notice is-danger" role="alert">
-                    <Icon name="warning" size={14} />
-                    {protocolError}
-                  </div>
-                ) : sectionDirty ? (
-                  <div className="notice is-warning">
-                    <Icon name="warning" size={14} />
-                    Edits not compiled yet — Compile submits and builds them.
-                  </div>
-                ) : null}
-                {chainNotice ? (
-                  <div className="notice is-warning">
-                    <Icon name="warning" size={14} />
-                    {chainNotice}
-                  </div>
+                  })}
+                </div>
+                {/* Which kind of section the open canvas is. It lives in the tab
+                    bar's free right-hand end rather than floating over the
+                    blocks, so it costs the canvas nothing and can never sit on
+                    top of one. The section's name is already on its tab. */}
+                {blocklyCanvasOpen ? (
+                  <span
+                    className="tab-context"
+                    title={`${selectedSegment.region_id} — ${POLICY_HINT[policyOf(selectedSegment)]}`}
+                  >
+                    <span className={`policy-tag is-${policyOf(selectedSegment)}`}>
+                      <Icon name={POLICY_ICON[policyOf(selectedSegment)]} size={12} />
+                      {POLICY_LABEL[policyOf(selectedSegment)]}
+                    </span>
+                  </span>
                 ) : null}
               </div>
-            ) : null}
 
-            <div className="editor-foot">
-              <span className="crumbs">
-                {projectName}
-                <Icon name="chevron-right" size={10} />
-                <b>{resolvedActiveFile || 'connecting…'}</b>
-              </span>
-              <span className="editor-foot-meta">
-                <span>C++ (Arduino)</span>
-                {boardName ? <span>{boardName}</span> : null}
-              </span>
+              {workspaceActive ? (
+                // THE OPEN EDITABLE SECTION'S OWN WORKSPACE. Replaces the
+                // stacked source view entirely while open — only the active
+                // tab's workspace is ever mounted — and returning to the file
+                // tab brings the source view back unchanged.
+                <div className="code-workspace">
+                  {sectionLoading || !sectionData ? (
+                    <p className="muted-note">Loading section…</p>
+                  ) : sectionData.representable ? (
+                    // THE INTENDED EDITING PATH. Blockly is the source of
+                    // truth for this section — the generated C++ is an output
+                    // of it, never something typed here. `key={selectedSectionId}`
+                    // remounts the canvas (and reloads `sectionData.workspace`)
+                    // whenever the student opens a different section; see
+                    // BlocklyWorkspace.jsx.
+                    <div className={`blockly-panel${toolboxVisible ? '' : ' is-toolbox-hidden'}`}>
+                      <BlocklyWorkspace
+                        key={selectedSectionId}
+                        initialWorkspaceState={sectionData.workspace}
+                        onWorkspaceChange={onBlocksChange}
+                        apiRef={blocklyApiRef}
+                        toolboxVisible={toolboxVisible}
+                      />
+                    </div>
+                  ) : (
+                    // Understood by the backend as EDITABLE, but the toolbox
+                    // has no vocabulary for this construct yet — refused as a
+                    // block edit, never faked. The legacy raw-text path stays
+                    // available so the section is still completable meanwhile;
+                    // it is not offered for any section the toolbox CAN draw.
+                    <>
+                      {!legacyTextOpen ? (
+                        <>
+                          <CppCode code={selectedSegment.text} className="code-segment" />
+                          <button type="button" className="btn btn-sm" onClick={() => openLegacyText(selectedSegment)}>
+                            Edit as text (legacy)
+                          </button>
+                        </>
+                      ) : (
+                        <textarea
+                          className="code-editor-full"
+                          spellCheck={false}
+                          value={legacyDraft ?? ''}
+                          onChange={(e) => onLegacyTextChange(e.target.value)}
+                        />
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : (
+                // THE COMPLETE .ino IS THE PRIMARY WORKSPACE. Every discovered
+                // section renders here, in document order, all the time — a
+                // student reads the whole firmware for context and clicks a
+                // section directly in place to open its workspace tab (an
+                // EDITABLE one) or just highlight it in place (LOCKED/EXPLORE).
+                // Text is always the plain, current text from `state.files`.
+                <div className="code-view" ref={codeViewRef}>
+                  {activeSegments.length === 0 ? (
+                    <p className="muted-note">Loading firmware…</p>
+                  ) : (
+                    numberSegments(activeSegments).map(({ segment, start, lines }) => {
+                      const policy = policyOf(segment)
+                      const isSelected = segment.region_id === selectedSectionId
+                      return (
+                        <div
+                          key={segment.region_id}
+                          data-region-id={segment.region_id}
+                          className={`code-section is-${policy}${isSelected ? ' is-selected' : ''}`}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open ${segment.region_id} (${POLICY_LABEL[policy]})`}
+                          onClick={() => openSection(segment.region_id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              openSection(segment.region_id)
+                            }
+                          }}
+                        >
+                          <span className={`policy-tag is-${policy}`}>
+                            <Icon name={POLICY_ICON[policy]} size={12} />
+                            {POLICY_LABEL[policy]}
+                          </span>
+                          <div className="code-lines">
+                            <pre className="code-gutter" aria-hidden="true">
+                              {lines.map((_, i) => start + i).join('\n')}
+                            </pre>
+                            <CppCode code={lines.join('\n')} className="code-segment" />
+                          </div>
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              )}
+
+              {/* Every action button (COMPILE / FLASH / validation) lives in the
+                  top bar. This is the workspace's submission-state readout,
+                  plus why the last COMPILE/FLASH chain stopped short, if it
+                  did. */}
+              {protocolError || sectionDirty || chainNotice ? (
+                <div className="build-notices">
+                  {protocolError ? (
+                    <div className="notice is-danger" role="alert">
+                      <Icon name="warning" size={14} />
+                      {protocolError}
+                    </div>
+                  ) : sectionDirty ? (
+                    <div className="notice is-warning">
+                      <Icon name="warning" size={14} />
+                      Edits not compiled yet — Compile submits and builds them.
+                    </div>
+                  ) : null}
+                  {chainNotice ? (
+                    <div className="notice is-warning">
+                      <Icon name="warning" size={14} />
+                      {chainNotice}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {/* The breadcrumb foot belongs to the source view. Over a Blockly
+                  canvas the same facts are the pill floated on the canvas, so the
+                  canvas keeps this row's height. */}
+              {blocklyCanvasOpen ? null : (
+                <div className="editor-foot">
+                  <span className="crumbs">
+                    {projectName}
+                    <Icon name="chevron-right" size={10} />
+                    <b>{resolvedActiveFile || 'connecting…'}</b>
+                    {selectedSegment ? (
+                      <>
+                        <Icon name="chevron-right" size={10} />
+                        <b title={selectedSegment.region_id}>{sectionLabel(selectedSegment.region_id)}</b>
+                        <span className={`policy-tag is-${policyOf(selectedSegment)}`}>
+                          <Icon name={POLICY_ICON[policyOf(selectedSegment)]} size={12} />
+                          {POLICY_LABEL[policyOf(selectedSegment)]}
+                        </span>
+                      </>
+                    ) : null}
+                  </span>
+                  <span className="editor-foot-meta">
+                    <span>C++ (Arduino)</span>
+                    {boardName ? <span>{boardName}</span> : null}
+                  </span>
+                </div>
+              )}
+
             </div>
 
-            {/* GENERAL TERMINAL — compile, flash and validation output merged
-                into one compact, bounded, scrollable terminal under the
-                editor. It shows whichever of the three is currently running
-                and keeps that operation's result on screen afterwards until a
-                different one starts — see the `activeOp`/`currentOp`
-                derivation above. Real backend output only, never simulated. */}
-            <div className="general-terminal">
-              <button
-                type="button"
-                className="terminal-toggle"
-                aria-expanded={terminalOpen}
-                onClick={() => setTerminalOpen((open) => !open)}
-              >
-                <span className="terminal-toggle-label">
-                  <Icon name={terminalOpen ? 'caret-down' : 'caret-up'} size={10} />
-                  General terminal{currentOp ? ` — ${GENERAL_TERMINAL_LABEL[currentOp]}` : ''}
-                </span>
-                <span className={`chip ${(STATUS_VISUAL[generalTerminalBannerStatus] || STATUS_VISUAL.not_started).tone}`}>
-                  {generalTerminalStatusText}
-                </span>
-              </button>
-              {terminalOpen ? <pre className="terminal-output">{generalTerminalText}</pre> : null}
-            </div>
-          </section>
-
-          <section className="card build-pipeline" aria-label="Build pipeline">
-            <ol className="pipeline">
-              <PipelineStep status={compileBannerStatus} title="Compile" detail={compileDetail} />
-              <li className={`pipeline-link${compileBannerStatus === 'succeeded' ? ' is-done' : ''}`} aria-hidden="true" />
-              <PipelineStep status={flashBannerStatus} title="Flash" detail={flashDetail} />
-              <li className={`pipeline-link${flashBannerStatus === 'succeeded' ? ' is-done' : ''}`} aria-hidden="true" />
-              <PipelineStep status={validationBannerStatus} title="Verify" detail={validationDetail} />
-            </ol>
-            <button type="button" className="btn" disabled={!canValidate} onClick={validate} title={validationHint()}>
-              <Icon name="shield" size={16} />
-              {validationPending ? 'Validating…' : 'Run validation'}
-            </button>
+            {/* TERMINAL — compile, flash and validation output, as a dock along
+                the bottom of the editor card (src/components/TerminalDock.jsx).
+                It shows whichever of the three is running and keeps that
+                operation's result on screen afterwards until a different one
+                starts — see `activeOp`/`currentOp` above. Real backend output
+                only, never simulated, and nothing here is typed into. */}
+            <TerminalDock dock={dock} onDock={dispatchDock} text={terminalText} chip={terminalChip} />
           </section>
         </div>
       </main>
@@ -1466,11 +1413,14 @@ export default function BuildMode({ onQuit, onReset, onMenu, participantId }) {
         <HardwareHeaderStatus hardware={hardware} />
       </StatusBar>
 
-      {/* Small bottom-right compile notification. Floats above the layout
+      {/* Small top-right compile notification. Floats above the layout
           (position: fixed) rather than taking up workspace; the full compiler
-          output is in the General Terminal. */}
-      {compileToastKind && (
-        <div className={`toast is-${compileToastKind}`} role="status">
+          output is in the Terminal. Not drawn while the Terminal is maximized:
+          its header controls sit exactly where this lands, and the output it
+          points to is already filling the editor. Its state keeps running, so a
+          failure that has not been dismissed shows again on restore. */}
+      {compileToastKind && !dock.maximized && (
+        <div className={`toast build-toast is-${compileToastKind}`} role="status">
           <button
             type="button"
             className="icon-btn is-quiet is-sm toast-dismiss"
