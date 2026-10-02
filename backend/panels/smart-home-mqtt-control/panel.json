@@ -277,7 +277,7 @@
       {
         "hint_id": "search-the-strings",
         "objective_id": "analyze-firmware",
-        "text": "A firmware image is mostly machine code. Print its readable text with `strings -n 8 firmware.bin`, then narrow it down with `grep` for words a networked device would need, such as mqtt."
+        "text": "A firmware image is mostly machine code. Print its readable text with `strings -n 8 firmware.bin`, then narrow it down with `grep` for words tied to this lab, such as cybertrainer."
       },
       {
         "hint_id": "find-broker-and-topics",
@@ -291,7 +291,7 @@
       {
         "hint_id": "watch-the-traffic",
         "objective_id": "observe-mqtt-communication",
-        "text": "Listen before you speak. Subscribe to the topics you found with `mosquitto_sub -h <host> -t <topic>` to see the messages the device exchanges."
+        "text": "Listen before you speak. Subscribe to the topics you found with `mosquitto_sub -h <host> -t <topic>` to see the messages the device exchanges. Nothing arrives in time? Try sending a command of your own first, then subscribe again."
       },
       {
         "hint_id": "test-authorization",
